@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Per-session worker process for beam that owns terminal backends and CLI adapters"
 
 [[bin]]
 name = "beam-worker"
@@ -15,7 +22,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 base64.workspace = true
-beam-core = { path = "../beam-core" }
+beam-core = { path = "../beam-core", version = "0.1.0" }
 chrono.workspace = true
 clap.workspace = true
 font8x8.workspace = true

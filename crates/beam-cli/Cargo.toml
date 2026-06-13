@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "CLI entrypoint for beam, a Rust runtime that connects Feishu/Lark threads to local AI coding CLIs"
 
 [[bin]]
 name = "beam"
@@ -11,9 +18,9 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-beam-core = { path = "../beam-core" }
-beam-daemon = { path = "../beam-daemon" }
-beam-worker = { path = "../beam-worker" }
+beam-core = { path = "../beam-core", version = "0.1.0" }
+beam-daemon = { path = "../beam-daemon", version = "0.1.0" }
+beam-worker = { path = "../beam-worker", version = "0.1.0" }
 clap.workspace = true
 chrono.workspace = true
 libc.workspace = true

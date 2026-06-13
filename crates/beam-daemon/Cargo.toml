@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Daemon process for beam that receives Feishu/Lark events and manages coding sessions"
 
 [[bin]]
 name = "beam-daemon"
@@ -13,7 +20,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 axum.workspace = true
 async-trait.workspace = true
-beam-core = { path = "../beam-core" }
+beam-core = { path = "../beam-core", version = "0.1.0" }
 clap.workspace = true
 chrono.workspace = true
 reqwest.workspace = true

@@ -12,6 +12,12 @@ edition = "2024"
 license = "MIT"
 version = "0.1.0"
 rust-version = "1.95"
+repository = "https://github.com/linuxhenhao/beam"
+homepage = "https://github.com/linuxhenhao/beam"
+documentation = "https://github.com/linuxhenhao/beam"
+readme = "README.en.md"
+keywords = ["lark", "feishu", "cli", "agent", "automation"]
+categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 anyhow = "1.0.100"
