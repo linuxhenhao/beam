@@ -1,0 +1,24 @@
+# beam
+
+- Pure Rust workspace. Crates under `crates/`: `beam-cli`, `beam-core`, `beam-daemon`, `beam-worker`.
+- Use progressive disclosure for repo context. Start with `AGENTS.md` only, then read the minimum relevant design docs instead of loading all `docs/` up front.
+- Design-doc routing:
+  - Core runtime/session/card/worker/daemon changes: read `docs/design/beam.md` first, then `docs/design/beam-architecture.md`.
+  - Current parity status / known drift / remaining gaps: read `docs/design/beam-parity-plan.md`, then `docs/design/beam-parity-backlog.md` if you need task-level status.
+  - Platform, team roster, multi-bot collaboration: read `docs/platform-design.md`.
+  - Cross-deployment federation: read `docs/federation-design.md`.
+  - Ask hook flow: read `docs/design/2026-05-25-beam-ask-hooks-design.md` and `docs/plans/2026-05-25-beam-ask-hooks.md`.
+  - Zellij backend or adopt work: read `docs/zellij-backend-poc.md`.
+- Do not treat design docs as automatically authoritative. Verify critical behavior against the Rust code, and if you rely on a doc that has drifted from code, update the doc in the same change.
+- Build daemon: `cargo build -p beam-cli`, binary at `target/debug/beam`.
+- After daemon/runtime changes, rebuild with `cargo build -p beam-cli` then restart with `beam restart`.
+- Lifecycle commands: `beam start` (background daemon), `beam stop`, `beam restart`, `beam logs`, `beam status`.
+- Run tests: `cargo test --workspace --no-fail-fast`; narrower: `cargo test -p <crate> <filter>`.
+- There is no repo `lint` or `format` script; do not assume one exists.
+- Commit messages use `type(scope): 中文描述`.
+- Releases are tag-driven. Do not hand-edit `Cargo.toml` version. Stable `vX.Y.Z` tags must be on `master` or rebased onto the latest `master`; prerelease suffixes (`-canary`, `-beta`, `-rc`, other `-suffix`) publish to non-`latest` dist-tags.
+- Do not add TypeScript code to this repo. The TS daemon has been removed.
+- Rust daemon CLI passthrough: `classify_lark_text_action` in `crates/beam-daemon/src/lib.rs` passes through any `/slash` command that is not a beam daemon command (`/close`, `/restart`, `/card`, `/adopt`, `/workflow`). Unknown `/` commands are forwarded verbatim via `raw_input` to the CLI.
+- Card lifecycle: `ensure_lark_streaming_card` (main new-card path) and `post_or_refresh_lark_session_card` (show-card/"Refresh" path) both create streaming cards. DO NOT call `start_pending_response_turn` on the streaming card — it marks the streaming card as the pending response target, causing `deliver_final_output_once` to PATCH-overwrite the terminal card with reply content.
+- When creating sessions via `create_session_internal`, resolve `lark_app_secret` from `state.bots` (like `build_init_from_session` does). An empty secret blocks screenshot uploads.
+- Place daemon API routes that the CLI `send` command calls (`/sessions/{id}/final-output`) in `open_routes`, not `protected_dashboard` (which requires a dashboard token).
