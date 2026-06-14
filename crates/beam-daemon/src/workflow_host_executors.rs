@@ -3,7 +3,8 @@
 //! Each registered executor carries out a specific external provider call
 //! (e.g. send a Feishu message, create a beam schedule task).
 //! The registry enables the daemon to look up the correct executor by name
-//! and provides a single point for Phase 2.2 effectAttempted integration.
+//! and provides parse/canonical/provider/ttl metadata via
+//! `prepare_host_executor`.
 
 use std::collections::HashMap;
 
@@ -53,7 +54,7 @@ pub trait HostExecutor: Send + Sync {
     async fn invoke(
         &self,
         state: &AppState,
-        ctx: WorkflowDispatchRun<'_>,
+        ctx: &WorkflowDispatchRun<'_>,
         node: &HostExecutorNode,
         parsed_input: &Value,
     ) -> Result<WorkflowDispatchOutcome>;
@@ -109,12 +110,13 @@ impl HostExecutorRegistry {
     /// with `UnknownProviderError / manual` if not registered.
     #[allow(dead_code)]
     pub fn resolve(&self, name: &str) -> Result<&dyn HostExecutor, WorkflowDispatchOutcome> {
-        self.get(name).ok_or_else(|| WorkflowDispatchOutcome::Failed {
-            error_code: "UnknownProviderError".to_string(),
-            error_class: "manual".to_string(),
-            error_message: format!("hostExecutor '{}' is not registered.", name),
-            session: None,
-        })
+        self.get(name)
+            .ok_or_else(|| WorkflowDispatchOutcome::Failed {
+                error_code: "UnknownProviderError".to_string(),
+                error_class: "manual".to_string(),
+                error_message: format!("hostExecutor '{}' is not registered.", name),
+                session: None,
+            })
     }
 
     /// Returns an iterator over all registered executor names.
@@ -152,8 +154,8 @@ impl HostExecutor for FeishuSendExecutor {
     }
 
     fn parse_input(&self, resolved_input: &Value) -> Result<Value> {
-        let _parsed: WorkflowFeishuSendInput = serde_json::from_value(resolved_input.clone())
-            .context("invalid feishu-send input")?;
+        let _parsed: WorkflowFeishuSendInput =
+            serde_json::from_value(resolved_input.clone()).context("invalid feishu-send input")?;
         serde_json::to_value(&_parsed).context("serialize feishu-send input")
     }
 
@@ -171,7 +173,7 @@ impl HostExecutor for FeishuSendExecutor {
     async fn invoke(
         &self,
         state: &AppState,
-        ctx: WorkflowDispatchRun<'_>,
+        ctx: &WorkflowDispatchRun<'_>,
         node: &HostExecutorNode,
         parsed_input: &Value,
     ) -> Result<WorkflowDispatchOutcome> {
@@ -223,8 +225,8 @@ impl HostExecutor for FeishuReplyExecutor {
     }
 
     fn parse_input(&self, resolved_input: &Value) -> Result<Value> {
-        let _parsed: WorkflowFeishuReplyInput = serde_json::from_value(resolved_input.clone())
-            .context("invalid feishu-reply input")?;
+        let _parsed: WorkflowFeishuReplyInput =
+            serde_json::from_value(resolved_input.clone()).context("invalid feishu-reply input")?;
         serde_json::to_value(&_parsed).context("serialize feishu-reply input")
     }
 
@@ -242,7 +244,7 @@ impl HostExecutor for FeishuReplyExecutor {
     async fn invoke(
         &self,
         state: &AppState,
-        ctx: WorkflowDispatchRun<'_>,
+        ctx: &WorkflowDispatchRun<'_>,
         node: &HostExecutorNode,
         parsed_input: &Value,
     ) -> Result<WorkflowDispatchOutcome> {
@@ -321,11 +323,11 @@ impl HostExecutor for BeamScheduleExecutor {
     async fn invoke(
         &self,
         state: &AppState,
-        ctx: WorkflowDispatchRun<'_>,
+        ctx: &WorkflowDispatchRun<'_>,
         _node: &HostExecutorNode,
         parsed_input: &Value,
     ) -> Result<WorkflowDispatchOutcome> {
-        let idempotency_key = crate::derive_workflow_idempotency_key(
+        let idempotency_key = beam_core::derive_workflow_idempotency_key(
             ctx.workflow_id,
             ctx.revision_id,
             ctx.run_id,
@@ -452,8 +454,9 @@ mod tests {
             lark_tokens: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             chat_mode_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             recent_lark_events: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            inflight_final_output_turns: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new(
-            ))),
+            inflight_final_output_turns: Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             workflow_progress_cards: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             ask_pending: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             grant_pending: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -693,8 +696,18 @@ mod tests {
         let input = serde_json::json!([{"z": 1, "a": 2}, {"c": 3, "b": 4}]);
         let sorted = sort_json_keys(input);
         let arr = sorted.as_array().unwrap();
-        let k0: Vec<&str> = arr[0].as_object().unwrap().keys().map(|k| k.as_str()).collect();
-        let k1: Vec<&str> = arr[1].as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        let k0: Vec<&str> = arr[0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        let k1: Vec<&str> = arr[1]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
         assert_eq!(k0, vec!["a", "z"]);
         assert_eq!(k1, vec!["b", "c"]);
     }

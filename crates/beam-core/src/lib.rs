@@ -86,10 +86,11 @@ pub use workflow_run::{
     bootstrap_workflow_run, mint_workflow_run_id,
 };
 pub use workflow_runtime::{
-    RunLoopResult, RunLoopStopReason, RunTickResult, WorkflowDispatchOutcome, WorkflowDispatchRun,
-    WorkflowDispatchSession, WorkflowExecutionHooks, WorkflowRuntimeContext, complete_node_failed,
-    complete_node_succeeded, complete_run_failed, complete_run_succeeded, dispatch_gate,
-    dispatch_work, run_loop, run_tick,
+    HostExecutorPrepareResult, RunLoopResult, RunLoopStopReason, RunTickResult,
+    WorkflowDispatchOutcome, WorkflowDispatchRun, WorkflowDispatchSession, WorkflowExecutionHooks,
+    WorkflowRuntimeContext, complete_node_failed, complete_node_succeeded, complete_run_failed,
+    complete_run_succeeded, derive_workflow_idempotency_key, dispatch_gate, dispatch_work,
+    get_host_executor_provider_meta, run_loop, run_tick,
 };
 pub use workflow_sidecar::{load_effect_input_sidecar, write_effect_input_sidecar};
 pub use workflow_snapshot::{

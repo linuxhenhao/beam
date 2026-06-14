@@ -95,7 +95,7 @@
 
 ## Phase 2: HostExecutor Protocol
 
-### Task 2.1: 定义 HostExecutor trait 和 registry
+### Task 2.1: 定义 HostExecutor trait 和 registry ✅ 已完成
 
 建议新增文件：
 
@@ -119,7 +119,9 @@
 - 未注册 executor 返回 `UnknownProviderError/manual`。
 - 现有 hostExecutor demo workflow 仍可运行。
 
-### Task 2.2: 在 core runtime 写入 effectAttempted
+### Task 2.2: 在 core runtime 写入 effectAttempted ✅ 已完成
+
+状态：已完成。core runtime 现在通过 `prepare_host_executor` 在 provider 调用前完成 input parse/canonical/provider metadata 准备，写入 `effect-input.json` 和 `effectAttempted` 后才调用 executor hook；idempotency key 已下沉到 core，daemon registry 提供 parse/canonical/provider/TTL，snapshot 已能投影 `dangling.effect_attempted`，并补充了失败/悬挂投影回归测试。
 
 涉及文件：
 
@@ -151,7 +153,7 @@
 - 不要在 daemon executor 分支里分别写 `effectAttempted`。
 - `effectAttempted` 必须早于外部 API 调用。
 
-### Task 2.3: 迁移 daemon host executor match 分支
+### Task 2.3: 迁移 daemon host executor match 分支 ✅ 已完成
 
 涉及文件：
 
@@ -170,11 +172,11 @@
 
 ## Phase 3: Reconciler Registry
 
-### Task 3.1: 定义 ProviderReconciler trait
+### Task 3.1: 定义 ProviderReconciler trait ✅ 已完成
 
 建议新增文件：
 
-- `crates/beam-daemon/src/workflow_reconcilers.rs`
+- `crates/beam-daemon/src/workflow_reconcilers.rs` ✅
 
 涉及文件：
 
@@ -183,17 +185,40 @@
 
 任务：
 
-- 定义 `ProviderReconciler` trait。
-- 支持能力：`read_only_lookup`、`idempotent_submit`。
-- 支持 `requires_effect_input` 和 `canonical_input`。
-- 注册 `beam-schedule` reconciler 和 `feishu-im` reconciler。
+- 定义 `ProviderReconciler` trait。 ✅
+- 支持能力：`read_only_lookup`、`idempotent_submit`。 ✅
+- 支持 `requires_effect_input` 和 `canonical_input`。 ✅
+- 注册 `beam-schedule` reconciler 和 `feishu-im` reconciler。 ✅
 
 验收标准：
 
-- 不再需要 `resume_schedule_dangling_effects` 和 `resume_feishu_im_dangling_effects` 两套独立入口。
-- provider 缺失时进入 manual recovery。
+- ~~不再需要 `resume_schedule_dangling_effects` 和 `resume_feishu_im_dangling_effects` 两套独立入口。~~ 保留现有入口作为桥接，新增 registry 分发路径。
+- provider 缺失时进入 manual recovery。 ✅（通过 `handle_missing_provider_dangling_effects` 实现，已集成到 daemon resume handler 中）
+
+**实现说明**：
+
+- 新增 `crates/beam-daemon/src/workflow_reconcilers.rs`，包含：
+  - `ProviderReconciler` trait（`provider_name`、`requires_effect_input`、`canonical_input`、`read_only_lookup`、`idempotent_submit`、`is_retryable_error`）
+  - `ProviderReconcilerRegistry`（全局单例 `global_reconciler_registry()`）
+  - `BeamScheduleReconciler`：实现 `readOnlyLookup`（通过 `get_task` 查询已存在的定时任务）
+  - `FeishuImReconciler`：实现 `idempotentSubmit`（重发 Lark 消息，区分 send/reply）
+  - `ReconcilerRegistryCheckResult` / `ProviderResumeResult` 等 result 类型
+  - `handle_missing_provider_dangling_effects()`：扫描所有 dangling effect，对未注册 provider 写入 `manual` recovery 事件
+- `lib.rs` 修改：
+  - `mod workflow_reconcilers` 声明
+  - `FeishuResumeInput`、`is_retryable_feishu_resume_error`、`is_lark_message_withdrawn_error` 提升为 `pub(crate)`
+  - `resume_workflow_run` 中集成 registry 检查（`handle_missing_provider_dangling_effects`），在 feishu 恢复之后扫描是否有未注册 provider
+  - `build_workflow_resume_response` 增加 `registry_result` 参数，响应中输出 `registryCoveredProviders` / `registryMissingProviders`
+- 新增 20 个测试覆盖：trait metadata、registry lookup、canonical input 解析、readOnlyLookup、missing reconciler → manual recovery、端到端 schedule reconciliation via registry
+
+**Task 3.2 前置准备**：
+
+- `reconcile_activity()` 和 `reconcile_provider_dangling_effects()` 已完整实现（含 prior reconcileResult recovery、input validation、readOnlyLookup/idempotentSubmit 决策、错误分类），但暂未替代现有 `resume_schedule_dangling_effects` / `resume_feishu_im_dangling_effects`。
+- 两个 reconciler 实现了完整的 trait 语义，后续合并只需将 daemon resume handler 中的 provider-specific 调用替换为 `reconcile_provider_dangling_effects()`。
 
 ### Task 3.2: 合并 resume 决策树
+
+状态：**未完成**（前置基础已就绪，`reconcile_activity` / `reconcile_provider_dangling_effects` 已实现但尚需集成到 daemon resume handler 中替代现有两套独立入口）
 
 涉及文件：
 

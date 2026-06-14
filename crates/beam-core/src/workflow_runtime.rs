@@ -69,6 +69,23 @@ pub struct WorkflowDispatchRun<'a> {
     pub node_id: &'a str,
 }
 
+/// The result of preparing a host-executor call: parsed input, canonical
+/// (effect) input, and provider metadata.  The runtime writes the canonical
+/// input to `effect-input.json`, emits `effectAttempted`, and then passes the
+/// parsed input to `execute_host_executor`.
+#[derive(Debug, Clone)]
+pub struct HostExecutorPrepareResult {
+    /// Input after executor-specific parsing/validation (feeds `execute_host_executor`).
+    pub parsed_input: Value,
+    /// Canonical, deterministic form of the effect input (feeds `effect-input.json`
+    /// and the `inputHash` in `effectAttempted`).
+    pub canonical_input: Value,
+    /// Provider identifier for the `effectAttempted` event (e.g. `"feishu-im"`).
+    pub provider: String,
+    /// Idempotency TTL in milliseconds for the `effectAttempted` event.
+    pub idempotency_ttl_ms: u64,
+}
+
 #[async_trait]
 pub trait WorkflowExecutionHooks {
     async fn execute_subagent(
@@ -82,8 +99,31 @@ pub trait WorkflowExecutionHooks {
         &mut self,
         ctx: WorkflowDispatchRun<'_>,
         node: &HostExecutorNode,
-        resolved_input: Value,
+        // Parsed input as returned by `prepare_host_executor`.
+        parsed_input: Value,
     ) -> Result<WorkflowDispatchOutcome>;
+
+    /// Prepare a host-executor call: parse/validate the resolved input and
+    /// return the parsed form, the canonical (effect) form, and the provider
+    /// metadata.  Called by the runtime **before** writing `effect-input.json`
+    /// and emitting `effectAttempted`.
+    ///
+    /// The default implementation uses `get_host_executor_provider_meta` for
+    /// provider/TTL and treats `resolved_input` as both parsed and canonical
+    /// input — matching the legacy behaviour.
+    fn prepare_host_executor(
+        &self,
+        executor_name: &str,
+        resolved_input: &Value,
+    ) -> Result<HostExecutorPrepareResult> {
+        let (provider, idempotency_ttl_ms) = get_host_executor_provider_meta(executor_name);
+        Ok(HostExecutorPrepareResult {
+            parsed_input: resolved_input.clone(),
+            canonical_input: resolved_input.clone(),
+            provider: provider.to_string(),
+            idempotency_ttl_ms,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -542,14 +582,46 @@ pub async fn dispatch_work<H: WorkflowExecutionHooks>(
                 }
                 WorkflowNode::HostExecutor(executor) => {
                     let resolved_input = resolve_bindings(&executor.input, &bind_ctx).await?;
-                    let parsed_input = resolved_input.clone();
+
+                    // --- prepare (parse + canonicalise) BEFORE any side-effect ---
+                    let prepared = hooks
+                        .prepare_host_executor(&executor.executor, &resolved_input)
+                        .context("prepare_host_executor failed")?;
+
+                    // --- write effect-input.json using the canonical input ---
                     let _ = write_effect_input_sidecar(
                         &rt.log,
                         activity_id,
                         &attempt_id,
-                        &parsed_input,
+                        &prepared.canonical_input,
                     )
                     .await?;
+
+                    // --- emit effectAttempted BEFORE calling the external provider ---
+                    let idempotency_key = derive_workflow_idempotency_key(
+                        snap.run.workflow_id.as_deref().unwrap_or(""),
+                        snap.run.revision_id.as_deref().unwrap_or(""),
+                        &rt.log.run_id,
+                        node_id,
+                        &attempt_id,
+                    );
+                    let input_bytes = serde_json::to_vec(&prepared.canonical_input)?;
+                    let input_hash = sha256_hex(&input_bytes);
+                    rt.log.append(EventDraft {
+                        event_type: "effectAttempted".to_string(),
+                        actor: WorkflowActor::Scheduler,
+                        payload: serde_json::json!({
+                            "activityId": activity_id,
+                            "attemptId": attempt_id,
+                            "idempotencyKey": idempotency_key,
+                            "inputHash": input_hash,
+                            "idempotencyTtlMs": prepared.idempotency_ttl_ms,
+                            "provider": prepared.provider,
+                        }),
+                        timestamp: None,
+                        payload_hash: None,
+                    })?;
+
                     let result = hooks
                         .execute_host_executor(
                             WorkflowDispatchRun {
@@ -561,7 +633,7 @@ pub async fn dispatch_work<H: WorkflowExecutionHooks>(
                                 node_id,
                             },
                             executor,
-                            resolved_input,
+                            prepared.parsed_input,
                         )
                         .await?;
                     settle_work_result(&mut rt.log, activity_id, &attempt_id, result).await
@@ -878,6 +950,49 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())
+}
+
+/// Derive a deterministic idempotency key for a workflow host-executor attempt.
+///
+/// The key is `wf_` prefixed with a SHA-256 hex fragment of the canonical
+/// (workflowId, revisionId, runId, nodeId, attemptId) seed.  This function
+/// lives in `beam-core` so the runtime can emit `effectAttempted` events
+/// before delegating to the daemon’s executor hooks.
+pub fn derive_workflow_idempotency_key(
+    workflow_id: &str,
+    revision_id: &str,
+    run_id: &str,
+    node_id: &str,
+    attempt_id: &str,
+) -> String {
+    let seed = serde_json::json!({
+        "attemptId": attempt_id,
+        "nodeId": node_id,
+        "revisionId": revision_id,
+        "runId": run_id,
+        "workflowId": workflow_id,
+    });
+    let mut hasher = Sha256::new();
+    let canonical = serde_json::to_vec(&seed).expect("workflow idempotency seed serializable");
+    hasher.update(&canonical);
+    let hash = format!("{:x}", hasher.finalize());
+    let namespace = "wf_";
+    let max_len = 50usize;
+    let hash_len = max_len.saturating_sub(namespace.len());
+    format!("{namespace}{}", &hash[..hash_len.min(hash.len())])
+}
+
+/// Return (provider, idempotency_ttl_ms) metadata for a known host executor.
+///
+/// This mapping lives in `beam-core` so that `effectAttempted` events can be
+/// emitted with accurate provider / TTL information without depending on the
+/// daemon’s HostExecutor trait.
+pub fn get_host_executor_provider_meta(executor_name: &str) -> (&'static str, u64) {
+    match executor_name {
+        "feishu-send" | "feishu-reply" => ("feishu-im", 60_000),
+        "beam-schedule" => ("beam-schedule", 86_400_000),
+        _ => ("manual", 300_000),
+    }
 }
 
 fn loop_context_from_activity(activity_id: &str) -> Option<LoopContext<'_>> {

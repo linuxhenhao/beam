@@ -16,6 +16,7 @@ mod webhook_key;
 mod webhook_lifecycle;
 mod workflow_host_executors;
 mod workflow_progress_card;
+mod workflow_reconcilers;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -30,17 +31,17 @@ use axum::{
 use base64::Engine;
 use beam_core::{
     AdoptCandidate, AdoptTmuxSessionRequest, AdoptedFrom, ApiHealth, AttemptResumeRequest,
-    BackendType, BootstrapWorkflowRunInput, BotConfig, BotSummary, BeamPaths, ChatMode,
-    CliUsageLimitState, ColdWorkflowRun, Config, CreateSessionRequest, CreateTaskInput,
+    BackendType, BeamPaths, BootstrapWorkflowRunInput, BotConfig, BotSummary, ChatMode,
+    CliUsageLimitState, ColdWorkflowRun, Config, CreateSessionRequest,
     DaemonOverview, DaemonRuntimeState, DaemonToWorker, DisplayMode, EventDraft, EventLog,
     EventWindowOpts, FinalOutputKind, FinalOutputRequest, InitConfig, PendingResponseCardState,
     ResolveWaitInput, RestartSessionRequest, ResumeSessionRequest, RunChatBinding, RunStatus,
-    ScheduleStoreError, ScreenStatus, Session, SessionGroup, SessionInputRequest,
+    ScreenStatus, Session, SessionGroup, SessionInputRequest,
     SessionLocateInfo, SessionScope, SessionStatus, SessionSummary, TalkEvaluation, TermActionKey,
     TuiPromptOption, WaitResolution, WorkerToDaemon, WorkflowActor, WorkflowDispatchOutcome,
     WorkflowDispatchRun, WorkflowDispatchSession, WorkflowExecutionHooks, WorkflowNode,
     WorkflowOutputRef, WorkflowRuntimeContext, bootstrap_workflow_run, can_operate,
-    complete_run_cancel, create_task, evaluate_talk, event_seq_from_id, grant_restricted,
+    complete_run_cancel, evaluate_talk, event_seq_from_id, grant_restricted,
     infer_run_status, mint_workflow_run_id, parse_workflow_definition, parse_workflow_output,
     read_event_window, read_run_events_pure, read_run_snapshot, request_cancel, resolve_wait,
     run_loop, scan_cold_workflow_runs, with_workflow_output_protocol,
@@ -735,7 +736,7 @@ struct WorkflowRunRow {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-struct FeishuResumeInput {
+pub(crate) struct FeishuResumeInput {
     #[serde(rename = "larkAppId")]
     lark_app_id: String,
     #[serde(rename = "chatId", default)]
@@ -818,9 +819,42 @@ impl WorkflowExecutionHooks for DaemonWorkflowExecutionHooks {
         &mut self,
         ctx: WorkflowDispatchRun<'_>,
         node: &beam_core::HostExecutorNode,
-        resolved_input: Value,
+        // Already parsed by `prepare_host_executor`.
+        parsed_input: Value,
     ) -> anyhow::Result<WorkflowDispatchOutcome> {
-        run_workflow_host_executor(&self.state, ctx, node, resolved_input).await
+        run_workflow_host_executor(&self.state, ctx, node, parsed_input).await
+    }
+
+    fn prepare_host_executor(
+        &self,
+        executor_name: &str,
+        resolved_input: &Value,
+    ) -> anyhow::Result<beam_core::HostExecutorPrepareResult> {
+        let registry = workflow_host_executors::global_host_executor_registry();
+        if let Some(executor) = registry.get(executor_name) {
+            let parsed = executor.parse_input(resolved_input).map_err(|err| {
+                anyhow::anyhow!("{} parse_input failed: {:#}", executor.name(), err)
+            })?;
+            let canonical = executor.canonical_input(&parsed).map_err(|err| {
+                anyhow::anyhow!("{} canonical_input failed: {:#}", executor.name(), err)
+            })?;
+            Ok(beam_core::HostExecutorPrepareResult {
+                parsed_input: parsed,
+                canonical_input: canonical,
+                provider: executor.provider().to_string(),
+                idempotency_ttl_ms: executor.idempotency_ttl_ms(),
+            })
+        } else {
+            // Fall back to the default implementation (legacy path).
+            let (provider, idempotency_ttl_ms) =
+                beam_core::get_host_executor_provider_meta(executor_name);
+            Ok(beam_core::HostExecutorPrepareResult {
+                parsed_input: resolved_input.clone(),
+                canonical_input: resolved_input.clone(),
+                provider: provider.to_string(),
+                idempotency_ttl_ms,
+            })
+        }
     }
 }
 
@@ -960,10 +994,7 @@ fn load_bot_configs(paths: &BeamPaths) -> Result<HashMap<String, BotConfig>> {
     }
 }
 
-async fn persist_sessions(
-    paths: &BeamPaths,
-    sessions: &HashMap<String, Session>,
-) -> Result<()> {
+async fn persist_sessions(paths: &BeamPaths, sessions: &HashMap<String, Session>) -> Result<()> {
     tokio::fs::create_dir_all(paths.sessions_dir()).await?;
     let tmp = paths.session_store_json().with_extension("json.tmp");
     let payload = serde_json::to_vec_pretty(sessions)?;
@@ -1094,10 +1125,7 @@ async fn mark_pending_response_patch_marker_patched(
     Ok(())
 }
 
-async fn clear_pending_response_patch_marker(
-    paths: &BeamPaths,
-    session_id: &str,
-) -> Result<()> {
+async fn clear_pending_response_patch_marker(paths: &BeamPaths, session_id: &str) -> Result<()> {
     let path = paths.pending_response_patch_json(session_id);
     match tokio::fs::remove_file(path).await {
         Ok(()) => Ok(()),
@@ -2241,7 +2269,7 @@ fn is_lark_message_withdrawn_payload(payload: &str) -> bool {
         || payload.to_ascii_lowercase().contains("withdrawn")
 }
 
-fn is_lark_message_withdrawn_error(err: &anyhow::Error) -> bool {
+pub(crate) fn is_lark_message_withdrawn_error(err: &anyhow::Error) -> bool {
     err.chain()
         .any(|cause| is_lark_message_withdrawn_payload(&cause.to_string()))
 }
@@ -2858,7 +2886,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn is_retryable_feishu_resume_error(err: &anyhow::Error) -> bool {
+pub(crate) fn is_retryable_feishu_resume_error(err: &anyhow::Error) -> bool {
     if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>() {
         if reqwest_err.is_timeout() || reqwest_err.is_connect() {
             return true;
@@ -3015,7 +3043,10 @@ fn load_bot_identity(paths: &BeamPaths, lark_app_id: &str) -> (Option<String>, O
         if entry.get("larkAppId").and_then(Value::as_str) != Some(lark_app_id) {
             continue;
         }
-        let name = entry.get("botName").and_then(Value::as_str).map(ToOwned::to_owned);
+        let name = entry
+            .get("botName")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
         let open_id = entry
             .get("botOpenId")
             .and_then(Value::as_str)
@@ -3323,10 +3354,7 @@ fn decide_multibot_inbound_gate(
     true
 }
 
-fn final_output_footer_recipient_open_id(
-    paths: &BeamPaths,
-    session: &Session,
-) -> Option<String> {
+fn final_output_footer_recipient_open_id(paths: &BeamPaths, session: &Session) -> Option<String> {
     let owner = session.owner_open_id.as_deref()?.trim();
     if owner.is_empty() {
         return None;
@@ -5910,126 +5938,22 @@ async fn run_workflow_host_executor(
     state: &AppState,
     ctx: WorkflowDispatchRun<'_>,
     node: &beam_core::HostExecutorNode,
-    resolved_input: Value,
+    // Already parsed by `prepare_host_executor`.
+    parsed_input: Value,
 ) -> Result<WorkflowDispatchOutcome> {
-    // Phase 2.1: delegate to the HostExecutorRegistry.
-    // If the executor is not registered, fall back to the legacy match arms
-    // (which also return UnknownProviderError/manual for anything not matching).
     let registry = workflow_host_executors::global_host_executor_registry();
-    if let Some(executor) = registry.get(&node.executor) {
-        let parsed = executor.parse_input(&resolved_input)
-            .map_err(|err| anyhow::anyhow!("{} parse_input failed: {:#}", executor.name(), err))?;
-        return executor.invoke(state, ctx, node, &parsed).await;
-    }
+    let executor = match registry.resolve(&node.executor) {
+        Ok(executor) => executor,
+        Err(outcome) => return Ok(outcome),
+    };
 
-    // Legacy path – will be removed in Phase 2.3.
-    match node.executor.as_str() {
-        "feishu-send" => {
-            let input: WorkflowFeishuSendInput = serde_json::from_value(resolved_input.clone())
-                .map_err(|err| anyhow::anyhow!("invalid feishu-send input: {}", err))?;
-            let Some(bot) = state.bots.get(&input.lark_app_id).cloned() else {
-                return Ok(WorkflowDispatchOutcome::Failed {
-                    error_code: "UnknownProviderError".to_string(),
-                    error_class: "manual".to_string(),
-                    error_message: format!("bot '{}' is not registered.", input.lark_app_id),
-                    session: None,
-                });
-            };
-            let message_id =
-                lark_send_chat_message(state, &bot, &input.chat_id, &input.content).await?;
-            Ok(WorkflowDispatchOutcome::Succeeded {
-                output: serde_json::json!({ "messageId": message_id }),
-                session: Some(WorkflowDispatchSession {
-                    session_id: format!("host-{}-{}", ctx.activity_id, ctx.attempt_id),
-                    bot_name: node.executor.clone(),
-                    started_at: Utc::now().timestamp_millis().max(0) as u64,
-                    ended_at: Some(Utc::now().timestamp_millis().max(0) as u64),
-                    cli_session_id: None,
-                    lark_app_id: Some(input.lark_app_id),
-                    cli_id: Some(bot.cli_id.clone()),
-                    working_dir: None,
-                    web_port: None,
-                    log_path: None,
-                }),
-            })
-        }
-        "feishu-reply" => {
-            let input: WorkflowFeishuReplyInput = serde_json::from_value(resolved_input.clone())
-                .map_err(|err| anyhow::anyhow!("invalid feishu-reply input: {}", err))?;
-            let Some(bot) = state.bots.get(&input.lark_app_id).cloned() else {
-                return Ok(WorkflowDispatchOutcome::Failed {
-                    error_code: "UnknownProviderError".to_string(),
-                    error_class: "manual".to_string(),
-                    error_message: format!("bot '{}' is not registered.", input.lark_app_id),
-                    session: None,
-                });
-            };
-            let reply_id =
-                lark_reply_message(state, &bot, &input.root_message_id, &input.content).await?;
-            Ok(WorkflowDispatchOutcome::Succeeded {
-                output: serde_json::json!({ "messageId": reply_id }),
-                session: Some(WorkflowDispatchSession {
-                    session_id: format!("host-{}-{}", ctx.activity_id, ctx.attempt_id),
-                    bot_name: node.executor.clone(),
-                    started_at: Utc::now().timestamp_millis().max(0) as u64,
-                    ended_at: Some(Utc::now().timestamp_millis().max(0) as u64),
-                    cli_session_id: None,
-                    lark_app_id: Some(input.lark_app_id),
-                    cli_id: Some(bot.cli_id.clone()),
-                    working_dir: None,
-                    web_port: None,
-                    log_path: None,
-                }),
-            })
-        }
-        "beam-schedule" => {
-            let input: CreateTaskInput = serde_json::from_value(resolved_input.clone())
-                .map_err(|err| anyhow::anyhow!("invalid beam-schedule input: {}", err))?;
-            let idempotency_key = derive_workflow_idempotency_key(
-                ctx.workflow_id,
-                ctx.revision_id,
-                ctx.run_id,
-                ctx.node_id,
-                ctx.attempt_id,
-            );
-            let input = CreateTaskInput {
-                id: Some(idempotency_key.clone()),
-                ..input
-            };
-            match create_task(&state.paths, input) {
-                Ok(task) => Ok(WorkflowDispatchOutcome::Succeeded {
-                    output: serde_json::json!({ "taskId": task.id.clone() }),
-                    session: None,
-                }),
-                Err(ScheduleStoreError::IdempotencyConflict {
-                    task_id,
-                    existing_input_hash,
-                    incoming_input_hash,
-                }) => Ok(WorkflowDispatchOutcome::Failed {
-                    error_code: "IdempotencyConflict".to_string(),
-                    error_class: "fatal".to_string(),
-                    error_message: format!(
-                        "IdempotencyConflict: schedule task {task_id} exists with different canonical input (existing={existing_input_hash}…, incoming={incoming_input_hash}…)",
-                    ),
-                    session: None,
-                }),
-                Err(err) => Ok(WorkflowDispatchOutcome::Failed {
-                    error_code: "UnknownProviderError".to_string(),
-                    error_class: "manual".to_string(),
-                    error_message: format!("beam-schedule createTask failed: {err}"),
-                    session: None,
-                }),
-            }
-        }
-        other => Ok(WorkflowDispatchOutcome::Failed {
-            error_code: "UnknownProviderError".to_string(),
-            error_class: "manual".to_string(),
-            error_message: format!("hostExecutor '{}' is not registered.", other),
-            session: None,
-        }),
+    match executor.invoke(state, &ctx, node, &parsed_input).await {
+        Ok(outcome) => Ok(outcome),
+        Err(err) => Ok(executor.classify_error(&err, &ctx)),
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn derive_workflow_idempotency_key(
     workflow_id: &str,
     revision_id: &str,
@@ -6037,21 +5961,13 @@ pub(crate) fn derive_workflow_idempotency_key(
     node_id: &str,
     attempt_id: &str,
 ) -> String {
-    let seed = serde_json::json!({
-        "attemptId": attempt_id,
-        "nodeId": node_id,
-        "revisionId": revision_id,
-        "runId": run_id,
-        "workflowId": workflow_id,
-    });
-    let mut hasher = Sha256::new();
-    let canonical = serde_json::to_vec(&seed).expect("workflow idempotency seed serializable");
-    hasher.update(&canonical);
-    let hash = format!("{:x}", hasher.finalize());
-    let namespace = "wf_";
-    let max_len = 50usize;
-    let hash_len = max_len.saturating_sub(namespace.len());
-    format!("{namespace}{}", &hash[..hash_len.min(hash.len())])
+    beam_core::derive_workflow_idempotency_key(
+        workflow_id,
+        revision_id,
+        run_id,
+        node_id,
+        attempt_id,
+    )
 }
 
 async fn send_workflow_progress_card(state: &AppState, run_id: &str, workflow_id: &str) {
@@ -6391,10 +6307,7 @@ async fn list_workflow_runs(
     Ok(rows)
 }
 
-fn project_workflow_run_row(
-    run_id: &str,
-    snapshot: &beam_core::RunSnapshotDTO,
-) -> WorkflowRunRow {
+fn project_workflow_run_row(run_id: &str, snapshot: &beam_core::RunSnapshotDTO) -> WorkflowRunRow {
     let effect_set: HashSet<_> = snapshot.dangling.effect_attempted.iter().cloned().collect();
     let wait_set: HashSet<_> = snapshot.dangling.waits.iter().cloned().collect();
     let d_act = snapshot
@@ -7214,13 +7127,8 @@ async fn handle_lark_event_payload(
                     anchor,
                 ) + &text;
                 if bot.cli_id == "opencode" {
-                    let (bot_name, bot_open_id) =
-                        load_bot_identity(&state.paths, &app_id);
-                    let observed_bots = load_observed_bots_for_chat(
-                        &state.paths,
-                        &app_id,
-                        chat_id,
-                    );
+                    let (bot_name, bot_open_id) = load_bot_identity(&state.paths, &app_id);
+                    let observed_bots = load_observed_bots_for_chat(&state.paths, &app_id, chat_id);
                     prompt::build_initial_prompt(&prompt::InitialPromptOptions {
                         user_message: &raw,
                         session_id: "pending",
@@ -9566,8 +9474,7 @@ async fn resume_feishu_im_dangling_effects(
         }
 
         let Some(raw_input) =
-            beam_core::load_effect_input_sidecar(run_dir, activity_id, &latest.attempt_id)
-                .await?
+            beam_core::load_effect_input_sidecar(run_dir, activity_id, &latest.attempt_id).await?
         else {
             append_feishu_resume_failure(
                 log,
@@ -9815,6 +9722,7 @@ fn build_workflow_resume_response(
     snapshot: &beam_core::RunSnapshotDTO,
     schedule_result: &beam_core::ScheduleResumeResult,
     feishu_result: &FeishuResumeResult,
+    registry_result: &workflow_reconcilers::ReconcilerRegistryCheckResult,
     worker_crashed_outcomes: Vec<Value>,
     wait_recovery_outcomes: Vec<Value>,
     cancel_recovery_outcomes: Vec<Value>,
@@ -9921,6 +9829,9 @@ fn build_workflow_resume_response(
             .chain(feishu_result.fresh_retry.iter())
             .map(feishu_outcome_json)
             .collect::<Vec<_>>(),
+        "registryCoveredProviders": &registry_result.covered_providers,
+        "registryMissingProviders": &registry_result.missing_providers,
+        "registryChecked": true,
     })
 }
 
@@ -10353,6 +10264,28 @@ async fn resume_workflow_run(
             .await
             .map_err(internal_error)?;
 
+    // --- Reconciler registry check: handle any remaining dangling effects for
+    //     providers that have no reconciler registered ---
+    let registry = workflow_reconcilers::global_reconciler_registry();
+    let after_feishu_snapshot =
+        read_run_snapshot(&run_dir).await.map_err(internal_error)?;
+    let (registry_covered, registry_missing) = if let Some(after_feishu) =
+        after_feishu_snapshot.as_ref()
+    {
+        workflow_reconcilers::handle_missing_provider_dangling_effects(
+            registry,
+            &mut log,
+            after_feishu,
+        )
+        .map_err(internal_error)?
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let registry_result = workflow_reconcilers::ReconcilerRegistryCheckResult {
+        covered_providers: registry_covered,
+        missing_providers: registry_missing,
+    };
+
     let raw_def = tokio::fs::read_to_string(run_dir.join("workflow.json"))
         .await
         .map_err(internal_error)?;
@@ -10436,6 +10369,7 @@ async fn resume_workflow_run(
             &updated,
             &schedule_result,
             &feishu_result,
+            &registry_result,
             worker_crashed_outcomes,
             wait_recovery_outcomes,
             cancel_recovery_outcomes,
@@ -14212,6 +14146,10 @@ mod tests {
             &snapshot,
             &schedule_result,
             &feishu_result,
+            &workflow_reconcilers::ReconcilerRegistryCheckResult {
+                covered_providers: vec!["beam-schedule".to_string(), "feishu-im".to_string()],
+                missing_providers: vec![],
+            },
             vec![],
             vec![],
             vec![],
@@ -14234,10 +14172,7 @@ mod tests {
             payload["reconcileOutcomes"].as_array().map(Vec::len),
             Some(1)
         );
-        assert_eq!(
-            payload["reconcileOutcomes"][0]["provider"],
-            "beam-schedule"
-        );
+        assert_eq!(payload["reconcileOutcomes"][0]["provider"], "beam-schedule");
         assert_eq!(
             payload["reconcileOutcomes"][0]["capability"],
             "readOnlyLookup"
