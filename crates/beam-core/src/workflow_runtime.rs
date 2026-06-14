@@ -4245,7 +4245,7 @@ mod tests {
             &paths,
             crate::BootstrapWorkflowRunInput {
                 run_id,
-                workflow_json: r#"{"workflowId":"flow-loop-dep","version":1,"nodes":{"pre":{"type":"subagent","bot":"bot-x","prompt":"setup"},"rl":{"type":"loop","maxIterations":3,"body":[],"depends":["pre"],"terminate":{"node":"pre","via":"humanGate"}}}}"#,
+                workflow_json: r#"{"workflowId":"flow-loop-dep","version":1,"nodes":{"pre":{"type":"subagent","bot":"bot-x","prompt":"setup"},"dec":{"type":"decision"},"rl":{"type":"loop","maxIterations":3,"body":["dec"],"depends":["pre"],"terminate":{"node":"dec","via":"humanGate"},"output":{"from":"dec"}}}}"#,
                 expected_workflow_id: Some("flow-loop-dep"),
                 params: &params,
                 initiator: "cli",
@@ -4285,6 +4285,21 @@ mod tests {
                             }),
                         ),
                         (
+                            "dec".to_string(),
+                            WorkflowNode::Decision(DecisionNode {
+                                base: NodeBase {
+                                    description: None,
+                                    depends: None,
+                                    human_gate: None,
+                                    retry_policy: None,
+                                    timeout_ms: None,
+                                    max_output_bytes: None,
+                                    output_schema: None,
+                                    unsafe_allow_ungated: None,
+                                },
+                            }),
+                        ),
+                        (
                             "rl".to_string(),
                             WorkflowNode::Loop(LoopNode {
                                 base: NodeBase {
@@ -4298,12 +4313,14 @@ mod tests {
                                     unsafe_allow_ungated: None,
                                 },
                                 max_iterations: 3,
-                                body: vec![],
+                                body: vec!["dec".to_string()],
                                 terminate: LoopTerminate {
-                                    node: "pre".to_string(),
+                                    node: "dec".to_string(),
                                     via: "humanGate".to_string(),
                                 },
-                                output: None,
+                                output: Some(LoopOutputProjection {
+                                    from: "dec".to_string(),
+                                }),
                             }),
                         ),
                     ]),
@@ -4350,6 +4367,21 @@ mod tests {
                             }),
                         ),
                         (
+                            "dec".to_string(),
+                            WorkflowNode::Decision(DecisionNode {
+                                base: NodeBase {
+                                    description: None,
+                                    depends: None,
+                                    human_gate: None,
+                                    retry_policy: None,
+                                    timeout_ms: None,
+                                    max_output_bytes: None,
+                                    output_schema: None,
+                                    unsafe_allow_ungated: None,
+                                },
+                            }),
+                        ),
+                        (
                             "rl".to_string(),
                             WorkflowNode::Loop(LoopNode {
                                 base: NodeBase {
@@ -4363,12 +4395,14 @@ mod tests {
                                     unsafe_allow_ungated: None,
                                 },
                                 max_iterations: 3,
-                                body: vec![],
+                                body: vec!["dec".to_string()],
                                 terminate: LoopTerminate {
-                                    node: "pre".to_string(),
+                                    node: "dec".to_string(),
                                     via: "humanGate".to_string(),
                                 },
-                                output: None,
+                                output: Some(LoopOutputProjection {
+                                    from: "dec".to_string(),
+                                }),
                             }),
                         ),
                     ]),

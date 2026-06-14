@@ -811,26 +811,74 @@ Task 6.3 边界（未在本任务完成）：
 - `cargo test -p beam-daemon workflow`：106 passed，0 failed。
 - `cargo test --workspace`：全部通过，无回归。
 
-### Task 8.3: 补齐 loop definition validation
+### Task 8.3: 补齐 loop definition validation ✅ 已完成
+
+状态：**已完成**
 
 涉及文件：
 
 - `crates/beam-core/src/workflow_definition.rs`
+- `crates/beam-core/src/workflow_runtime.rs`（修复 1 个既有测试的 loop 定义）
 
-任务：
+实现说明：
 
-- body node 必须存在。
-- body node 不能是 loop。
-- decision 必须在 loop body 中，且作为 terminate.node。
-- 每个 loop body 只能有一个 decision。
-- body external deps 必须显式出现在 loop.depends。
-- external node 不能依赖 loop body，只能依赖 loop block。
-- sink loop 必须声明 `output.from`。
+在 `validate_workflow_definition` 中新增 `validate_loop_definitions()` 函数，覆盖全部 7 条规则：
 
-验收标准：
+1. **body node 必须存在**：loop.body 中每个 node id 必须存在于 `def.nodes`，否则报 `loop 'X' body node 'Y' not found in workflow nodes`。
+2. **body node 不能是 loop**：body 中的节点不能是 `WorkflowNode::Loop`（不支持嵌套 loop），否则报 `cannot be a Loop node (nested loops are not supported)`。
+3. **Decision 必须在 loop body 中作为 terminate.node**：
+   - terminate.node 必须存在、属于 body、且为 Decision 节点。
+   - 所有 Decision 节点必须被某个 loop 作为 terminate.node 使用（拒绝 standalone Decision，报 `standalone`）。
+   - 同一 Decision 不能被多个 loop 使用（报 `used by multiple loops`）。
+4. **每个 loop body 只能有一个 Decision**：body 中最多一个 Decision 节点，必须是 terminate.node；额外 Decision 报 `at most one Decision node`。
+5. **body external deps 必须显式出现在 loop.depends**：body 节点依赖 body 之外的节点时，该外部依赖必须声明在 loop 节点自身的 `base.depends` 中，否则报 `external dependencies of body nodes must be declared in the loop's depends`。
+6. **external node 不能依赖 loop body（包括 loop 节点自身）**：所有非 body 节点（含 `WorkflowNode::Loop`）不得 depends 任何 body 节点，否则报 `node 'X' depends on loop body node 'Y'; nodes must depend on the loop node instead of its body node`。loop 之间要传递依赖应 depends loop 节点自身。**边界修复（第二轮）**：初版 Rule 6 错误跳过了 `WorkflowNode::Loop`，已修正为对所有非 body 节点（含 loop）统一检查。
+7. **sink loop 必须声明 output.from**：没有外部节点依赖的 loop 节点必须有 `output.from`，否则报 `must declare output.from`。
 
-- 错误 loop 定义在 parse 阶段失败。
-- 合法 code-review-loop 定义通过。
+辅助修改：
+- 将 `build_body_owner_map` 和 `find_non_body_sinks` 作为私有 helper 函数加入 `workflow_definition.rs`（语义与 orchestrator 中的同名函数一致）。
+- 修复 root node 检查：排除 body 节点和 Decision 节点，使错误信息与实际检查逻辑一致。
+- 修复 `workflow_runtime.rs` 中 `loop_depends_met_produces_start_loop_and_first_iteration` 测试的 loop 定义（原定义使用非法 loop：空 body + Subagent terminate.node），改为合法定义（含 Decision 节点 + output.from）。
+
+测试覆盖（新增 22 个，更新 2 个既有测试）：
+
+- **Rule 1**：`reject_loop_with_missing_body_node` — body 引用不存在的节点
+- **Rule 2**：`reject_loop_with_nested_loop_body` — body 含另一个 Loop 节点
+- **Rule 3a**：`reject_loop_with_missing_terminate_node` — terminate.node 不存在
+- **Rule 3a**：`reject_loop_with_terminate_node_not_in_body` — terminate.node 不在 body 中
+- **Rule 3a**：`reject_loop_with_non_decision_terminate_node` — terminate.node 不是 Decision（Subagent）
+- **Rule 3b**：`reject_standalone_decision_node`（更新原有 `accept_standalone_decision_node` → 改名为 reject）— Decision 不被任何 loop 使用
+- **Rule 3b**：`reject_decision_not_used_by_any_loop` — 混合 workflow 中的 orphan Decision
+- **Rule 3b**：`reject_decision_outside_loop_body` — Decision 在 nodes 中但不在 loop body
+- **Rule 3b**：`reject_decision_used_by_multiple_loops` — 同一 Decision 被两个 loop 引用
+- **Rule 4**：`reject_loop_with_extra_decision_in_body` — body 中有两个 Decision
+- **Rule 5**：`reject_body_node_with_undeclared_external_dependency` — body 节点引用外部节点但未在 loop.depends 声明
+- **Rule 5**：`accept_body_node_with_external_dependency_declared_in_loop_depends` — 正确声明的外部依赖通过
+- **Rule 6**：`reject_external_node_depending_on_loop_body_node` — 外部节点 depends body 节点
+- **Rule 6**：`accept_external_node_depending_on_loop_node_instead_of_body_node` — 外部节点 depends loop 自身（合法）
+- **Rule 6（边界修复，第二轮新增）**：`reject_loop_depends_on_own_body_node` — loop 节点 depends 自己 body 中的节点被拒绝
+- **Rule 6（边界修复，第二轮新增）**：`reject_loop_depends_on_another_loop_body_node` — 另一个 loop depends 前一个 loop 的 body 节点被拒绝
+- **Rule 6（边界修复，第二轮新增）**：`accept_loop_depends_on_another_loop_node` — loop 节点 depends 另一个 loop 节点（合法）
+- **Rule 7**：`reject_sink_loop_without_output_from` — sink loop 缺少 output.from
+- **Rule 7**：`accept_sink_loop_with_output_from` — sink loop 有 output.from 通过
+- **Rule 7**：`accept_non_sink_loop_without_output_from` — 非 sink loop 不需 output.from 通过
+- **Edge case**：`accept_loop_with_explicit_depends_and_no_body_external_deps` — loop 有 depends 但 body 全为内部依赖
+- **Regression**：`accept_two_independent_loops` — 同一 workflow 中两个独立 loop 均通过
+
+验证结果（第二轮边界修复后重新验证）：
+
+- `cargo test -p beam-core workflow`：98 passed，0 failed。
+- `cargo test -p beam-core`：128 passed（115 unit + 1 event_log + 8 regression + 4 resume），0 failed。
+- `cargo test -p beam-daemon workflow`：106 passed，0 failed。
+- `cargo test -p beam-daemon --lib`：271 passed，0 failed。
+- `cargo build --workspace`：无 warning/error。
+- 合法 `workflows/code-review-loop.workflow.json` parse 成功（既有测试 `accept_code_review_loop_workflow_json` 继续通过）。
+
+边界说明：
+- 未改 runtime 行为；仅做 parse/definition validation。
+- 未绕过 EventLog。
+- body node 重叠（同一非 Decision body 节点出现在多个 loop 的 body 中）未做显式检查（不在任务验收标准中），当前 `build_body_owner_map` 会以最后一个 loop 为准。
+- Round 2 修复了 Rule 6 对 `WorkflowNode::Loop` 的不当跳过，现在所有非 body 节点（含 loop）均不得 depends body node；loop 之间依赖应直接 depends loop 节点。
 
 ## Phase 9: 清理与文档
 

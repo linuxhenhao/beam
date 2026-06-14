@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -205,14 +205,6 @@ pub fn validate_workflow_definition(def: &WorkflowDefinition) -> Result<()> {
     }
     for (node_id, node) in &def.nodes {
         match node {
-            // Loop and Decision nodes are now implemented (Phase 8.2)
-            WorkflowNode::Loop(_) => {
-                // Loop validation will be enhanced in Task 8.3
-            }
-            WorkflowNode::Decision(_) => {
-                // Standalone Decision nodes are only valid as loop body nodes,
-                // but full validation is deferred to Task 8.3
-            }
             WorkflowNode::HostExecutor(host) => {
                 // Side-effect executors must be gated
                 if is_side_effect_executor(&host.executor)
@@ -240,9 +232,25 @@ pub fn validate_workflow_definition(def: &WorkflowDefinition) -> Result<()> {
         }
     }
     detect_cycles(def)?;
-    if !def.nodes.values().any(|node| node_depends(node).is_empty()) {
+
+    // Loop definition validation (Task 8.3)
+    validate_loop_definitions(def)?;
+
+    // Check for at least one scheduler-visible root node
+    // (exclude body nodes and Decision nodes — they're dispatched inside their loop context)
+    let body_owner = build_body_owner_map(def);
+    let has_root = def.nodes.iter().any(|(node_id, node)| {
+        if body_owner.contains_key(node_id) {
+            return false;
+        }
+        if matches!(node, WorkflowNode::Decision(_)) {
+            return false;
+        }
+        node_depends(node).is_empty()
+    });
+    if !has_root {
         anyhow::bail!(
-            "Workflow has no scheduler-visible root node (every non-loop-body node has dependencies)"
+            "Workflow has no scheduler-visible root node (every non-loop-body, non-decision node has dependencies)"
         );
     }
     Ok(())
@@ -291,6 +299,232 @@ fn detect_cycles(def: &WorkflowDefinition) -> Result<()> {
         visit(node_id, def, &mut marks, &mut stack)?;
     }
     Ok(())
+}
+
+/// Build a map from each body node id → its owning loop node id.
+fn build_body_owner_map(def: &WorkflowDefinition) -> HashMap<String, String> {
+    let mut owner = HashMap::new();
+    for (loop_id, node) in &def.nodes {
+        if let WorkflowNode::Loop(loop_node) = node {
+            for body_id in &loop_node.body {
+                owner.insert(body_id.clone(), loop_id.clone());
+            }
+        }
+    }
+    owner
+}
+
+/// Validate loop definitions per Task 8.3 rules:
+/// 1. body nodes must exist
+/// 2. body nodes cannot be loops (no nested loops)
+/// 3. terminate.node must exist, be in body, be a Decision; all Decisions must have a loop owner
+/// 4. each loop body can have at most one Decision (the terminate.node)
+/// 5. body external deps must appear in loop.depends
+/// 6. external nodes cannot depend on loop body nodes
+/// 7. sink loops must declare output.from
+fn validate_loop_definitions(def: &WorkflowDefinition) -> Result<()> {
+    let body_owner = build_body_owner_map(def);
+
+    // Track which Decision node is owned by which loop (via terminate.node)
+    let mut decision_loop_owner: HashMap<String, String> = HashMap::new();
+
+    for (loop_id, node) in &def.nodes {
+        let loop_node = match node {
+            WorkflowNode::Loop(ln) => ln,
+            _ => continue,
+        };
+
+        // Rule 1: body nodes must exist in workflow nodes
+        for body_id in &loop_node.body {
+            if !def.nodes.contains_key(body_id) {
+                anyhow::bail!(
+                    "loop '{}' body node '{}' not found in workflow nodes",
+                    loop_id,
+                    body_id
+                );
+            }
+        }
+
+        // Rule 2: body nodes cannot be Loop (no nested loops)
+        for body_id in &loop_node.body {
+            if matches!(def.nodes.get(body_id), Some(WorkflowNode::Loop(_))) {
+                anyhow::bail!(
+                    "loop '{}' body node '{}' cannot be a Loop node (nested loops are not supported)",
+                    loop_id,
+                    body_id
+                );
+            }
+        }
+
+        // Rule 3a: terminate.node must exist
+        let term_node_id = &loop_node.terminate.node;
+        if !def.nodes.contains_key(term_node_id) {
+            anyhow::bail!(
+                "loop '{}' terminate.node '{}' not found in workflow nodes",
+                loop_id,
+                term_node_id
+            );
+        }
+
+        // Rule 3a: terminate.node must be in the loop body
+        if !loop_node.body.contains(term_node_id) {
+            anyhow::bail!(
+                "loop '{}' terminate.node '{}' must be in the loop body",
+                loop_id,
+                term_node_id
+            );
+        }
+
+        // Rule 3a: terminate.node must be a Decision node
+        match def.nodes.get(term_node_id) {
+            Some(WorkflowNode::Decision(_)) => {
+                // Each Decision can belong to at most one loop
+                if let Some(existing_owner) =
+                    decision_loop_owner.insert(term_node_id.clone(), loop_id.clone())
+                {
+                    anyhow::bail!(
+                        "Decision node '{}' is used as terminate.node by multiple loops: '{}' and '{}'",
+                        term_node_id,
+                        existing_owner,
+                        loop_id
+                    );
+                }
+            }
+            _ => {
+                anyhow::bail!(
+                    "loop '{}' terminate.node '{}' must be a Decision node, got {:?}",
+                    loop_id,
+                    term_node_id,
+                    std::mem::discriminant(def.nodes.get(term_node_id).unwrap())
+                );
+            }
+        }
+
+        // Rule 4: each loop body can have at most one Decision (the terminate.node)
+        for body_id in &loop_node.body {
+            if body_id != term_node_id
+                && matches!(def.nodes.get(body_id), Some(WorkflowNode::Decision(_)))
+            {
+                anyhow::bail!(
+                    "loop '{}' has Decision node '{}' in body that is not the terminate.node; \
+                     each loop body can have at most one Decision node (which must be the terminate.node)",
+                    loop_id,
+                    body_id
+                );
+            }
+        }
+
+        // Rule 5: body external deps must be declared in loop.depends
+        let loop_depends: BTreeSet<&str> = loop_node
+            .base
+            .depends
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        for body_id in &loop_node.body {
+            if let Some(body_node) = def.nodes.get(body_id) {
+                for dep in node_depends(body_node) {
+                    if !loop_node.body.contains(dep) {
+                        // dep is external to the loop body
+                        if !loop_depends.contains(dep.as_str()) {
+                            anyhow::bail!(
+                                "loop '{}' body node '{}' depends on external node '{}'; \
+                                 all external dependencies of body nodes must be declared in the loop's depends",
+                                loop_id,
+                                body_id,
+                                dep
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Rule 3b: all Decision nodes must be owned by some loop (no standalone Decision)
+    for (node_id, node) in &def.nodes {
+        if matches!(node, WorkflowNode::Decision(_)) {
+            if !decision_loop_owner.contains_key(node_id) {
+                anyhow::bail!(
+                    "Decision node '{}' is standalone; Decision nodes must be used as a loop's terminate.node and reside in that loop's body",
+                    node_id
+                );
+            }
+        }
+    }
+
+    // Rule 6: non-body nodes (including loop nodes themselves) cannot depend on
+    // loop body nodes.  External nodes that need a loop's result must depend on
+    // the loop node itself, not on individual body nodes.
+    for (node_id, node) in &def.nodes {
+        if body_owner.contains_key(node_id) {
+            continue; // skip body nodes themselves
+        }
+        if matches!(node, WorkflowNode::Decision(_)) {
+            continue; // Decision nodes not owned by a loop are already rejected by rule 3b;
+                      // owned Decision nodes are body nodes (skip above)
+        }
+        for dep in node_depends(node) {
+            if body_owner.contains_key(dep) {
+                let owner = body_owner.get(dep).unwrap();
+                anyhow::bail!(
+                    "node '{}' depends on loop body node '{}'; \
+                     nodes must depend on the loop node '{}' instead of its body node",
+                    node_id,
+                    dep,
+                    owner
+                );
+            }
+        }
+    }
+
+    // Rule 7: sink loops must declare output.from
+    // A loop is a "sink" if no non-body, non-decision node depends on it.
+    let sinks = find_non_body_sinks(def, &body_owner);
+    for sink_id in &sinks {
+        if let Some(WorkflowNode::Loop(loop_node)) = def.nodes.get(sink_id) {
+            if loop_node.output.is_none() {
+                anyhow::bail!(
+                    "sink loop '{}' must declare output.from (the loop is not depended on by any external node)",
+                    sink_id
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Find sink nodes excluding body nodes and Decision nodes.
+/// A node is a sink if no non-body, non-decision node depends on it.
+fn find_non_body_sinks(
+    def: &WorkflowDefinition,
+    body_owner: &HashMap<String, String>,
+) -> Vec<String> {
+    let mut referenced: BTreeSet<String> = BTreeSet::new();
+    for (node_id, node) in &def.nodes {
+        if body_owner.contains_key(node_id) {
+            continue;
+        }
+        if matches!(node, WorkflowNode::Decision(_)) {
+            continue;
+        }
+        for dep in node_depends(node) {
+            referenced.insert(dep.clone());
+        }
+    }
+    def.nodes
+        .iter()
+        .filter_map(|(node_id, node)| {
+            if body_owner.contains_key(node_id) {
+                return None;
+            }
+            if matches!(node, WorkflowNode::Decision(_)) {
+                return None;
+            }
+            (!referenced.contains(node_id)).then_some(node_id.clone())
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -457,21 +691,25 @@ mod tests {
 
     #[test]
     fn accept_loop_node_with_minimal_body() {
-        // Loop with empty body + decision terminate node
+        // Loop with minimal body + decision terminate node + output.from (sink loop requires it)
         let def = parse_workflow_definition(
-            r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision"},"l":{"type":"loop","maxIterations":3,"body":["d"],"depends":[],"terminate":{"node":"d","via":"humanGate"}}}}"#,
+            r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision"},"l":{"type":"loop","maxIterations":3,"body":["d"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"d"}}}}"#,
         )
         .expect("loop accepted");
         assert!(def.nodes.contains_key("l"));
     }
 
     #[test]
-    fn accept_standalone_decision_node() {
-        let def = parse_workflow_definition(
+    fn reject_standalone_decision_node() {
+        // Task 8.3: standalone Decision nodes (not used as a loop terminate.node) are rejected
+        let err = parse_workflow_definition(
             r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision"}}}"#,
         )
-        .expect("decision accepted");
-        assert!(def.nodes.contains_key("d"));
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("standalone"),
+            "expected 'standalone' in error, got: {err}"
+        );
     }
 
     #[test]
@@ -492,5 +730,258 @@ mod tests {
         assert!(def.nodes.contains_key("implement"));
         assert!(def.nodes.contains_key("review"));
         assert!(def.nodes.contains_key("reviewDecision"));
+    }
+
+    // -- Task 8.3: loop definition validation --
+
+    // Rule 1: body nodes must exist
+    #[test]
+    fn reject_loop_with_missing_body_node() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision"},"l":{"type":"loop","maxIterations":3,"body":["missing","d"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"d"}}}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("body node") && err.to_string().contains("missing"),
+            "expected body node 'missing' error, got: {err}"
+        );
+    }
+
+    // Rule 2: body node cannot be a loop (no nested loops)
+    #[test]
+    fn reject_loop_with_nested_loop_body() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision"},"inner":{"type":"loop","maxIterations":2,"body":["d"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"d"}},"l":{"type":"loop","maxIterations":3,"body":["inner","d"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"d"}}}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("nested loop") || err.to_string().contains("cannot be a Loop"),
+            "expected nested loop error, got: {err}"
+        );
+    }
+
+    // Rule 3a: terminate.node must exist
+    #[test]
+    fn reject_loop_with_missing_terminate_node() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision"},"l":{"type":"loop","maxIterations":3,"body":["d"],"terminate":{"node":"nonexistent","via":"humanGate"},"output":{"from":"d"}}}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("terminate.node") && err.to_string().contains("nonexistent"),
+            "expected terminate.node not found error, got: {err}"
+        );
+    }
+
+    // Rule 3a: terminate.node must be in loop body
+    #[test]
+    fn reject_loop_with_terminate_node_not_in_body() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision"},"x":{"type":"subagent","bot":"b","prompt":"p"},"l":{"type":"loop","maxIterations":3,"body":["d"],"terminate":{"node":"x","via":"humanGate"}}}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("terminate.node") && err.to_string().contains("body"),
+            "expected terminate.node must be in body error, got: {err}"
+        );
+    }
+
+    // Rule 3a: terminate.node must be a Decision node
+    #[test]
+    fn reject_loop_with_non_decision_terminate_node() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"a":{"type":"subagent","bot":"b","prompt":"p"},"l":{"type":"loop","maxIterations":3,"body":["a"],"terminate":{"node":"a","via":"humanGate"}}}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("Decision node"),
+            "expected Decision node error, got: {err}"
+        );
+    }
+
+    // Rule 3b: Decision node cannot be standalone
+    #[test]
+    fn reject_decision_not_used_by_any_loop() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"a":{"type":"subagent","bot":"b","prompt":"p"},"d":{"type":"decision"}}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("standalone"),
+            "expected standalone Decision error, got: {err}"
+        );
+    }
+
+    // Rule 3b: Decision node must be in body of the loop that uses it
+    #[test]
+    fn reject_decision_outside_loop_body() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision"},"l":{"type":"loop","maxIterations":3,"body":[],"terminate":{"node":"d","via":"humanGate"}}}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("body"),
+            "expected body error for terminate.node not in body, got: {err}"
+        );
+    }
+
+    // Rule 3b: same Decision cannot be used by multiple loops
+    #[test]
+    fn reject_decision_used_by_multiple_loops() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision"},"l1":{"type":"loop","maxIterations":3,"body":["d"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"d"}},"l2":{"type":"loop","maxIterations":3,"body":["d"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"d"}}}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("multiple loops"),
+            "expected 'multiple loops' error, got: {err}"
+        );
+    }
+
+    // Rule 4: each loop body can have at most one Decision (the terminate.node)
+    #[test]
+    fn reject_loop_with_extra_decision_in_body() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"d1":{"type":"decision"},"d2":{"type":"decision"},"l":{"type":"loop","maxIterations":3,"body":["d1","d2"],"terminate":{"node":"d1","via":"humanGate"},"output":{"from":"d1"}}}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("at most one Decision"),
+            "expected 'at most one Decision' error, got: {err}"
+        );
+    }
+
+    // Rule 5: body external deps must appear in loop.depends
+    #[test]
+    fn reject_body_node_with_undeclared_external_dependency() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"ext":{"type":"subagent","bot":"b","prompt":"p"},"d":{"type":"decision"},"inner":{"type":"subagent","bot":"b","prompt":"p","depends":["ext"]},"l":{"type":"loop","maxIterations":3,"body":["inner","d"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"inner"}}}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("external") && err.to_string().contains("depends"),
+            "expected external dep must be declared in loop.depends error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_body_node_with_external_dependency_declared_in_loop_depends() {
+        let def = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"ext":{"type":"subagent","bot":"b","prompt":"p"},"d":{"type":"decision"},"inner":{"type":"subagent","bot":"b","prompt":"p","depends":["ext"]},"l":{"type":"loop","maxIterations":3,"body":["inner","d"],"depends":["ext"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"inner"}}}}"#,
+        )
+        .expect("loop with declared external dep accepted");
+        assert!(def.nodes.contains_key("l"));
+    }
+
+    // Rule 6: external nodes cannot depend on loop body nodes
+    #[test]
+    fn reject_external_node_depending_on_loop_body_node() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision"},"inner":{"type":"subagent","bot":"b","prompt":"p"},"ext":{"type":"subagent","bot":"b","prompt":"p","depends":["inner"]},"l":{"type":"loop","maxIterations":3,"body":["inner","d"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"inner"}}}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("depends on loop body node"),
+            "expected depends on loop body node error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_external_node_depending_on_loop_node_instead_of_body_node() {
+        let def = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision"},"inner":{"type":"subagent","bot":"b","prompt":"p"},"ext":{"type":"subagent","bot":"b","prompt":"p","depends":["l"]},"l":{"type":"loop","maxIterations":3,"body":["inner","d"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"inner"}}}}"#,
+        )
+        .expect("external node depends on loop node accepted");
+        assert!(def.nodes.contains_key("l"));
+    }
+
+    // Rule 6 (cont): loop node itself must not depend on body nodes
+    // (either its own body or another loop's body)
+    #[test]
+    fn reject_loop_depends_on_own_body_node() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision"},"inner":{"type":"subagent","bot":"b","prompt":"p"},"l":{"type":"loop","maxIterations":3,"body":["inner","d"],"depends":["inner"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"inner"}}}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("body node"),
+            "expected 'body node' error for loop depending on own body node, got: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_loop_depends_on_another_loop_body_node() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"d1":{"type":"decision"},"a":{"type":"subagent","bot":"b","prompt":"p"},"l1":{"type":"loop","maxIterations":3,"body":["a","d1"],"terminate":{"node":"d1","via":"humanGate"},"output":{"from":"a"}},"d2":{"type":"decision"},"l2":{"type":"loop","maxIterations":3,"body":["d2"],"depends":["a"],"terminate":{"node":"d2","via":"humanGate"},"output":{"from":"d2"}}}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("body node") && err.to_string().contains("'l2'"),
+            "expected 'body node' error for l2 depending on another loop's body node, got: {err}"
+        );
+    }
+
+    // Also verify that loop depends on another loop (not body node) is still accepted
+    #[test]
+    fn accept_loop_depends_on_another_loop_node() {
+        let def = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"d1":{"type":"decision"},"a":{"type":"subagent","bot":"b","prompt":"p"},"l1":{"type":"loop","maxIterations":3,"body":["a","d1"],"terminate":{"node":"d1","via":"humanGate"},"output":{"from":"a"}},"d2":{"type":"decision"},"l2":{"type":"loop","maxIterations":3,"body":["d2"],"depends":["l1"],"terminate":{"node":"d2","via":"humanGate"},"output":{"from":"d2"}}}}"#,
+        )
+        .expect("loop depends on another loop node accepted");
+        assert!(def.nodes.contains_key("l1"));
+        assert!(def.nodes.contains_key("l2"));
+    }
+
+    // Rule 7: sink loop must declare output.from
+    #[test]
+    fn reject_sink_loop_without_output_from() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision"},"inner":{"type":"subagent","bot":"b","prompt":"p"},"l":{"type":"loop","maxIterations":3,"body":["inner","d"],"terminate":{"node":"d","via":"humanGate"}}}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("output.from"),
+            "expected 'output.from' error for sink loop, got: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_sink_loop_with_output_from() {
+        let def = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision"},"inner":{"type":"subagent","bot":"b","prompt":"p"},"l":{"type":"loop","maxIterations":3,"body":["inner","d"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"inner"}}}}"#,
+        )
+        .expect("sink loop with output.from accepted");
+        assert!(def.nodes.contains_key("l"));
+    }
+
+    #[test]
+    fn accept_non_sink_loop_without_output_from() {
+        // Loop is not a sink because external node 'ext' depends on it
+        let def = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision"},"inner":{"type":"subagent","bot":"b","prompt":"p"},"l":{"type":"loop","maxIterations":3,"body":["inner","d"],"terminate":{"node":"d","via":"humanGate"}},"ext":{"type":"subagent","bot":"b","prompt":"p","depends":["l"]}}}"#,
+        )
+        .expect("non-sink loop without output.from accepted");
+        assert!(def.nodes.contains_key("l"));
+    }
+
+    // Edge case: loop with depends on external node but no body external deps (valid)
+    #[test]
+    fn accept_loop_with_explicit_depends_and_no_body_external_deps() {
+        let def = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"ext":{"type":"subagent","bot":"b","prompt":"p"},"d":{"type":"decision"},"inner":{"type":"subagent","bot":"b","prompt":"p"},"l":{"type":"loop","maxIterations":3,"body":["inner","d"],"depends":["ext"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"inner"}}}}"#,
+        )
+        .expect("loop with explicit depends accepted");
+        assert!(def.nodes.contains_key("l"));
+    }
+
+    // Regression: multiple loops in same workflow
+    #[test]
+    fn accept_two_independent_loops() {
+        let def = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"d1":{"type":"decision"},"inner1":{"type":"subagent","bot":"b","prompt":"p"},"l1":{"type":"loop","maxIterations":3,"body":["inner1","d1"],"terminate":{"node":"d1","via":"humanGate"},"output":{"from":"inner1"}},"d2":{"type":"decision"},"inner2":{"type":"subagent","bot":"b","prompt":"p"},"l2":{"type":"loop","maxIterations":3,"body":["inner2","d2"],"depends":["l1"],"terminate":{"node":"d2","via":"humanGate"},"output":{"from":"inner2"}}}}"#,
+        )
+        .expect("two independent loops accepted");
+        assert!(def.nodes.contains_key("l1"));
+        assert!(def.nodes.contains_key("l2"));
     }
 }
