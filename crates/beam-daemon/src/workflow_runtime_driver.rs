@@ -48,7 +48,7 @@ pub(crate) async fn run(state: &AppState, run_id: &str, workflow_json: &str) {
     let watch_state = state.clone();
     let watch_run_id = run_id.to_string();
     let watch_workflow_id = rt.def.workflow_id.clone();
-    tokio::spawn(async move {
+    let watcher = tokio::spawn(async move {
         let events_path = watch_state
             .paths
             .workflow_run_dir(&watch_run_id)
@@ -101,6 +101,11 @@ pub(crate) async fn run(state: &AppState, run_id: &str, workflow_json: &str) {
             warn!("workflow runtime failed for {}: {}", run_id, err);
         }
     }
+
+    // A resume creates a fresh driver invocation, so its watcher must not
+    // outlive this invocation and compete with later watchers for the same run.
+    watcher.abort();
+    let _ = watcher.await;
 
     // Fanout approval cards for any human-gate waits created during this
     // runtime tick.  This covers normal advancement, recovery, and resume.

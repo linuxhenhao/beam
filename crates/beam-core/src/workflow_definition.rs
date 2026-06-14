@@ -317,11 +317,13 @@ fn build_body_owner_map(def: &WorkflowDefinition) -> HashMap<String, String> {
 /// Validate loop definitions per Task 8.3 rules:
 /// 1. body nodes must exist
 /// 2. body nodes cannot be loops (no nested loops)
-/// 3. terminate.node must exist, be in body, be a Decision; all Decisions must have a loop owner
+/// 3. terminate.node must exist, be in body, be a human-gated Decision, and
+///    terminate.via must be "humanGate"; all Decisions must have a loop owner
 /// 4. each loop body can have at most one Decision (the terminate.node)
 /// 5. body external deps must appear in loop.depends
 /// 6. external nodes cannot depend on loop body nodes
-/// 7. sink loops must declare output.from
+/// 7. output.from must identify an output-producing body node
+/// 8. sink loops must declare output.from
 fn validate_loop_definitions(def: &WorkflowDefinition) -> Result<()> {
     let body_owner = build_body_owner_map(def);
 
@@ -375,7 +377,8 @@ fn validate_loop_definitions(def: &WorkflowDefinition) -> Result<()> {
             );
         }
 
-        // Rule 3a: terminate.node must be a Decision node
+        // Rule 3a: terminate.node must be a Decision node. Gate details are
+        // checked after structural validation to preserve useful diagnostics.
         match def.nodes.get(term_node_id) {
             Some(WorkflowNode::Decision(_)) => {
                 // Each Decision can belong to at most one loop
@@ -478,7 +481,34 @@ fn validate_loop_definitions(def: &WorkflowDefinition) -> Result<()> {
         }
     }
 
-    // Rule 7: sink loops must declare output.from
+    // Rule 7: every declared output must come from an output-producing body node.
+    for (loop_id, node) in &def.nodes {
+        let WorkflowNode::Loop(loop_node) = node else {
+            continue;
+        };
+        let Some(output) = &loop_node.output else {
+            continue;
+        };
+        if !loop_node.body.contains(&output.from) {
+            anyhow::bail!(
+                "loop '{}' output.from '{}' must identify a node in the loop body",
+                loop_id,
+                output.from
+            );
+        }
+        if !matches!(
+            def.nodes.get(&output.from),
+            Some(WorkflowNode::Subagent(_) | WorkflowNode::HostExecutor(_))
+        ) {
+            anyhow::bail!(
+                "loop '{}' output.from '{}' must identify an output-producing Subagent or HostExecutor body node",
+                loop_id,
+                output.from
+            );
+        }
+    }
+
+    // Rule 8: sink loops must declare output.from
     // A loop is a "sink" if no non-body, non-decision node depends on it.
     let sinks = find_non_body_sinks(def, &body_owner);
     for sink_id in &sinks {
@@ -489,6 +519,31 @@ fn validate_loop_definitions(def: &WorkflowDefinition) -> Result<()> {
                     sink_id
                 );
             }
+        }
+    }
+
+    // Loop termination is only implemented through a human gate.
+    for (loop_id, node) in &def.nodes {
+        let WorkflowNode::Loop(loop_node) = node else {
+            continue;
+        };
+        if loop_node.terminate.via != "humanGate" {
+            anyhow::bail!(
+                "loop '{}' terminate.via must be 'humanGate', got '{}'",
+                loop_id,
+                loop_node.terminate.via
+            );
+        }
+        let decision = match def.nodes.get(&loop_node.terminate.node) {
+            Some(WorkflowNode::Decision(decision)) => decision,
+            _ => continue,
+        };
+        if decision.base.human_gate.is_none() {
+            anyhow::bail!(
+                "loop '{}' terminate.node '{}' must declare humanGate",
+                loop_id,
+                loop_node.terminate.node
+            );
         }
     }
 
@@ -691,9 +746,9 @@ mod tests {
 
     #[test]
     fn accept_loop_node_with_minimal_body() {
-        // Loop with minimal body + decision terminate node + output.from (sink loop requires it)
+        // Sink loops need both an output-producing body node and a gated decision.
         let def = parse_workflow_definition(
-            r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision"},"l":{"type":"loop","maxIterations":3,"body":["d"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"d"}}}}"#,
+            r#"{"workflowId":"f","version":1,"nodes":{"work":{"type":"subagent","bot":"b","prompt":"p"},"d":{"type":"decision","humanGate":{"stage":"approve","prompt":"continue?"},"depends":["work"]},"l":{"type":"loop","maxIterations":3,"body":["work","d"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"work"}}}}"#,
         )
         .expect("loop accepted");
         assert!(def.nodes.contains_key("l"));
@@ -823,6 +878,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reject_loop_with_ungated_decision_terminate_node() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"work":{"type":"subagent","bot":"b","prompt":"p"},"d":{"type":"decision","depends":["work"]},"l":{"type":"loop","maxIterations":3,"body":["work","d"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"work"}}}}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("humanGate"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_loop_with_non_human_gate_terminate_via() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"work":{"type":"subagent","bot":"b","prompt":"p"},"d":{"type":"decision","humanGate":{"stage":"approve","prompt":"continue?"},"depends":["work"]},"l":{"type":"loop","maxIterations":3,"body":["work","d"],"terminate":{"node":"d","via":"automatic"},"output":{"from":"work"}}}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("terminate.via") && err.to_string().contains("humanGate"),
+            "got: {err}"
+        );
+    }
+
     // Rule 3b: Decision node cannot be standalone
     #[test]
     fn reject_decision_not_used_by_any_loop() {
@@ -891,7 +967,7 @@ mod tests {
     #[test]
     fn accept_body_node_with_external_dependency_declared_in_loop_depends() {
         let def = parse_workflow_definition(
-            r#"{"workflowId":"f","version":1,"nodes":{"ext":{"type":"subagent","bot":"b","prompt":"p"},"d":{"type":"decision"},"inner":{"type":"subagent","bot":"b","prompt":"p","depends":["ext"]},"l":{"type":"loop","maxIterations":3,"body":["inner","d"],"depends":["ext"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"inner"}}}}"#,
+            r#"{"workflowId":"f","version":1,"nodes":{"ext":{"type":"subagent","bot":"b","prompt":"p"},"d":{"type":"decision","humanGate":{"stage":"approve","prompt":"continue?"},"depends":["inner"]},"inner":{"type":"subagent","bot":"b","prompt":"p","depends":["ext"]},"l":{"type":"loop","maxIterations":3,"body":["inner","d"],"depends":["ext"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"inner"}}}}"#,
         )
         .expect("loop with declared external dep accepted");
         assert!(def.nodes.contains_key("l"));
@@ -913,7 +989,7 @@ mod tests {
     #[test]
     fn accept_external_node_depending_on_loop_node_instead_of_body_node() {
         let def = parse_workflow_definition(
-            r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision"},"inner":{"type":"subagent","bot":"b","prompt":"p"},"ext":{"type":"subagent","bot":"b","prompt":"p","depends":["l"]},"l":{"type":"loop","maxIterations":3,"body":["inner","d"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"inner"}}}}"#,
+            r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision","humanGate":{"stage":"approve","prompt":"continue?"},"depends":["inner"]},"inner":{"type":"subagent","bot":"b","prompt":"p"},"ext":{"type":"subagent","bot":"b","prompt":"p","depends":["l"]},"l":{"type":"loop","maxIterations":3,"body":["inner","d"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"inner"}}}}"#,
         )
         .expect("external node depends on loop node accepted");
         assert!(def.nodes.contains_key("l"));
@@ -949,14 +1025,14 @@ mod tests {
     #[test]
     fn accept_loop_depends_on_another_loop_node() {
         let def = parse_workflow_definition(
-            r#"{"workflowId":"f","version":1,"nodes":{"d1":{"type":"decision"},"a":{"type":"subagent","bot":"b","prompt":"p"},"l1":{"type":"loop","maxIterations":3,"body":["a","d1"],"terminate":{"node":"d1","via":"humanGate"},"output":{"from":"a"}},"d2":{"type":"decision"},"l2":{"type":"loop","maxIterations":3,"body":["d2"],"depends":["l1"],"terminate":{"node":"d2","via":"humanGate"},"output":{"from":"d2"}}}}"#,
+            r#"{"workflowId":"f","version":1,"nodes":{"d1":{"type":"decision","humanGate":{"stage":"approve","prompt":"continue?"},"depends":["a"]},"a":{"type":"subagent","bot":"b","prompt":"p"},"l1":{"type":"loop","maxIterations":3,"body":["a","d1"],"terminate":{"node":"d1","via":"humanGate"},"output":{"from":"a"}},"b":{"type":"subagent","bot":"b","prompt":"q"},"d2":{"type":"decision","humanGate":{"stage":"approve","prompt":"continue?"},"depends":["b"]},"l2":{"type":"loop","maxIterations":3,"body":["b","d2"],"depends":["l1"],"terminate":{"node":"d2","via":"humanGate"},"output":{"from":"b"}}}}"#,
         )
         .expect("loop depends on another loop node accepted");
         assert!(def.nodes.contains_key("l1"));
         assert!(def.nodes.contains_key("l2"));
     }
 
-    // Rule 7: sink loop must declare output.from
+    // Rule 8: sink loop must declare output.from
     #[test]
     fn reject_sink_loop_without_output_from() {
         let err = parse_workflow_definition(
@@ -972,17 +1048,44 @@ mod tests {
     #[test]
     fn accept_sink_loop_with_output_from() {
         let def = parse_workflow_definition(
-            r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision"},"inner":{"type":"subagent","bot":"b","prompt":"p"},"l":{"type":"loop","maxIterations":3,"body":["inner","d"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"inner"}}}}"#,
+            r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision","humanGate":{"stage":"approve","prompt":"continue?"},"depends":["inner"]},"inner":{"type":"subagent","bot":"b","prompt":"p"},"l":{"type":"loop","maxIterations":3,"body":["inner","d"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"inner"}}}}"#,
         )
         .expect("sink loop with output.from accepted");
         assert!(def.nodes.contains_key("l"));
     }
 
     #[test]
+    fn reject_sink_loop_with_unknown_output_from() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"inner":{"type":"subagent","bot":"b","prompt":"p"},"d":{"type":"decision","humanGate":{"stage":"approve","prompt":"continue?"},"depends":["inner"]},"l":{"type":"loop","maxIterations":3,"body":["inner","d"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"missing"}}}}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("loop body"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_sink_loop_with_external_output_from() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"external":{"type":"subagent","bot":"b","prompt":"p"},"inner":{"type":"subagent","bot":"b","prompt":"p"},"d":{"type":"decision","humanGate":{"stage":"approve","prompt":"continue?"},"depends":["inner"]},"l":{"type":"loop","maxIterations":3,"body":["inner","d"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"external"}}}}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("loop body"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_sink_loop_with_decision_output_from() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"inner":{"type":"subagent","bot":"b","prompt":"p"},"d":{"type":"decision","humanGate":{"stage":"approve","prompt":"continue?"},"depends":["inner"]},"l":{"type":"loop","maxIterations":3,"body":["inner","d"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"d"}}}}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("output-producing"), "got: {err}");
+    }
+
+    #[test]
     fn accept_non_sink_loop_without_output_from() {
         // Loop is not a sink because external node 'ext' depends on it
         let def = parse_workflow_definition(
-            r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision"},"inner":{"type":"subagent","bot":"b","prompt":"p"},"l":{"type":"loop","maxIterations":3,"body":["inner","d"],"terminate":{"node":"d","via":"humanGate"}},"ext":{"type":"subagent","bot":"b","prompt":"p","depends":["l"]}}}"#,
+            r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision","humanGate":{"stage":"approve","prompt":"continue?"},"depends":["inner"]},"inner":{"type":"subagent","bot":"b","prompt":"p"},"l":{"type":"loop","maxIterations":3,"body":["inner","d"],"terminate":{"node":"d","via":"humanGate"}},"ext":{"type":"subagent","bot":"b","prompt":"p","depends":["l"]}}}"#,
         )
         .expect("non-sink loop without output.from accepted");
         assert!(def.nodes.contains_key("l"));
@@ -992,7 +1095,7 @@ mod tests {
     #[test]
     fn accept_loop_with_explicit_depends_and_no_body_external_deps() {
         let def = parse_workflow_definition(
-            r#"{"workflowId":"f","version":1,"nodes":{"ext":{"type":"subagent","bot":"b","prompt":"p"},"d":{"type":"decision"},"inner":{"type":"subagent","bot":"b","prompt":"p"},"l":{"type":"loop","maxIterations":3,"body":["inner","d"],"depends":["ext"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"inner"}}}}"#,
+            r#"{"workflowId":"f","version":1,"nodes":{"ext":{"type":"subagent","bot":"b","prompt":"p"},"d":{"type":"decision","humanGate":{"stage":"approve","prompt":"continue?"},"depends":["inner"]},"inner":{"type":"subagent","bot":"b","prompt":"p"},"l":{"type":"loop","maxIterations":3,"body":["inner","d"],"depends":["ext"],"terminate":{"node":"d","via":"humanGate"},"output":{"from":"inner"}}}}"#,
         )
         .expect("loop with explicit depends accepted");
         assert!(def.nodes.contains_key("l"));
@@ -1002,7 +1105,7 @@ mod tests {
     #[test]
     fn accept_two_independent_loops() {
         let def = parse_workflow_definition(
-            r#"{"workflowId":"f","version":1,"nodes":{"d1":{"type":"decision"},"inner1":{"type":"subagent","bot":"b","prompt":"p"},"l1":{"type":"loop","maxIterations":3,"body":["inner1","d1"],"terminate":{"node":"d1","via":"humanGate"},"output":{"from":"inner1"}},"d2":{"type":"decision"},"inner2":{"type":"subagent","bot":"b","prompt":"p"},"l2":{"type":"loop","maxIterations":3,"body":["inner2","d2"],"depends":["l1"],"terminate":{"node":"d2","via":"humanGate"},"output":{"from":"inner2"}}}}"#,
+            r#"{"workflowId":"f","version":1,"nodes":{"d1":{"type":"decision","humanGate":{"stage":"approve","prompt":"continue?"},"depends":["inner1"]},"inner1":{"type":"subagent","bot":"b","prompt":"p"},"l1":{"type":"loop","maxIterations":3,"body":["inner1","d1"],"terminate":{"node":"d1","via":"humanGate"},"output":{"from":"inner1"}},"d2":{"type":"decision","humanGate":{"stage":"approve","prompt":"continue?"},"depends":["inner2"]},"inner2":{"type":"subagent","bot":"b","prompt":"p"},"l2":{"type":"loop","maxIterations":3,"body":["inner2","d2"],"depends":["l1"],"terminate":{"node":"d2","via":"humanGate"},"output":{"from":"inner2"}}}}"#,
         )
         .expect("two independent loops accepted");
         assert!(def.nodes.contains_key("l1"));

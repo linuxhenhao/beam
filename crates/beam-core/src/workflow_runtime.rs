@@ -4245,7 +4245,7 @@ mod tests {
             &paths,
             crate::BootstrapWorkflowRunInput {
                 run_id,
-                workflow_json: r#"{"workflowId":"flow-loop-dep","version":1,"nodes":{"pre":{"type":"subagent","bot":"bot-x","prompt":"setup"},"dec":{"type":"decision"},"rl":{"type":"loop","maxIterations":3,"body":["dec"],"depends":["pre"],"terminate":{"node":"dec","via":"humanGate"},"output":{"from":"dec"}}}}"#,
+                workflow_json: r#"{"workflowId":"flow-loop-dep","version":1,"nodes":{"pre":{"type":"subagent","bot":"bot-x","prompt":"setup"},"work":{"type":"subagent","bot":"bot-x","prompt":"work"},"dec":{"type":"decision","depends":["work"],"humanGate":{"stage":"approve","prompt":"continue?"}},"rl":{"type":"loop","maxIterations":3,"body":["work","dec"],"depends":["pre"],"terminate":{"node":"dec","via":"humanGate"},"output":{"from":"work"}}}}"#,
                 expected_workflow_id: Some("flow-loop-dep"),
                 params: &params,
                 initiator: "cli",

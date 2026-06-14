@@ -15,8 +15,9 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use beam_core::{RunChatBinding, RunStatus, WaitState, read_run_snapshot};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::{Arc, OnceLock, Weak};
 use tracing::{info, warn};
 
 use crate::{AppState, BotConfig};
@@ -105,6 +106,25 @@ impl ApprovalCardSentMarker {
         self.sent
             .insert(format!("{}::{}", activity_id, attempt_id));
     }
+}
+
+type FanoutLock = tokio::sync::Mutex<()>;
+
+/// Serialize marker load/check/send/save per run within the daemon process.
+async fn fanout_lock(run_dir: &PathBuf) -> Arc<FanoutLock> {
+    static LOCKS: OnceLock<tokio::sync::Mutex<HashMap<PathBuf, Weak<FanoutLock>>>> =
+        OnceLock::new();
+
+    let locks = LOCKS.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
+    let mut locks = locks.lock().await;
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(run_dir).and_then(Weak::upgrade) {
+        return lock;
+    }
+
+    let lock = Arc::new(FanoutLock::new(()));
+    locks.insert(run_dir.clone(), Arc::downgrade(&lock));
+    lock
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +260,8 @@ pub(crate) async fn fanout_approval_cards_if_needed<S: ApprovalCardSender>(
     sender: &S,
 ) -> usize {
     let run_dir = state.paths.workflow_run_dir(run_id);
+    let fanout_lock = fanout_lock(&run_dir).await;
+    let _fanout_guard = fanout_lock.lock().await;
 
     // 1. Read snapshot — this is the authoritative view derived from EventLog.
     let snapshot = match read_run_snapshot(&run_dir).await {
@@ -595,6 +617,43 @@ mod tests {
         let sent2 = fanout_approval_cards_if_needed(&state, run_id, &mock).await;
         assert_eq!(sent2, 0, "second fanout should not re-send");
         assert_eq!(mock.call_count(), 1, "mock should have been called only once");
+
+        let _ = std::fs::remove_dir_all(paths.root());
+    }
+
+    #[tokio::test]
+    async fn concurrent_fanout_does_not_duplicate() {
+        let paths = temp_paths("concurrent-fanout");
+        let _ = std::fs::remove_dir_all(paths.root());
+        let state = make_state(&paths);
+        let run_id = "run-concurrent-fanout";
+        let def = r#"{"workflowId":"flow-concurrent","version":1,"nodes":{"gate":{"type":"hostExecutor","executor":"beam-shell","input":{"command":"echo hi"},"humanGate":{"stage":"approve","prompt":"Approve?"}}}}"#;
+
+        bootstrap_workflow_run(
+            &paths,
+            BootstrapWorkflowRunInput {
+                run_id,
+                workflow_json: def,
+                expected_workflow_id: Some("flow-concurrent"),
+                params: &BTreeMap::new(),
+                initiator: "test",
+                chat_binding: Some(RunChatBinding {
+                    chat_id: "oc_test_chat".to_string(),
+                    lark_app_id: "app_test".to_string(),
+                }),
+            },
+        )
+        .expect("bootstrap");
+        crate::run_workflow_runtime_once(&state, run_id, def).await;
+
+        let mock = MockSender::new();
+        let (sent1, sent2) = tokio::join!(
+            fanout_approval_cards_if_needed(&state, run_id, &mock),
+            fanout_approval_cards_if_needed(&state, run_id, &mock),
+        );
+
+        assert_eq!(sent1 + sent2, 1, "only one concurrent call should send");
+        assert_eq!(mock.call_count(), 1, "approval card must not be duplicated");
 
         let _ = std::fs::remove_dir_all(paths.root());
     }
