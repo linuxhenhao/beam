@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use beam_core::{
-    BeamPaths, EventDraft, EventLog, RequestCancelInput, RunChatBinding, RunLoopStopReason,
+    BeamPaths, EventLog, RequestCancelInput, RunChatBinding, RunLoopStopReason,
     RunStatus, WorkflowActor, WorkflowDispatchOutcome, WorkflowDispatchRun, WorkflowExecutionHooks,
     WorkflowRuntimeContext, bootstrap_workflow_run, read_run_snapshot, request_cancel, run_loop,
     run_tick,
@@ -91,6 +91,7 @@ impl CountingHooks {
         }
     }
 
+    #[allow(dead_code)]
     fn with_fail(node_id: &str) -> Self {
         Self {
             call_count: Arc::new(Mutex::new(0)),

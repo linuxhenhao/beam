@@ -14,6 +14,7 @@ mod terminal_proxy;
 mod trigger_log;
 mod webhook_key;
 mod webhook_lifecycle;
+mod workflow_cancellation;
 mod workflow_commands;
 mod workflow_event_fanout;
 mod workflow_host_executors;
@@ -813,7 +814,19 @@ impl WorkflowExecutionHooks for DaemonWorkflowExecutionHooks {
         node: &beam_core::SubagentNode,
         resolved_prompt: String,
     ) -> anyhow::Result<WorkflowDispatchOutcome> {
-        run_workflow_subagent_session(&self.state, ctx, node, resolved_prompt).await
+        let guard = workflow_cancellation::ActivityTokenGuard::register(
+            workflow_cancellation::global_cancellation_registry(),
+            ctx.run_id,
+            ctx.activity_id,
+        );
+        run_workflow_subagent_session(
+            &self.state,
+            ctx,
+            node,
+            resolved_prompt,
+            Some(&guard.token),
+        )
+        .await
     }
 
     async fn execute_host_executor(
@@ -823,7 +836,19 @@ impl WorkflowExecutionHooks for DaemonWorkflowExecutionHooks {
         // Already parsed by `prepare_host_executor`.
         parsed_input: Value,
     ) -> anyhow::Result<WorkflowDispatchOutcome> {
-        run_workflow_host_executor(&self.state, ctx, node, parsed_input).await
+        let guard = workflow_cancellation::ActivityTokenGuard::register(
+            workflow_cancellation::global_cancellation_registry(),
+            ctx.run_id,
+            ctx.activity_id,
+        );
+        run_workflow_host_executor(
+            &self.state,
+            ctx,
+            node,
+            parsed_input,
+            Some(&guard.token),
+        )
+        .await
     }
 
     fn prepare_host_executor(
@@ -916,6 +941,60 @@ impl WorkflowExecutionHooks for DaemonWorkflowExecutionHooks {
             had_progress,
             has_remaining_dangling: has_remaining,
         })
+    }
+
+    async fn on_activities_cancelled(
+        &mut self,
+        activity_ids: &[String],
+        node_ids: &[String],
+        run_id: &str,
+    ) {
+        let registry = workflow_cancellation::global_cancellation_registry();
+
+        // If the entire run is being cancelled, cancel all tokens at once.
+        // We detect this by checking whether the run-level cancel intent is
+        // present in the snapshot.
+        if let Ok(Some(snap)) = beam_core::read_run_snapshot(
+            &self.state.paths.workflow_run_dir(run_id),
+        )
+        .await
+        {
+            if snap.run.cancelled_run_intent.is_some() {
+                let count = registry.cancel_run(run_id).len();
+                if count > 0 {
+                    tracing::debug!(
+                        "cancellation registry: cancelled run {} ({} activities)",
+                        run_id,
+                        count
+                    );
+                }
+                return;
+            }
+        }
+
+        // Node-level cancels: cancel each node's tokens.
+        for node_id in node_ids {
+            let count = registry.cancel_node(run_id, node_id).len();
+            if count > 0 {
+                tracing::debug!(
+                    "cancellation registry: cancelled node {} in run {} ({} activities)",
+                    node_id,
+                    run_id,
+                    count
+                );
+            }
+        }
+
+        // Individual activity cancels.
+        for activity_id in activity_ids {
+            if registry.cancel_activity(run_id, activity_id) {
+                tracing::debug!(
+                    "cancellation registry: cancelled activity {} in run {}",
+                    activity_id,
+                    run_id
+                );
+            }
+        }
     }
 }
 
@@ -5869,6 +5948,7 @@ async fn await_session_final_output(
     state: &AppState,
     session_id: &str,
     timeout: Duration,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<String> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
@@ -5894,7 +5974,151 @@ async fn await_session_final_output(
                 session_id
             );
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Cooperative cancellation: yield either after 200ms or when the
+        // cancel token fires, whichever comes first.
+        let sleep = tokio::time::sleep(Duration::from_millis(200));
+        if let Some(token) = cancel_token {
+            tokio::select! {
+                _ = token.cancelled() => {
+                    anyhow::bail!("workflow activity cancelled");
+                }
+                _ = sleep => {}
+            }
+        } else {
+            sleep.await;
+        }
+    }
+}
+
+/// Terminate a workflow worker process with escalating signals.
+///
+/// Sends SIGINT first, then polls (via `try_wait` on the tokio child handle,
+/// falling back to `kill(pid, 0)` when no handle is available) whether the
+/// process has exited.  Escalates to SIGKILL after a 5-second grace period
+/// if the process is still alive.
+///
+/// # Why `try_wait` before `kill(pid, 0)`
+///
+/// A child that has exited but not yet been reaped (zombie) still has a PID
+/// entry, so `kill(pid, 0)` returns success.  That makes us wait the full
+/// 5-second grace *and* send a pointless SIGKILL even though the worker
+/// already honoured SIGINT.  `try_wait` reaps the zombie and returns
+/// `Some(exit_status)`, allowing us to break out of the grace loop
+/// immediately.
+///
+/// This is called from the cancellation path of `run_workflow_subagent_session`
+/// to ensure the worker process is forcefully killed rather than relying solely
+/// on the gentle `DaemonToWorker::Close` message (which a stuck worker may
+/// never process).
+///
+/// # Safety
+///
+/// Uses `libc::kill` to send signals.  The `worker_pid` must belong to the
+/// current process's child (or the caller must have permission to signal it).
+async fn terminate_workflow_worker_process(state: &AppState, session_id: &str) {
+    let worker_pid = {
+        let sessions = state.sessions.lock().await;
+        sessions
+            .get(session_id)
+            .and_then(|s| s.worker_pid)
+    };
+    let Some(pid) = worker_pid else {
+        tracing::debug!(
+            "terminate_workflow_worker_process: no worker_pid for session {}",
+            session_id
+        );
+        return;
+    };
+
+    // Step 1: Send SIGINT to request graceful shutdown.
+    let sigint_ok = unsafe { libc::kill(pid as i32, libc::SIGINT) == 0 };
+    tracing::info!(
+        "terminate_workflow_worker: SIGINT sent to pid={} (ok={})",
+        pid,
+        sigint_ok
+    );
+
+    // Step 2: Grace period – poll every 200 ms up to 5 seconds.
+    //
+    // We prefer `try_wait()` on the tokio child handle because it correctly
+    // detects (and reaps) zombie children that `kill(pid, 0)` would still
+    // report as alive.  When no child handle is available (e.g. the worker
+    // was already removed from the workers map), we fall back to the less
+    // reliable `kill(pid, 0)`.
+    let grace_duration = std::time::Duration::from_secs(5);
+    let poll_interval = std::time::Duration::from_millis(200);
+    let deadline = tokio::time::Instant::now() + grace_duration;
+    let mut process_exited = false;
+    // Track whether we have (or once had) a child handle so we know
+    // when to trust try_wait results over kill(pid, 0).
+    let mut has_handle = false;
+
+    while tokio::time::Instant::now() < deadline {
+        // --- try_wait path (preferred) ---
+        // Lock is held *only* for the synchronous try_wait call, never
+        // across the .await sleep below.
+        let try_wait_exited = {
+            let mut workers = state.workers.lock().await;
+            match workers.get_mut(session_id) {
+                Some(handle) => {
+                    has_handle = true;
+                    match handle.child.try_wait() {
+                        Ok(Some(_status)) => {
+                            // Child exited and was reaped — done.
+                            true
+                        }
+                        Ok(None) => {
+                            // Still running.
+                            false
+                        }
+                        Err(_) => {
+                            // Child already reaped or OS error — treat as
+                            // gone.
+                            true
+                        }
+                    }
+                }
+                None => false,
+            }
+        }; // mutex guard dropped here
+
+        if try_wait_exited {
+            process_exited = true;
+            tracing::info!(
+                "terminate_workflow_worker: pid={} exited (detected via try_wait)",
+                pid
+            );
+            break;
+        }
+
+        // --- kill(pid, 0) fallback ---
+        // Only use this when we've never seen a child handle.  If we *have*
+        // a handle and try_wait said "still running", we trust that over the
+        // zombie-prone kill(pid, 0) check.
+        if !has_handle {
+            let alive = unsafe { libc::kill(pid as i32, 0) == 0 };
+            if !alive {
+                process_exited = true;
+                tracing::info!(
+                    "terminate_workflow_worker: pid={} exited (detected via kill(0))",
+                    pid
+                );
+                break;
+            }
+        }
+
+        tokio::time::sleep(poll_interval).await;
+    }
+
+    // Step 3: Escalate to SIGKILL if the process is still alive.
+    if !process_exited {
+        let sigkill_ok = unsafe { libc::kill(pid as i32, libc::SIGKILL) == 0 };
+        tracing::warn!(
+            "terminate_workflow_worker: SIGKILL sent to pid={} (ok={}) – did not exit after SIGINT + {:?}",
+            pid,
+            sigkill_ok,
+            grace_duration,
+        );
     }
 }
 
@@ -5903,6 +6127,7 @@ async fn run_workflow_subagent_session(
     ctx: WorkflowDispatchRun<'_>,
     node: &beam_core::SubagentNode,
     resolved_prompt: String,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<WorkflowDispatchOutcome> {
     let Some(bot) = state.bots.get(&node.bot).cloned() else {
         return Ok(WorkflowDispatchOutcome::Failed {
@@ -5912,6 +6137,15 @@ async fn run_workflow_subagent_session(
             session: None,
         });
     };
+
+    // Check cancellation before doing heavy work.
+    if cancel_token.map_or(false, |t| t.is_cancelled()) {
+        return Ok(WorkflowDispatchOutcome::Cancelled {
+            cancel_origin_event_id: String::new(),
+            session: None,
+        });
+    }
+
     let working_dir = expand_tilde(
         &node
             .working_dir
@@ -5953,9 +6187,43 @@ async fn run_workflow_subagent_session(
 
     let session_id = session.session_id.clone();
     let output =
-        match await_session_final_output(state, &session_id, Duration::from_secs(180)).await {
+        match await_session_final_output(
+            state,
+            &session_id,
+            Duration::from_secs(180),
+            cancel_token,
+        )
+        .await
+        {
             Ok(output) => output,
             Err(err) => {
+                // Distinguish cancellation from other failures.
+                if cancel_token.map_or(false, |t| t.is_cancelled()) {
+                    // Forcefully terminate the worker process before cleaning up
+                    // the session.  The gentle DaemonToWorker::Close message may
+                    // never be processed by a stuck worker, so we escalate via
+                    // SIGINT → grace → SIGKILL.
+                    terminate_workflow_worker_process(state, &session_id).await;
+                    let _ =
+                        close_session(State(state.clone()), AxumPath(session_id.clone())).await;
+                    return Ok(WorkflowDispatchOutcome::Cancelled {
+                        cancel_origin_event_id: String::new(),
+                        session: Some(WorkflowDispatchSession {
+                            session_id,
+                            bot_name: node.bot.clone(),
+                            started_at: Utc::now().timestamp_millis().max(0) as u64,
+                            ended_at: Some(Utc::now().timestamp_millis().max(0) as u64),
+                            cli_session_id: None,
+                            lark_app_id: Some("local".to_string()),
+                            cli_id: Some(bot.cli_id.clone()),
+                            working_dir: Some(working_dir),
+                            web_port: None,
+                            log_path: None,
+                        }),
+                    });
+                }
+
+                // Non-cancellation failure: gentle close.
                 let _ = close_session(State(state.clone()), AxumPath(session_id.clone())).await;
                 return Ok(WorkflowDispatchOutcome::Failed {
                     error_code: "WorkerCrashed".to_string(),
@@ -6001,13 +6269,27 @@ async fn run_workflow_host_executor(
     node: &beam_core::HostExecutorNode,
     // Already parsed by `prepare_host_executor`.
     parsed_input: Value,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<WorkflowDispatchOutcome> {
+    // Check cancellation before dispatching to provider.
+    if cancel_token.map_or(false, |t| t.is_cancelled()) {
+        return Ok(WorkflowDispatchOutcome::Cancelled {
+            cancel_origin_event_id: String::new(),
+            session: None,
+        });
+    }
+
     let registry = workflow_host_executors::global_host_executor_registry();
     let executor = match registry.resolve(&node.executor) {
         Ok(executor) => executor,
         Err(outcome) => return Ok(outcome),
     };
 
+    // NOTE: We do NOT interrupt the provider future mid-flight, because
+    // effectAttempted has already been written before this call and the
+    // provider must be allowed to complete (or fail on its own).  The token
+    // is registered so that if cancellation is detected *before* provider
+    // invocation, we bail early.  Task 6.3 will handle real worker kill.
     match executor.invoke(state, &ctx, node, &parsed_input).await {
         Ok(outcome) => Ok(outcome),
         Err(err) => Ok(executor.classify_error(&err, &ctx)),
@@ -15735,6 +16017,7 @@ mod tests {
             },
             &node,
             node.input.clone(),
+            None,
         )
         .await
         .expect("host executor");
@@ -18157,5 +18440,254 @@ mod tests {
 
             maybe_remove_dir(&paths.root().to_path_buf());
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 6.3: Worker termination tests
+    // -----------------------------------------------------------------------
+
+    /// Spawn a child process, register it in both `state.sessions` and
+    /// `state.workers`, then call `terminate_workflow_worker_process`.
+    /// Verify that the *`try_wait()` path* detects the child's exit promptly
+    /// (well before the 5-second grace), so that a SIGINT-responsive worker
+    /// does not suffer a pointless full-grace wait + SIGKILL.
+    #[tokio::test]
+    async fn terminate_workflow_worker_process_exits_early_via_try_wait() {
+        let paths = temp_paths("terminate-trywait");
+        maybe_remove_dir(&paths.root().to_path_buf());
+        let state = make_state(paths.clone(), HashMap::new());
+
+        // Spawn a long-running "worker" (sleep 60).
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+
+        let worker_pid = child.id().expect("child should have a pid");
+        let session_id = "session-trywait";
+
+        // Register both the session *and* the worker handle so that the
+        // grace poll uses try_wait() rather than the zombie-prone kill(0).
+        {
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert(
+                session_id.to_string(),
+                Session {
+                    session_id: session_id.to_string(),
+                    worker_pid: Some(worker_pid),
+                    status: SessionStatus::Active,
+                    closed_at: None,
+                    ..make_session(session_id)
+                },
+            );
+        }
+        {
+            let stdin = child.stdin.take().expect("stdin");
+            state.workers.lock().await.insert(
+                session_id.to_string(),
+                WorkerHandle {
+                    child,
+                    stdin: std::sync::Arc::new(tokio::sync::Mutex::new(stdin)),
+                },
+            );
+        }
+
+        // Verify the process is alive before termination.
+        let alive_before = unsafe { libc::kill(worker_pid as i32, 0) == 0 };
+        assert!(alive_before, "child should be alive before termination");
+
+        // Terminate — `sleep` honours SIGINT, so try_wait should detect the
+        // exit within a few poll cycles.
+        let start = tokio::time::Instant::now();
+        terminate_workflow_worker_process(&state, session_id).await;
+        let elapsed = start.elapsed();
+
+        // The grace period is 5 s.  A SIGINT-responsive process should exit
+        // *much* faster (typically < 1 s).  We use 3 s as a generous upper
+        // bound to prove we didn't wait the full grace.
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "try_wait should detect exit well before 5 s grace, got {:?}",
+            elapsed
+        );
+
+        // Retrieve the child and verify its exit status.
+        let mut child = {
+            let mut workers = state.workers.lock().await;
+            workers
+                .remove(session_id)
+                .expect("worker handle should still be there")
+                .child
+        };
+        let exit_status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+            .await
+            .expect("wait should not time out")
+            .expect("wait should succeed");
+
+        assert!(
+            !exit_status.success(),
+            "sleep process should be killed by signal (exit status: {:?})",
+            exit_status
+        );
+
+        maybe_remove_dir(&paths.root().to_path_buf());
+    }
+
+    /// Fallback path: when the child is *not* registered in `state.workers`,
+    /// `terminate_workflow_worker_process` falls back to `kill(pid, 0)`.  A
+    /// responsive child still exits, but the zombie means `kill(0)` keeps
+    /// returning success, so we wait the full 5-second grace and escalate to
+    /// SIGKILL.  This test documents the *current behaviour* of the fallback
+    /// and verifies the child is killed regardless.
+    #[tokio::test]
+    async fn terminate_workflow_worker_process_fallback_kills_child() {
+        let paths = temp_paths("terminate-fallback");
+        maybe_remove_dir(&paths.root().to_path_buf());
+        let state = make_state(paths.clone(), HashMap::new());
+
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+
+        let worker_pid = child.id().expect("child should have a pid");
+        let session_id = "session-fallback";
+
+        // Session has worker_pid but *no* worker handle in state.workers.
+        {
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert(
+                session_id.to_string(),
+                Session {
+                    session_id: session_id.to_string(),
+                    worker_pid: Some(worker_pid),
+                    status: SessionStatus::Active,
+                    closed_at: None,
+                    ..make_session(session_id)
+                },
+            );
+        }
+
+        let alive_before = unsafe { libc::kill(worker_pid as i32, 0) == 0 };
+        assert!(alive_before, "child should be alive before termination");
+
+        // Without a handle, the grace loop falls back to kill(pid, 0) which
+        // is zombie-prone → we'll wait the full grace + send SIGKILL.  The
+        // child is killed eventually.
+        let start = tokio::time::Instant::now();
+        terminate_workflow_worker_process(&state, session_id).await;
+        let elapsed = start.elapsed();
+
+        // Fallback path will wait close to the full 5 s grace period.
+        assert!(
+            elapsed >= std::time::Duration::from_secs(3),
+            "fallback should wait at least most of the grace, got {:?}",
+            elapsed
+        );
+
+        let exit_status = tokio::time::timeout(std::time::Duration::from_secs(10), child.wait())
+            .await
+            .expect("child wait should not time out")
+            .expect("child wait should succeed");
+
+        assert!(
+            !exit_status.success(),
+            "sleep process should be killed by signal (exit status: {:?})",
+            exit_status
+        );
+
+        maybe_remove_dir(&paths.root().to_path_buf());
+    }
+
+    /// Verify that `terminate_workflow_worker_process` is a no-op when there
+    /// is no worker PID (session exists but worker was never spawned).
+    #[tokio::test]
+    async fn terminate_workflow_worker_process_no_pid_is_noop() {
+        let paths = temp_paths("terminate-no-pid");
+        maybe_remove_dir(&paths.root().to_path_buf());
+        let state = make_state(paths.clone(), HashMap::new());
+        let session_id = "session-no-pid";
+
+        {
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert(
+                session_id.to_string(),
+                Session {
+                    session_id: session_id.to_string(),
+                    worker_pid: None,
+                    status: SessionStatus::Active,
+                    closed_at: None,
+                    ..make_session(session_id)
+                },
+            );
+        }
+
+        // Should not panic or error.
+        terminate_workflow_worker_process(&state, session_id).await;
+
+        // Session should still exist and be active.
+        {
+            let sessions = state.sessions.lock().await;
+            let session = sessions.get(session_id).expect("session should exist");
+            assert_eq!(session.status, SessionStatus::Active);
+            assert!(session.worker_pid.is_none());
+        }
+
+        maybe_remove_dir(&paths.root().to_path_buf());
+    }
+
+    /// Verify that when we call cancel_run on a run that has an active
+    /// cancellation token registered, the token is cancelled immediately
+    /// (existing behaviour from Task 6.2), and the registry is cleaned up.
+    #[tokio::test]
+    async fn cancel_run_clears_registry_and_session_cleanup_works() {
+        use beam_core::{BootstrapWorkflowRunInput, bootstrap_workflow_run};
+
+        let paths = temp_paths("cancel-session-cleanup");
+        maybe_remove_dir(&paths.root().to_path_buf());
+        let state = make_state(paths.clone(), HashMap::new());
+        let run_id = "run-cancel-cleanup";
+
+        // Bootstrap a human-gate workflow so the run stays in Waiting state.
+        let def = r#"{"workflowId":"flow-a","version":1,"nodes":{"nodeA":{"type":"hostExecutor","executor":"beam-shell","input":{"command":"echo hello"},"humanGate":{"stage":"approve","prompt":"wait"}}}}"#;
+        let _ = bootstrap_workflow_run(
+            &paths,
+            BootstrapWorkflowRunInput {
+                run_id,
+                workflow_json: def,
+                expected_workflow_id: Some("flow-a"),
+                params: &std::collections::BTreeMap::new(),
+                initiator: "test",
+                chat_binding: None,
+            },
+        )
+        .expect("bootstrap");
+
+        crate::run_workflow_runtime_once(&state, run_id, def).await;
+
+        // Register a fake activity token to simulate active dispatch.
+        let reg = crate::workflow_cancellation::global_cancellation_registry();
+        let token = reg.register_activity(run_id, &format!("{}::work::nodeA", run_id));
+        assert_eq!(reg.total_activities(), 1);
+
+        // Cancel the run.
+        let outcome = crate::workflow_commands::cancel_run(&state, run_id, Some("test".to_string()))
+            .await
+            .expect("cancel");
+
+        assert!(outcome.ok);
+        assert_eq!(outcome.status, "cancelled");
+
+        // Token should be cancelled and registry cleaned up.
+        assert!(token.is_cancelled());
+        assert_eq!(reg.total_activities(), 0);
+
+        maybe_remove_dir(&paths.root().to_path_buf());
     }
 }

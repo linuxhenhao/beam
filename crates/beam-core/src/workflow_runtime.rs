@@ -148,6 +148,20 @@ pub trait WorkflowExecutionHooks {
             has_remaining_dangling: !snapshot.dangling.effect_attempted.is_empty(),
         })
     }
+
+    /// Called after `check_pending_cancels` has written cancel events for the
+    /// given activities and nodes.  The hook receives the lists of activity IDs
+    /// that were just cancelled, allowing daemon-level cancellation registries
+    /// to cancel active dispatch tokens.
+    ///
+    /// Default implementation is a no-op.
+    async fn on_activities_cancelled(
+        &mut self,
+        _activity_ids: &[String],
+        _node_ids: &[String],
+        _run_id: &str,
+    ) {
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -326,7 +340,7 @@ pub async fn run_loop<H: WorkflowExecutionHooks + Clone + Send + 'static>(
             });
         }
 
-        check_pending_cancels(rt).await?;
+        check_pending_cancels(rt, hooks).await?;
 
         // --- Recovery phase: handle dangling effects before decide_next_actions ---
         // This ensures that crashed/restarted workflows with dangling
@@ -407,27 +421,47 @@ pub async fn run_loop<H: WorkflowExecutionHooks + Clone + Send + 'static>(
     }
 }
 
-async fn check_pending_cancels(rt: &mut WorkflowRuntimeContext) -> Result<()> {
+async fn check_pending_cancels<H: WorkflowExecutionHooks + Send>(
+    rt: &mut WorkflowRuntimeContext,
+    hooks: &mut H,
+) -> Result<()> {
     let _events = rt.log.read_all()?;
     let snapshot = read_snapshot(rt).await?;
+    let mut cancelled_activities: Vec<String> = Vec::new();
+    let mut cancelled_nodes: Vec<String> = Vec::new();
+
     for activity_id in &snapshot.dangling.cancels {
-        if !snapshot.dangling.activities.contains(activity_id) {
-            let attempt_id = snapshot
-                .activities
-                .iter()
-                .find(|a| &a.activity_id == activity_id)
-                .and_then(|a| a.current_attempt_id.clone())
-                .unwrap_or_else(|| format!("{}-attempt-1", activity_id));
-            let _ = crate::complete_activity_cancel(
-                &mut rt.log,
-                crate::CompleteActivityCancelInput {
-                    activity_id: activity_id.clone(),
-                    attempt_id,
-                    cancel_origin_event_id: String::new(),
-                },
-                WorkflowActor::Scheduler,
-            );
-        }
+        cancelled_activities.push(activity_id.clone());
+        let attempt_id = snapshot
+            .activities
+            .iter()
+            .find(|a| &a.activity_id == activity_id)
+            .and_then(|a| a.current_attempt_id.clone())
+            .unwrap_or_else(|| format!("{}-attempt-1", activity_id));
+        let origin = snapshot
+            .run
+            .cancelled_run_intent
+            .as_ref()
+            .map(|i| i.cancel_origin_event_id.clone())
+            .or_else(|| {
+                snapshot
+                    .run
+                    .cancelled_node_intents
+                    .values()
+                    .next()
+                    .map(|i| i.cancel_origin_event_id.clone())
+            })
+            .unwrap_or_default();
+        let _ = crate::complete_activity_cancel(
+            &mut rt.log,
+            crate::CompleteActivityCancelInput {
+                activity_id: activity_id.clone(),
+                attempt_id,
+                cancel_origin_event_id: origin,
+            },
+            WorkflowActor::Scheduler,
+        )
+        .await;
     }
 
     if let Some(ref intent) = snapshot.run.cancelled_run_intent {
@@ -438,12 +472,14 @@ async fn check_pending_cancels(rt: &mut WorkflowRuntimeContext) -> Result<()> {
                     cancel_origin_event_id: intent.cancel_origin_event_id.clone(),
                 },
                 WorkflowActor::Scheduler,
-            );
+            )
+            .await;
         }
     }
 
     if !snapshot.run.cancelled_node_intents.is_empty() {
         for (node_id, intent) in &snapshot.run.cancelled_node_intents {
+            cancelled_nodes.push(node_id.clone());
             let _ = crate::complete_node_cancel(
                 &mut rt.log,
                 crate::CompleteNodeCancelInput {
@@ -451,8 +487,16 @@ async fn check_pending_cancels(rt: &mut WorkflowRuntimeContext) -> Result<()> {
                     cancel_origin_event_id: intent.cancel_origin_event_id.clone(),
                 },
                 WorkflowActor::Scheduler,
-            );
+            )
+            .await;
         }
+    }
+
+    // Notify hooks so daemon can cancel active dispatch tokens.
+    if !cancelled_activities.is_empty() || !cancelled_nodes.is_empty() {
+        hooks
+            .on_activities_cancelled(&cancelled_activities, &cancelled_nodes, &rt.log.run_id)
+            .await;
     }
 
     Ok(())
@@ -2980,6 +3024,360 @@ mod tests {
             "expected progress after wait resolution recovery; reason={:?} ticks={}",
             result.reason,
             result.ticks
+        );
+
+        let _ = fs::remove_dir_all(&run_dir);
+    }
+
+    /// Verify that cancelRequested (run) propagation writes activityCanceled
+    /// for an open human-gate activity before writing runCanceled.
+    #[tokio::test]
+    async fn cancel_propagation_writes_activity_canceled_before_run_canceled() {
+        let run_dir = temp_run_dir("cancel-propagate");
+        let _ = fs::remove_dir_all(&run_dir);
+        fs::create_dir_all(run_dir.join("blobs")).unwrap();
+        let paths = crate::BeamPaths::from_root(run_dir.clone());
+        let run_id = "run-cancel-propagate";
+        crate::bootstrap_workflow_run(
+            &paths,
+            crate::BootstrapWorkflowRunInput {
+                run_id,
+                workflow_json: r#"{"workflowId":"flow-cancel-propagate","version":1,"nodes":{"gate":{"type":"hostExecutor","executor":"beam-schedule","input":{"prompt":"approve"},"humanGate":{"stage":"gate","prompt":"approve?","approvers":["admin"]}},"sink":{"type":"subagent","bot":"bot-a","prompt":"done","depends":["gate"]}}}"#,
+                expected_workflow_id: Some("flow-cancel-propagate"),
+                params: &BTreeMap::new(),
+                initiator: "cli",
+                chat_binding: Some(RunChatBinding {
+                    chat_id: "chat-1".to_string(),
+                    lark_app_id: "app-1".to_string(),
+                }),
+            },
+        )
+        .unwrap();
+
+        // First run_loop tick: dispatches the human-gate (creates a wait).
+        let gate_activity_id = format!("{}::gate::gate", run_id);
+        {
+            let mut rt = WorkflowRuntimeContext {
+                log: EventLog::new(run_id, paths.workflow_runs_dir()).unwrap(),
+                def: WorkflowDefinition {
+                    workflow_id: "flow-cancel-propagate".to_string(),
+                    version: 1,
+                    params: None,
+                    defaults: None,
+                    nodes: BTreeMap::from([
+                        (
+                            "gate".to_string(),
+                            WorkflowNode::HostExecutor(HostExecutorNode {
+                                base: NodeBase {
+                                    description: None,
+                                    depends: None,
+                                    human_gate: Some(crate::workflow_definition::HumanGate {
+                                        stage: "gate".to_string(),
+                                        prompt: Value::String("approve?".to_string()),
+                                        approvers: Some(vec!["admin".to_string()]),
+                                        deadline_ms: None,
+                                        on_timeout: None,
+                                    }),
+                                    retry_policy: None,
+                                    timeout_ms: None,
+                                    max_output_bytes: None,
+                                    output_schema: None,
+                                    unsafe_allow_ungated: Some(true),
+                                },
+                                executor: "beam-schedule".to_string(),
+                                input: serde_json::json!({"prompt":"approve"}),
+                            }),
+                        ),
+                        (
+                            "sink".to_string(),
+                            WorkflowNode::Subagent(SubagentNode {
+                                base: NodeBase {
+                                    description: None,
+                                    depends: Some(vec!["gate".to_string()]),
+                                    human_gate: None,
+                                    retry_policy: None,
+                                    timeout_ms: None,
+                                    max_output_bytes: None,
+                                    output_schema: None,
+                                    unsafe_allow_ungated: None,
+                                },
+                                bot: "bot-a".to_string(),
+                                prompt: Value::String("done".to_string()),
+                                working_dir: None,
+                                model_overrides: None,
+                                tool_policy: None,
+                            }),
+                        ),
+                    ]),
+                },
+                runs_base_dir: paths.workflow_runs_dir(),
+            };
+            let mut hooks = FakeHooks;
+            let result = run_loop(&mut rt, &mut hooks, 5, 1).await.unwrap();
+            assert_eq!(result.reason, RunLoopStopReason::AwaitingWait);
+        }
+
+        // Write cancelRequested (run).
+        {
+            let mut log = EventLog::new(run_id, paths.workflow_runs_dir()).unwrap();
+            let _ = crate::request_cancel(
+                &mut log,
+                crate::RequestCancelInput {
+                    target: serde_json::json!({
+                        "kind": "run",
+                        "runId": run_id,
+                    }),
+                    reason: "test cancel".to_string(),
+                    by: "tester".to_string(),
+                },
+                WorkflowActor::Human,
+            )
+            .await
+            .unwrap();
+        }
+
+        // Second run_loop: should propagate cancel (activityCanceled → runCanceled).
+        {
+            let mut rt = WorkflowRuntimeContext {
+                log: EventLog::new(run_id, paths.workflow_runs_dir()).unwrap(),
+                def: WorkflowDefinition {
+                    workflow_id: "flow-cancel-propagate".to_string(),
+                    version: 1,
+                    params: None,
+                    defaults: None,
+                    nodes: BTreeMap::from([
+                        (
+                            "gate".to_string(),
+                            WorkflowNode::HostExecutor(HostExecutorNode {
+                                base: NodeBase {
+                                    description: None,
+                                    depends: None,
+                                    human_gate: Some(crate::workflow_definition::HumanGate {
+                                        stage: "gate".to_string(),
+                                        prompt: Value::String("approve?".to_string()),
+                                        approvers: Some(vec!["admin".to_string()]),
+                                        deadline_ms: None,
+                                        on_timeout: None,
+                                    }),
+                                    retry_policy: None,
+                                    timeout_ms: None,
+                                    max_output_bytes: None,
+                                    output_schema: None,
+                                    unsafe_allow_ungated: Some(true),
+                                },
+                                executor: "beam-schedule".to_string(),
+                                input: serde_json::json!({"prompt":"approve"}),
+                            }),
+                        ),
+                        (
+                            "sink".to_string(),
+                            WorkflowNode::Subagent(SubagentNode {
+                                base: NodeBase {
+                                    description: None,
+                                    depends: Some(vec!["gate".to_string()]),
+                                    human_gate: None,
+                                    retry_policy: None,
+                                    timeout_ms: None,
+                                    max_output_bytes: None,
+                                    output_schema: None,
+                                    unsafe_allow_ungated: None,
+                                },
+                                bot: "bot-a".to_string(),
+                                prompt: Value::String("done".to_string()),
+                                working_dir: None,
+                                model_overrides: None,
+                                tool_policy: None,
+                            }),
+                        ),
+                    ]),
+                },
+                runs_base_dir: paths.workflow_runs_dir(),
+            };
+            let mut hooks = FakeHooks;
+            let result = run_loop(&mut rt, &mut hooks, 5, 1).await.unwrap();
+            assert_eq!(result.reason, RunLoopStopReason::Terminal);
+        }
+
+        // Verify event order: activityCanceled appears before runCanceled.
+        let log = EventLog::new(run_id, paths.workflow_runs_dir()).unwrap();
+        let events = log.read_all().unwrap();
+        let has_cancel_requested = events
+            .iter()
+            .any(|e| e.event_type == "cancelRequested");
+        assert!(has_cancel_requested, "should have cancelRequested");
+
+        // Find positions of activityCanceled (for the gate) and runCanceled.
+        let mut activity_canceled_pos: Option<usize> = None;
+        let mut run_canceled_pos: Option<usize> = None;
+        for (i, e) in events.iter().enumerate() {
+            if e.event_type == "activityCanceled"
+                && e.payload
+                    .get("activityId")
+                    .and_then(Value::as_str)
+                    == Some(&gate_activity_id)
+            {
+                activity_canceled_pos = Some(i);
+            }
+            if e.event_type == "runCanceled" {
+                run_canceled_pos = Some(i);
+            }
+        }
+
+        assert!(
+            activity_canceled_pos.is_some(),
+            "should have activityCanceled for the gate activity"
+        );
+        assert!(run_canceled_pos.is_some(), "should have runCanceled");
+        assert!(
+            activity_canceled_pos.unwrap() < run_canceled_pos.unwrap(),
+            "activityCanceled ({}) must appear before runCanceled ({})",
+            activity_canceled_pos.unwrap(),
+            run_canceled_pos.unwrap()
+        );
+
+        let _ = fs::remove_dir_all(&run_dir);
+    }
+
+    /// Verify that cancel propagation is idempotent: running check_pending_cancels
+    /// again on an already-cancelled run does not write duplicate events.
+    #[tokio::test]
+    async fn cancel_propagation_is_idempotent_after_run_is_cancelled() {
+        let run_dir = temp_run_dir("cancel-idempotent");
+        let _ = fs::remove_dir_all(&run_dir);
+        fs::create_dir_all(run_dir.join("blobs")).unwrap();
+        let paths = crate::BeamPaths::from_root(run_dir.clone());
+        let run_id = "run-cancel-idempotent";
+        crate::bootstrap_workflow_run(
+            &paths,
+            crate::BootstrapWorkflowRunInput {
+                run_id,
+                workflow_json: r#"{"workflowId":"flow-cancel-idem","version":1,"nodes":{"a":{"type":"subagent","bot":"bot-a","prompt":"hello"}}}"#,
+                expected_workflow_id: Some("flow-cancel-idem"),
+                params: &BTreeMap::new(),
+                initiator: "cli",
+                chat_binding: Some(RunChatBinding {
+                    chat_id: "chat-1".to_string(),
+                    lark_app_id: "app-1".to_string(),
+                }),
+            },
+        )
+        .unwrap();
+
+        // Write cancelRequested before any dispatch.
+        {
+            let mut log = EventLog::new(run_id, paths.workflow_runs_dir()).unwrap();
+            let _ = crate::request_cancel(
+                &mut log,
+                crate::RequestCancelInput {
+                    target: serde_json::json!({
+                        "kind": "run",
+                        "runId": run_id,
+                    }),
+                    reason: "test cancel".to_string(),
+                    by: "tester".to_string(),
+                },
+                WorkflowActor::Human,
+            )
+            .await
+            .unwrap();
+        }
+
+        // First run_loop: should write runCanceled.
+        {
+            let mut rt = WorkflowRuntimeContext {
+                log: EventLog::new(run_id, paths.workflow_runs_dir()).unwrap(),
+                def: WorkflowDefinition {
+                    workflow_id: "flow-cancel-idem".to_string(),
+                    version: 1,
+                    params: None,
+                    defaults: None,
+                    nodes: BTreeMap::from([(
+                        "a".to_string(),
+                        WorkflowNode::Subagent(SubagentNode {
+                            base: NodeBase {
+                                description: None,
+                                depends: None,
+                                human_gate: None,
+                                retry_policy: None,
+                                timeout_ms: None,
+                                max_output_bytes: None,
+                                output_schema: None,
+                                unsafe_allow_ungated: None,
+                            },
+                            bot: "bot-a".to_string(),
+                            prompt: Value::String("hello".to_string()),
+                            working_dir: None,
+                            model_overrides: None,
+                            tool_policy: None,
+                        }),
+                    )]),
+                },
+                runs_base_dir: paths.workflow_runs_dir(),
+            };
+            let mut hooks = FakeHooks;
+            let result = run_loop(&mut rt, &mut hooks, 5, 1).await.unwrap();
+            assert_eq!(result.reason, RunLoopStopReason::Terminal);
+        }
+
+        // Second run_loop: should be idempotent (no duplicate runCanceled).
+        let run_canceled_count_before: usize;
+        {
+            let log = EventLog::new(run_id, paths.workflow_runs_dir()).unwrap();
+            let events = log.read_all().unwrap();
+            run_canceled_count_before = events
+                .iter()
+                .filter(|e| e.event_type == "runCanceled")
+                .count();
+            assert_eq!(
+                run_canceled_count_before, 1,
+                "should have exactly 1 runCanceled after first propagation"
+            );
+        }
+
+        {
+            let mut rt = WorkflowRuntimeContext {
+                log: EventLog::new(run_id, paths.workflow_runs_dir()).unwrap(),
+                def: WorkflowDefinition {
+                    workflow_id: "flow-cancel-idem".to_string(),
+                    version: 1,
+                    params: None,
+                    defaults: None,
+                    nodes: BTreeMap::from([(
+                        "a".to_string(),
+                        WorkflowNode::Subagent(SubagentNode {
+                            base: NodeBase {
+                                description: None,
+                                depends: None,
+                                human_gate: None,
+                                retry_policy: None,
+                                timeout_ms: None,
+                                max_output_bytes: None,
+                                output_schema: None,
+                                unsafe_allow_ungated: None,
+                            },
+                            bot: "bot-a".to_string(),
+                            prompt: Value::String("hello".to_string()),
+                            working_dir: None,
+                            model_overrides: None,
+                            tool_policy: None,
+                        }),
+                    )]),
+                },
+                runs_base_dir: paths.workflow_runs_dir(),
+            };
+            let mut hooks = FakeHooks;
+            let _ = run_loop(&mut rt, &mut hooks, 5, 1).await.unwrap();
+        }
+
+        let log = EventLog::new(run_id, paths.workflow_runs_dir()).unwrap();
+        let events = log.read_all().unwrap();
+        let run_canceled_count_after = events
+            .iter()
+            .filter(|e| e.event_type == "runCanceled")
+            .count();
+        assert_eq!(
+            run_canceled_count_after, 1,
+            "second run_loop should not produce duplicate runCanceled"
         );
 
         let _ = fs::remove_dir_all(&run_dir);

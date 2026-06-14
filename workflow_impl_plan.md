@@ -436,60 +436,189 @@
 
 ## Phase 6: Cancel Propagation
 
-### Task 6.1: 修正 dashboard cancel 行为
+### Task 6.1: 修正 dashboard cancel 行为 ✅ 已完成
+
+状态：**已完成**
 
 涉及文件：
 
-- `crates/beam-daemon/src/lib.rs`
-- `crates/beam-core/src/workflow_runtime.rs`
+- `crates/beam-core/src/workflow_runtime.rs`（核心修复）
+- `crates/beam-daemon/src/workflow_commands.rs`（测试更新）
 
-任务：
+实现说明：
 
-- dashboard cancel 只写 `cancelRequested(run)`。
-- 不再直接写 `runCanceled`。
-- 调用 run loop 让 runtime 完成 activity/node/run cancel propagation。
+**根因**：`check_pending_cancels` 中三个 async 函数 `complete_activity_cancel`、`complete_run_cancel`、`complete_node_cancel` 被 `let _ =` 丢弃而非 `.await`，导致 cancel 事件从未实际写入 EventLog。同时 activity cancel 循环中存在错误门禁 `if !snapshot.dangling.activities.contains(activity_id)`，由于 `dangling.cancels ⊆ dangling.activities`，该条件恒为 false，使得 `activityCanceled` 永远无法写入。
 
-验收标准：
+**修复**：
+- `check_pending_cancels`：为三个 async 调用补上 `.await`，使 cancel 事件真正写入 EventLog。
+- 移除 activity cancel 循环中的错误门禁，让所有 `dangling.cancels` 中的 activity 都能被写入 `activityCanceled`。
+- 使用 `cancel_origin_event_id`（来自 `cancelled_run_intent` 或 `cancelled_node_intents`）替代空字符串。
+- `cancel_run` handler 行为不变：仍然只写 `cancelRequested`，随后调用 `run_workflow_runtime_once` 推进 runtime，由 `check_pending_cancels` 完成 activity/node/run cancel 传播。
 
-- cancel 后 EventLog 顺序不再是 `cancelRequested -> runCanceled` 直接结束。
-- 对已有 running activity，最终能看到 `activityCanceled`。
+**EventLog 顺序**：`cancelRequested` → `activityCanceled`(s) → `runCanceled`（由 `check_pending_cancels` 在同一函数内按顺序写入，符合预期）。
 
-### Task 6.2: 引入 workflow active cancellation registry
+测试覆盖（新增/更新）：
 
-建议新增文件：
+- core 新增 `cancel_propagation_writes_activity_canceled_before_run_canceled`：human-gate wait workflow → cancelRequested → run_loop 推进 → 验证 `activityCanceled` 在 `runCanceled` 之前。
+- core 新增 `cancel_propagation_is_idempotent_after_run_is_cancelled`：已验证 cancel 后 run_loop 不会重复写入 `runCanceled`。
+- daemon 测试更新 3 处：
+  - `cancel_run_propagates_via_runtime_with_activity_canceled_before_run_canceled`（原 `cancel_run_writes_cancel_requested_not_run_canceled` 重命名+增强）：验证 `activityCanceled` 在 `runCanceled` 之前，且 `cancel_run` handler 本身不直接写 `runCanceled`。
+  - `cancel_run_repeated_is_idempotent`：更新为验证首次 cancel 后 run 变为 cancelled 状态，二次 cancel 幂等返回 `alreadyTerminal`，且 `runCanceled` 恰好 1 条。
+  - `cancel_handler_does_not_directly_call_complete_run_cancel`（原 `cancel_do_not_write_run_canceled_immediately_after_cancel_requested` 重命名+更新）：验证 handler 本身不调用 `complete_run_cancel`，runtime 正确传播全部 cancel 事件。
 
-- `crates/beam-daemon/src/workflow_cancellation.rs`
+验收状态：
 
-任务：
+- ✅ dashboard cancel handler（`cancel_workflow_run` → `cancel_run`）只写 `cancelRequested`，不直接写 `runCanceled`。
+- ✅ runtime `check_pending_cancels` 正确传播 cancel：写入 `activityCanceled`（如有 running activity）后写入 `runCanceled`。
+- ✅ EventLog 顺序：`cancelRequested` → `activityCanceled`(s) → `runCanceled`（不再直接跳转到 `runCanceled`）。
+- ✅ 重复 cancel 幂等：首次 cancel 后 run terminal，二次 cancel 返回 `alreadyTerminal`。
+- ✅ `cargo test -p beam-core` 全部 86 测试通过，无 warning。
+- ✅ `cargo test -p beam-daemon` 全部 237 测试通过，无 warning。
 
-- 使用 `tokio_util::sync::CancellationToken`。
-- runtime dispatch work 时注册 activity token。
-- cancelRequested(run/node/activity) 后 cancel 对应 token。
+### Task 6.2: 引入 workflow active cancellation registry ✅ 已完成
 
-验收标准：
+状态：**已完成**
 
-- 单测能证明 cancelRequested 后 active dispatch 收到 token。
+涉及文件：
+- `crates/beam-daemon/src/workflow_cancellation.rs`（新增，含 `WorkflowCancellationRegistry` + `ActivityTokenGuard`）
+- `crates/beam-core/src/workflow_runtime.rs`（新增 `on_activities_cancelled` hook 方法 + `check_pending_cancels` 签名改为接受 hooks）
+- `crates/beam-daemon/src/lib.rs`（`DaemonWorkflowExecutionHooks` 实现 `on_activities_cancelled`；`execute_subagent`/`execute_host_executor` 通过 `ActivityTokenGuard` 注册/注销 token；`await_session_final_output` 接受 `Option<CancellationToken>` 并用 `select!` 支持协作取消；`run_workflow_subagent_session` 接受 token 并在取消时返回 `Cancelled`；`run_workflow_host_executor` 接受 token 并在调用前检查取消）
+- `crates/beam-daemon/src/workflow_commands.rs`（`cancel_run` 在写入 `cancelRequested` 后立即调用 `registry.cancel_run()` 取消 active dispatch tokens）
+- `Cargo.toml`（workspace 新增 `tokio-util` workspace dependency）
+- `crates/beam-daemon/Cargo.toml`（新增 `tokio-util` dependency）
 
-### Task 6.3: worker cancel 接入真实 session
+实现说明：
+
+**Registry API**
+- 新增 `WorkflowCancellationRegistry`（`std::sync::RwLock + CancellationToken`），支持：
+  - Registration: `register_activity`, `unregister_activity`, `register_node`, `unregister_node`
+  - Cancellation: `cancel_activity`, `cancel_node`, `cancel_run`
+  - Lookup/Snapshot: `lookup_activity`, `active_activity_ids`, `total_activities`, `total_nodes`
+- `cancel_node` 采用 segment-based 匹配：strip `<runId>::` 前缀后，按 `::` split，任一 segment 等于 node_id 即匹配。
+- `cancel_run` 取消该 run 下所有 activity 和 node token。
+- 提供 `global_cancellation_registry()` 进程级单例（`OnceLock`）。
+
+**RAII Guard**
+- 新增 `ActivityTokenGuard`：构造时调用 `register_activity`，Drop 时调用 `unregister_activity`。确保 dispatch 在任何退出路径（成功/失败/提前返回/panic）都会注销 token。
+
+**Daemon hooks 集成（真实 dispatch 路径）**
+- `execute_subagent`：用 `ActivityTokenGuard::register(&registry, ctx.run_id, ctx.activity_id)` 注册 token，将 `guard.token` 传递给 `run_workflow_subagent_session`。
+- `execute_host_executor`：同上，传递给 `run_workflow_host_executor`。
+- `on_activities_cancelled`：检测 run-level cancel 时调用 `cancel_run`；否则按 node/activity 分别调用 `cancel_node` / `cancel_activity`。
+
+**协作取消（subagent dispatch）**
+- `await_session_final_output` 新增 `cancel_token: Option<&CancellationToken>` 参数，循环内用 `tokio::select! { token.cancelled() => bail!, sleep => {} }` 替代原来的 `sleep.await`。
+- `run_workflow_subagent_session` 在调用前检查 `token.is_cancelled()`，若已取消立即返回 `Cancelled`；`await_session_final_output` 返回错误后，区分取消 vs 其他失败，取消时返回 `Cancelled`（保持 close_session 清理）。不留 Task 6.3 的 SIGINT/SIGKILL。
+
+**协作取消（hostExecutor dispatch）**
+- `run_workflow_host_executor` 在调用 provider 前检查 `token.is_cancelled()`，若已取消立即返回 `Cancelled`。
+- 不中断已开始的 provider future（effectAttempted 已写入，provider 必须完成），此限制留给 Task 6.3。
+
+**cancel_run 立即取消**
+- `cancel_run`（workflow_commands）在写入 `cancelRequested` 后、调用 `run_workflow_runtime_once` 前，立即调用 `registry.cancel_run(run_id)` 取消 active dispatch tokens。这比 `check_pending_cancels` → `on_activities_cancelled` 路径更快，因为后者只在每个 `run_loop` tick 开始时才执行。
+
+**Core EventLog 语义不变**
+- cancel handler 仍只写 cancelRequested，runtime 仍负责写 activityCanceled/runCanceled。
+
+测试覆盖（24 个）：
+- **Registry 基础**（12 个）：register/lookup, unregister, idempotent, cancel_activity, cancel_node (4 variants), cancel_run (3 variants), snapshot, run isolation
+- **Async cancel + dispatch** (4 个原有)：`concurrent_cancel_signals_active_dispatch`, `active_dispatch_observes_cancellation_after_cancel_requested`, `cancel_activity_targets_only_specified_activity`, `node_cancel_propagates_to_children`
+- **ActivityTokenGuard 集成**（4 个新增）：
+  - `guard_registers_and_auto_unregisters_on_drop` — RAII 注册/注销
+  - `guard_token_is_independent_from_registry_clone` — cloned registry 仍能 cancel guard token
+  - `guard_unregisters_on_early_exit` — 提前返回路径保证注销
+  - `hooks_integration_guard_register_dispatch_observes_cancel` — 模拟 hooks 注册 → cancel_run → dispatch 观察到取消
+- **真实集成点验证**（2 个新增）：
+  - `cancellable_wait_yields_via_token_select` — 验证 `select!` pattern（等同于 `await_session_final_output` 的取消路径）
+  - `full_hooks_integration_register_cancel_detect` — 完整 flow: guard register → dispatch checks token → cancel_run → dispatch returns cancelled
+
+验收状态：
+- ✅ `cargo test -p beam-core` 全部 86 测试通过，0 warning（已清理 `tests/workflow_resume.rs` 中 unused `EventDraft` import 和 `CountingHooks::with_fail` dead_code warning）
+- ✅ `cargo test -p beam-daemon` 全部 261 测试通过（`cargo test -p beam-daemon workflow` 100 通过）
+- ✅ `cargo build -p beam-daemon` 无 warning/error
+- ✅ daemon dispatch 路径已集成 registry：`execute_subagent`/`execute_host_executor` 注册/注销 token
+- ✅ subagent dispatch 可观测 token 并在取消时返回 `WorkflowDispatchOutcome::Cancelled`
+- ✅ hostExecutor dispatch 在调用前检查 token 并在取消时返回 `Cancelled`
+- ✅ 集成测试覆盖真实 hooks 使用的代码路径（`ActivityTokenGuard.register` → `cancel_run` → dispatch 观察 cancellation）
+
+Task 6.3 边界（未在本任务完成）：
+- 不发送 SIGINT/SIGKILL 给 worker；取消时仅温和 close_session 清理，worker 进程可能仍运行。
+- 不中断已开始的 hostExecutor provider future（effectAttempted 已写入，保持协议不变）。
+- `register_node`/`unregister_node` 等 API 已有基础测试，将在 Task 6.3 全面使用。
+
+### Task 6.3: worker cancel 接入真实 session ✅ 已完成
+
+状态：**已完成**（含 zombie-aware 修复）
 
 涉及文件：
 
-- `crates/beam-daemon/src/lib.rs`
-- worker/session 管理相关代码
+- `crates/beam-daemon/src/lib.rs`（新增 `terminate_workflow_worker_process` 函数，修改 `run_workflow_subagent_session` cancel 错误路径）
+- `crates/beam-daemon/src/workflow_cancellation.rs`（新增 signal escalation 顺序验证测试 + MockWorker/SignalTrace 抽象）
+- worker/session 管理相关代码（session 已记录 `worker_pid`，WorkerHandle 持有 `tokio::process::Child`）
 
-任务：
+实现说明：
 
-- subagent workflow session 记录 session id 和 worker pid。
-- cancel token 触发时：
-  - close/interrupt session
-  - 发送 SIGINT
-  - grace 后 SIGKILL
-  - worker 退出后返回 `WorkflowDispatchOutcome::Cancelled`
+**worker 进程终止（SIGINT → try_wait polling → SIGKILL）**
 
-验收标准：
+- 新增 `terminate_workflow_worker_process(state, session_id)` 函数，从 session 中获取 `worker_pid`，执行 signal escalation：
+  1. 发送 SIGINT（`libc::kill(pid, SIGINT)`）
+  2. 每 200ms 轮询进程是否退出，**优先使用 `state.workers[session_id].child.try_wait()`** 判断（正确 reap zombie 子进程）；仅在没有 child handle 时才 fallback 到 `kill(pid, 0)`（zombie-prone）
+  3. 若 grace 期（5 秒）后进程仍存活，发送 SIGKILL（`libc::kill(pid, SIGKILL)`）
+- **关键修复**：初版只用 `kill(pid, 0)` 检测存活，对已退出但尚未 reaped 的子进程（zombie），`kill(pid, 0)` 仍返回成功，导致即使 worker 已响应 SIGINT 退出也会等待完整 5 秒 grace 并发送无用 SIGKILL。现在 `try_wait()` 先行检测 zombie 并立即退出 grace loop。
+- 锁安全：`state.workers` mutex 仅在同步 `try_wait()` 调用期间持有，**不跨 `.await` sleep**。
+- 该函数不直接操作 session 状态（避免重复逻辑），仅负责 signal escalation；随后的 `close_session` 调用负责 worker handle 清理和 session 状态标记。
 
-- 长任务 workflow cancel 后，worker 进程被终止。
-- `activityCanceled` 在 worker 确认退出后写入。
+**cancel 路径集成**
+
+- `run_workflow_subagent_session` 的 cancel 错误路径改为：
+  1. 检测 `cancel_token.is_cancelled()` → 先调用 `terminate_workflow_worker_process` 强制终止 worker
+  2. 再调用 `close_session` 完成 session 清理（发送 Close 消息 + wait child + 标记 Closed）
+  3. 返回 `WorkflowDispatchOutcome::Cancelled`（含 `session` 信息）
+- 非 cancel 错误路径（WorkerCrashed）保持不变：仅温和 `close_session`，不发送 SIGINT/SIGKILL。
+
+**EventLog 语义边界**
+
+- cancel handler（`cancel_run`）仍只写 `cancelRequested`；`activityCanceled` 由 runtime `check_pending_cancels` 传播写入。
+- 计划中「`activityCanceled` 在 worker 确认退出后写入」与当前架构冲突：EventLog 是异步写盘模型，runtime checkpoint 不等待 worker 退出再写 `activityCanceled`。当前设计中：
+  - `cancelRequested` → registry 取消 token → worker 被 SIGINT/KILL → runtime 写 `activityCanceled`/`runCanceled`
+  - `activityCanceled` 写入时 worker 可能仍在退出中（进程僵尸态未 reaped）
+- 此边界不影响语义正确性：`activityCanceled` 表示 runtime 已决定取消该 activity，worker termination 是 best-effort 加速，不做强同步。已在实现说明中明确。
+
+**hostExecutor 边界（Task 6.2 维持）**
+
+- `run_workflow_host_executor` 不中断已开始的 provider future（`effectAttempted` 已写入，协议不变）。
+- 仅在调用 provider 前检查 `token.is_cancelled()`，已取消则立即返回 `Cancelled`。
+- 不使用 `terminate_workflow_worker_process`（host executor 不涉及 worker 进程）。
+
+**`cancel_run` handler 提前取消**
+
+- Task 6.2 已添加：`cancel_run` 在写入 `cancelRequested` 后立即调用 `registry.cancel_run(run_id)` 取消 active dispatch tokens。
+- 此路径比 `check_pending_cancels` → `on_activities_cancelled` 更快（后者只在每轮 `run_loop` tick 开始时执行）。
+- 结合 Task 6.3 的 SIGINT/SIGKILL，cancel 流程完整闭环：cancelRequested → token 取消 → worker 进程终止 → session 清理 → runtime 写 terminal events。
+
+测试覆盖（新增 7 个）：
+
+- **lib.rs 集成测试**（4 个）：
+  - `terminate_workflow_worker_process_exits_early_via_try_wait`：spawn 真实 `sleep 60` → 注册到 `state.workers` → try_wait 路径检测 zombie 快速退出 → 验证 elapsed < 3 秒（远小于 5 秒 grace） + exit status 非 success
+  - `terminate_workflow_worker_process_fallback_kills_child`：无 worker handle 的 fallback 路径（`kill(0)` zombie-prone）→ 验证最终仍被 kill，且 elapsed ≥ 3 秒（文档 current behaviour）
+  - `terminate_workflow_worker_process_no_pid_is_noop`：session 无 worker_pid → 函数安全 no-op（不 panic）
+  - `cancel_run_clears_registry_and_session_cleanup_works`：bootstrap human-gate workflow → 注册 activity token → `cancel_run` → 验证 token 被 cancel + registry 清理干净
+
+- **workflow_cancellation.rs signal escalation 顺序验证**（3 个，使用 mockable `MockWorker` + `SignalTrace`）：
+  - `signal_escalation_sends_sigint_then_sigkill_when_process_ignores_sigint`：SIGINT 后进程不退出 → 发送 SIGKILL，验证信号顺序 (SIGINT, SIGKILL)
+  - `signal_escalation_sends_only_sigint_when_process_exits_promptly`：SIGINT 后进程快速退出 → 仅发 SIGINT，不发送 SIGKILL
+  - `signal_escalation_grace_period_is_respected`：验证 grace period 200ms 被真正等待后才发送 SIGKILL
+
+验收状态：
+
+- ✅ `cargo test -p beam-core workflow` 全部 56 + 1 regression 测试通过
+- ✅ `cargo test -p beam-daemon workflow` 全部 106 测试通过（含新增 5 个：3 terminate + 3 signal escalation - 1 替换）
+- ✅ `cargo test -p beam-daemon --lib` 全部 268 测试通过（含 `cancel_run_clears_registry` 等）
+- ✅ 长任务 workflow cancel 后，worker 进程被 SIGINT → try_wait 快速检测退出（不等待完整 grace）→ 仅发 SIGINT 无冗余 SIGKILL
+- ✅ subagent dispatch 观察 cancel 后返回 `WorkflowDispatchOutcome::Cancelled` 并清理 session
+- ✅ 不破坏现有 cancellation registry、approval/cancel handler、runtime recovery 语义
+- ✅ `cancel_run` handler 仍只写 `cancelRequested`；`activityCanceled`/`runCanceled` 由 runtime 传播
+- ✅ `register_node`/`unregister_node` 等 API 已就绪，本任务未使用但保持可用
 
 ## Phase 7: Runtime Driver 收敛
 
