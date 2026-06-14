@@ -622,26 +622,43 @@ Task 6.3 边界（未在本任务完成）：
 
 ## Phase 7: Runtime Driver 收敛
 
-### Task 7.1: 抽出 workflow runtime driver
+### Task 7.1: 抽出 workflow runtime driver ✅ 已完成
+
+状态：**已完成**
 
 建议新增文件：
 
-- `crates/beam-daemon/src/workflow_runtime_driver.rs`
+- `crates/beam-daemon/src/workflow_runtime_driver.rs` ✅
+
+实现说明：
+
+- 新增 `crates/beam-daemon/src/workflow_runtime_driver.rs`，包含：
+  - `pub(crate) async fn run(state, run_id, workflow_json)` — 原 `run_workflow_runtime_once` 的完整实现（parse definition → create EventLog → create WorkflowRuntimeContext → create DaemonWorkflowExecutionHooks → spawn background watcher → call run_loop → fanout approval cards）
+  - `async fn send_progress_card(state, run_id, workflow_id)` — 从 `lib.rs` 移入的 progress card 发送/更新逻辑（读取 snapshot → 构建 card → 读取 chat-binding → 发送或更新 Lark 卡片）
+  - `const MAX_TICKS: usize = 128` — 从 `lib.rs` 移入，替代原 `WORKFLOW_RUNTIME_MAX_TICKS`
+- `lib.rs` 修改：
+  - `mod workflow_runtime_driver` 声明
+  - `run_workflow_runtime_once` 改为薄 wrapper：直接调用 `workflow_runtime_driver::run(state, run_id, workflow_json).await`
+  - 移除 `WORKFLOW_RUNTIME_MAX_TICKS` 常量、`send_workflow_progress_card` 函数
+- 调用点无一变更：`bootstrap_and_start_workflow_run`（trigger）、dashboard resume、daemon 测试均通过原有 `run_workflow_runtime_once` wrapper 继续工作
+- 无新依赖、无循环依赖、无重复逻辑
 
 任务：
 
-- 把 `run_workflow_runtime_once` 从 `lib.rs` 移出。
-- driver 负责：
-  - load definition
-  - create runtime context
-  - attach event fanout
-  - send/update progress card
-  - call `run_loop`
+- ✅ 把 `run_workflow_runtime_once` 从 `lib.rs` 移出。
+- ✅ driver 负责：load definition、create runtime context、attach event fanout、send/update progress card、call `run_loop`。
 
 验收标准：
 
-- `lib.rs` 中 workflow runtime 相关大段逻辑减少。
-- trigger、approval、cancel、cold attach 都调用同一个 driver。
+- ✅ `lib.rs` 中 workflow runtime 相关大段逻辑减少（移除约 90 行实现代码）。
+- ✅ trigger、approval、cancel、cold attach 都调用同一个 driver（通过 `run_workflow_runtime_once` wrapper）。
+
+测试结果：
+
+- ✅ `cargo test -p beam-daemon workflow`：106 passed, 0 failed
+- ✅ `cargo test -p beam-daemon --lib`：268 passed, 0 failed
+- ✅ `cargo test -p beam-core workflow`：56 passed, 0 failed
+- ✅ `cargo test --workspace`：全部通过
 
 ### Task 7.2: cold attach 使用统一 recovery run loop
 
