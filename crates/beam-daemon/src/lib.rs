@@ -43,10 +43,10 @@ use beam_core::{
     SessionGroup, SessionInputRequest, SessionLocateInfo, SessionScope, SessionStatus,
     SessionSummary, TalkEvaluation, TermActionKey, TuiPromptOption, WaitResolution, WorkerToDaemon,
     WorkflowActor, WorkflowDispatchOutcome, WorkflowDispatchRun, WorkflowDispatchSession,
-    WorkflowExecutionHooks, WorkflowNode, WorkflowOutputRef, WorkflowRuntimeContext,
+    WorkflowExecutionHooks, WorkflowNode, WorkflowOutputRef,
     bootstrap_workflow_run, can_operate, evaluate_talk, event_seq_from_id, grant_restricted,
     infer_run_status, mint_workflow_run_id, parse_workflow_definition, parse_workflow_output,
-    read_event_window, read_run_events_pure, read_run_snapshot, run_loop, scan_cold_workflow_runs,
+    read_event_window, read_run_events_pure, read_run_snapshot, scan_cold_workflow_runs,
     with_workflow_output_protocol,
 };
 use chrono::Utc;
@@ -11361,21 +11361,9 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         state: AppState,
         run: ColdWorkflowRun,
     ) -> Result<()> {
-        let log = EventLog::new(run.run_id.clone(), state.paths.workflow_runs_dir())?;
-        let mut rt = WorkflowRuntimeContext {
-            log,
-            def: run.def.clone(),
-            runs_base_dir: state.paths.workflow_runs_dir(),
-        };
-        let mut hooks = DaemonWorkflowExecutionHooks {
-            state: state.clone(),
-        };
-
-        let result = run_loop(&mut rt, &mut hooks, 100, 4).await?;
-        info!(
-            "workflow cold-attach {} result: reason={:?} ticks={}",
-            run.run_id, result.reason, result.ticks
-        );
+        let workflow_json =
+            serde_json::to_string(&run.def).context("failed to serialize workflow definition")?;
+        workflow_runtime_driver::run(&state, &run.run_id, &workflow_json).await;
         Ok(())
     }
 
@@ -18562,6 +18550,262 @@ mod tests {
         // Token should be cancelled and registry cleaned up.
         assert!(token.is_cancelled());
         assert_eq!(reg.total_activities(), 0);
+
+        maybe_remove_dir(&paths.root().to_path_buf());
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 7.2: cold attach 使用统一 recovery run loop
+    // -----------------------------------------------------------------------
+
+    /// Verifies that cold scan discovers non-terminal runs and skips terminal
+    /// (succeeded/failed/cancelled) runs, even when both have chat bindings.
+    #[tokio::test]
+    async fn cold_scan_discovers_non_terminal_and_skips_terminal_runs() {
+        use beam_core::{
+            BootstrapWorkflowRunInput, EventDraft, EventLog, WorkflowActor,
+            bootstrap_workflow_run, scan_cold_workflow_runs,
+        };
+
+        let paths = temp_paths("cold-scan-disc");
+        maybe_remove_dir(&paths.root().to_path_buf());
+
+        let lark_app_id = "app-cold-scan";
+        let def = r#"{"workflowId":"flow-cs","version":1,"nodes":{"a":{"type":"subagent","bot":"bot","prompt":"hello"}}}"#;
+        let params = std::collections::BTreeMap::new();
+        let binding = beam_core::RunChatBinding {
+            chat_id: "chat-1".to_string(),
+            lark_app_id: lark_app_id.to_string(),
+        };
+
+        // Non-terminal run (no terminal event written yet — just bootstrapped).
+        bootstrap_workflow_run(
+            &paths,
+            BootstrapWorkflowRunInput {
+                run_id: "run-nonterm",
+                workflow_json: def,
+                expected_workflow_id: Some("flow-cs"),
+                params: &params,
+                initiator: "test",
+                chat_binding: Some(binding.clone()),
+            },
+        )
+        .expect("bootstrap nonterm");
+
+        // Terminal run — write runSucceeded manually.
+        bootstrap_workflow_run(
+            &paths,
+            BootstrapWorkflowRunInput {
+                run_id: "run-term",
+                workflow_json: def,
+                expected_workflow_id: Some("flow-cs"),
+                params: &params,
+                initiator: "test",
+                chat_binding: Some(binding),
+            },
+        )
+        .expect("bootstrap term");
+        {
+            let mut log = EventLog::new("run-term", paths.workflow_runs_dir()).unwrap();
+            log.append(EventDraft {
+                event_type: "runSucceeded".to_string(),
+                actor: WorkflowActor::Scheduler,
+                payload: serde_json::json!({}),
+                timestamp: None,
+                payload_hash: None,
+            })
+            .unwrap();
+        }
+
+        let (runs, stats) = scan_cold_workflow_runs(&paths, lark_app_id).await.unwrap();
+        assert_eq!(stats.discovered, 1, "only the non-terminal run should be discovered");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, "run-nonterm");
+        assert!(stats.skipped.is_empty(), "no runs should be skipped with errors");
+
+        maybe_remove_dir(&paths.root().to_path_buf());
+    }
+
+    /// Verifies that cold-attaching a workflow with an open human-gate wait
+    /// does NOT terminalize it — the unified driver / run_loop recovery
+    /// correctly returns AwaitingWait and leaves the wait dangling.
+    #[tokio::test]
+    async fn cold_attach_open_human_gate_wait_not_terminalized() {
+        use beam_core::{
+            BootstrapWorkflowRunInput, RunStatus, bootstrap_workflow_run, read_run_snapshot,
+        };
+
+        let paths = temp_paths("cold-attach-open");
+        maybe_remove_dir(&paths.root().to_path_buf());
+        let state = make_state(paths.clone(), HashMap::new());
+        let run_id = "run-cold-open";
+
+        // Human-gate workflow: will create a wait and stay in AwaitingWait.
+        let def = r#"{"workflowId":"flow-co","version":1,"nodes":{"gate":{"type":"hostExecutor","executor":"beam-shell","input":{"command":"echo hi"},"humanGate":{"stage":"approve","prompt":"Approve?"}}}}"#;
+        let binding = beam_core::RunChatBinding {
+            chat_id: "oc_test".to_string(),
+            lark_app_id: "app_test".to_string(),
+        };
+        bootstrap_workflow_run(
+            &paths,
+            BootstrapWorkflowRunInput {
+                run_id,
+                workflow_json: def,
+                expected_workflow_id: Some("flow-co"),
+                params: &std::collections::BTreeMap::new(),
+                initiator: "test",
+                chat_binding: Some(binding),
+            },
+        )
+        .expect("bootstrap");
+
+        // Advance once to create the wait.
+        crate::run_workflow_runtime_once(&state, run_id, def).await;
+
+        // Verify we have an open wait (not terminal).
+        let sn = read_run_snapshot(&paths.workflow_run_dir(run_id)).await.unwrap().unwrap();
+        assert!(!sn.dangling.waits.is_empty(), "should have an open wait");
+        assert!(
+            !matches!(sn.run.status, RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled),
+            "run should NOT be terminal"
+        );
+
+        // Simulate cold attach: call the unified driver again.
+        // The driver calls run_loop which has built-in recovery; it should
+        // detect the open wait and return AwaitingWait, NOT terminalize.
+        workflow_runtime_driver::run(&state, run_id, def).await;
+
+        // After cold attach, the wait should still be open and the run
+        // should still be non-terminal.
+        let sn2 = read_run_snapshot(&paths.workflow_run_dir(run_id)).await.unwrap().unwrap();
+        assert!(
+            !sn2.dangling.waits.is_empty(),
+            "open wait should still be dangling after cold attach"
+        );
+        assert!(
+            !matches!(sn2.run.status, RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled),
+            "run should NOT be terminal after cold attach with open wait"
+        );
+
+        maybe_remove_dir(&paths.root().to_path_buf());
+    }
+
+    /// Verifies that cold-attaching a workflow whose wait was resolved but
+    /// whose terminal event was never written (e.g. crash after resolution)
+    /// correctly materializes the terminal via the unified run_loop recovery.
+    #[tokio::test]
+    async fn cold_attach_recovery_materializes_resolved_wait_terminal() {
+        use beam_core::{
+            BootstrapWorkflowRunInput, EventDraft, EventLog, WorkflowActor,
+            bootstrap_workflow_run,
+        };
+
+        let paths = temp_paths("cold-attach-rec");
+        maybe_remove_dir(&paths.root().to_path_buf());
+        let state = make_state(paths.clone(), HashMap::new());
+        let run_id = "run-cold-rec";
+
+        // Single-node human-gate workflow.
+        let def = r#"{"workflowId":"flow-cr","version":1,"nodes":{"gate":{"type":"hostExecutor","executor":"beam-shell","input":{"command":"echo hi"},"humanGate":{"stage":"approve","prompt":"OK?"}}}}"#;
+        let binding = beam_core::RunChatBinding {
+            chat_id: "oc_test".to_string(),
+            lark_app_id: "app_test".to_string(),
+        };
+        bootstrap_workflow_run(
+            &paths,
+            BootstrapWorkflowRunInput {
+                run_id,
+                workflow_json: def,
+                expected_workflow_id: Some("flow-cr"),
+                params: &std::collections::BTreeMap::new(),
+                initiator: "test",
+                chat_binding: Some(binding),
+            },
+        )
+        .expect("bootstrap");
+
+        // Advance to create the wait, then read the wait info.
+        crate::run_workflow_runtime_once(&state, run_id, def).await;
+
+        // Grab the activity_id from the wait, and the attempt_id from the
+        // activity's latest attempt, so we can craft a valid resolution event.
+        let sn = beam_core::read_run_snapshot(&paths.workflow_run_dir(run_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let activity_id = sn
+            .dangling
+            .waits
+            .first()
+            .expect("should have a wait")
+            .clone();
+        // Sanity-check: the activity exists and has an attempt.
+        let _activity = sn
+            .activities
+            .iter()
+            .find(|a| a.activity_id == activity_id)
+            .expect("should find the waiting activity");
+        assert!(
+            !_activity.attempts.is_empty(),
+            "activity should have at least one attempt"
+        );
+
+        // Simulate a crash scenario: write waitResolved (resolution approved)
+        // but NOT activitySucceeded (terminal).  This leaves the wait in a
+        // "resolved but no terminal" dangling state.
+        {
+            let mut log = EventLog::new(run_id, paths.workflow_runs_dir()).unwrap();
+            log.append(EventDraft {
+                event_type: "waitResolved".to_string(),
+                actor: WorkflowActor::Human,
+                payload: serde_json::json!({
+                    "activityId": activity_id,
+                    "resolution": "approved",
+                    "by": "test_user",
+                    "comment": "LGTM",
+                }),
+                timestamp: None,
+                payload_hash: None,
+            })
+            .unwrap();
+        }
+
+        // Verify the snapshot now has a wait resolution but no terminal for
+        // the activity — i.e. `dangling.wait_resolutions` is non-empty.
+        let sn_pre = beam_core::read_run_snapshot(&paths.workflow_run_dir(run_id)).await.unwrap().unwrap();
+        assert!(
+            sn_pre.dangling.waits.is_empty(),
+            "after resolution, waits should be cleared"
+        );
+        assert!(
+            !sn_pre.dangling.wait_resolutions.is_empty(),
+            "should have dangling wait resolutions (resolved but no terminal)"
+        );
+
+        // Simulate cold attach: the unified driver will call run_loop, and
+        // the built-in wait-resolution recovery phase should materialize the
+        // activitySucceeded terminal.
+        workflow_runtime_driver::run(&state, run_id, def).await;
+
+        // After recovery, the wait resolution should be cleared and the
+        // activity should have been terminalized.
+        let sn_post = beam_core::read_run_snapshot(&paths.workflow_run_dir(run_id)).await.unwrap().unwrap();
+        assert!(
+            sn_post.dangling.wait_resolutions.is_empty(),
+            "after recovery, dangling wait resolutions should be cleared"
+        );
+        assert!(
+            sn_post.dangling.waits.is_empty(),
+            "no waits should remain"
+        );
+
+        // The workflow should have progressed — since this is a single-node
+        // workflow and the node has now succeeded, the run should be terminal.
+        let terminal = matches!(
+            sn_post.run.status,
+            beam_core::RunStatus::Succeeded | beam_core::RunStatus::Failed | beam_core::RunStatus::Cancelled
+        );
+        assert!(terminal, "run should be terminal after recovery, got {:?}", sn_post.run.status);
 
         maybe_remove_dir(&paths.root().to_path_buf());
     }

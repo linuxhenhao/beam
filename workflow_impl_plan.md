@@ -660,21 +660,37 @@ Task 6.3 边界（未在本任务完成）：
 - ✅ `cargo test -p beam-core workflow`：56 passed, 0 failed
 - ✅ `cargo test --workspace`：全部通过
 
-### Task 7.2: cold attach 使用统一 recovery run loop
+### Task 7.2: cold attach 使用统一 recovery run loop ✅ 已完成
+
+状态：**已完成**
 
 涉及文件：
 
-- `crates/beam-daemon/src/lib.rs`
-- `crates/beam-core/src/workflow_cold_scan.rs`
+- `crates/beam-daemon/src/lib.rs`（`drive_workflow_run_after_cold_attach` 改为调用 `workflow_runtime_driver::run`）
+- `crates/beam-core/src/workflow_cold_scan.rs`（无修改，冷扫描逻辑不变）
 
-任务：
+实现说明：
 
-- cold attach 后调用统一 driver。
-- 不写特殊恢复逻辑。
+- `drive_workflow_run_after_cold_attach` 原来直接创建 `EventLog`、`WorkflowRuntimeContext`、`DaemonWorkflowExecutionHooks` 后调用 `run_loop`，缺少 progress card 发送、background watcher 和 approval card fanout。
+- 现改为序列化 `run.def` 为 JSON 后调用 `workflow_runtime_driver::run`（即统一的 driver 入口），与原 `run_workflow_runtime_once` wrapper 共享同一代码路径。
+- 移除了 `lib.rs` 中仅被 cold attach 使用的 `WorkflowRuntimeContext` 和 `run_loop` 两个 import（这些符号已由 driver 内部自行导入）。
+- 无 provider-specific 特殊恢复逻辑：driver 内部调用 `run_loop`，其内置的 recovery 阶段（Task 4.1 effect recovery + Task 4.2 wait resolution recovery）自动处理 dangling effects 和 resolved waits。
 
-验收标准：
+测试覆盖（3 个新增）：
 
-- daemon restart 后 non-terminal workflow 可以继续等待、恢复或推进。
+- `cold_scan_discovers_non_terminal_and_skips_terminal_runs`：验证冷扫描发现非 terminal run、跳过 terminal run（succeeded）。
+- `cold_attach_open_human_gate_wait_not_terminalized`：验证对 open human-gate wait 的 workflow 执行 cold attach（统一 driver）后，wait 保持 open、run 不 terminalize（返回 AwaitingWait）。
+- `cold_attach_recovery_materializes_resolved_wait_terminal`：模拟 crash 场景（waitResolved 已写但 activitySucceeded 未写），验证 cold attach 调用统一 driver 后，run_loop wait-resolution recovery 正确 materialize terminal event，run 推进到 terminal。
+
+验收状态：
+
+- ✅ cold attach 后不包含 provider-specific 特殊恢复逻辑，统一通过 `workflow_runtime_driver::run` → `run_loop` 处理。
+- ✅ daemon restart 后 non-terminal workflow 可以继续等待（open wait → AwaitingWait）、恢复（resolved wait → materialize terminal）、推进。
+- ✅ `cargo test -p beam-core workflow`：56 passed + 1 regression，0 failed。
+- ✅ `cargo test -p beam-daemon workflow`：106 passed，0 failed。
+- ✅ `cargo test -p beam-daemon --lib`：271 passed（268 原有 + 3 新增），0 failed。
+- ✅ `cargo build -p beam-daemon`：无 warning/error。
+- ✅ 改动量小（lib.rs 中 ~20 行替换为 ~5 行 + 两个 import 移除），不开始 Phase 8/9。
 
 ## Phase 8: Loop Runtime
 
