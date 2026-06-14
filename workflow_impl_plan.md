@@ -694,7 +694,7 @@ Task 6.3 边界（未在本任务完成）：
 
 ## Phase 8: Loop Runtime
 
-### Task 8.1: 扩展 OrchestratorAction 支持 loop lifecycle
+### Task 8.1: 扩展 OrchestratorAction 支持 loop lifecycle ✅
 
 涉及文件：
 
@@ -719,6 +719,28 @@ Task 6.3 边界（未在本任务完成）：
 
 - action 能序列化为对应事件。
 - replay 后 `snapshot.loops` 正确更新。
+
+**实现摘要**：
+
+- 在 `OrchestratorAction` 枚举中新增四个变体：
+  - `StartLoop { node_id, max_iterations }`
+  - `StartLoopIteration { node_id, iteration }`
+  - `FinishLoopIteration { node_id, iteration, resolution, decision_activity_id, wait_resolved_event_id, by, comment, timed_out }`
+  - `FinishLoop { node_id, final_iteration, resolution, output_ref, error_code, error_class }`
+- 在 `apply_orchestrator_action` 中为四种 action 分别调用 `start_loop` / `start_loop_iteration` / `finish_loop_iteration` / `finish_loop` 写入 `loopStarted` / `loopIterationStarted` / `loopIterationFinished` / `loopFinished` 事件，确保 action → event 路径打通。
+- `workflow_snapshot.rs` 本任务未做修改；其已有的 `snapshot.loops` 投影逻辑原已支持从 loop 事件重建 `LoopRun` 状态，本任务通过补齐 action → event 产出和 replay 测试覆盖该路径。
+- 新增 7 个 focused tests：
+  - `start_loop_writes_loop_started_event`
+  - `start_loop_iteration_writes_event`
+  - `finish_loop_iteration_writes_event`
+  - `finish_loop_writes_loop_finished_event`
+  - `all_loop_actions_produce_correct_event_sequence`
+  - `replay_builds_snapshot_loops_from_loop_events`
+  - `replay_loop_failed_sets_status_and_dangling_iteration`
+
+**验证结果**：
+
+- `cargo test -p beam-core workflow`：63 passed，0 failed。
 
 ### Task 8.2: 实现 loop dispatch pass
 

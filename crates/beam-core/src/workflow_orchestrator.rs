@@ -37,6 +37,38 @@ pub enum OrchestratorAction {
     CompleteRunFailed {
         failed_node_id: String,
     },
+    /// Begin executing a loop node (writes `loopStarted`).
+    StartLoop {
+        node_id: String,
+        max_iterations: u64,
+    },
+    /// Begin a single iteration of a loop (writes `loopIterationStarted`).
+    StartLoopIteration {
+        node_id: String,
+        iteration: u64,
+    },
+    /// Finish a single iteration of a loop (writes `loopIterationFinished`).
+    FinishLoopIteration {
+        node_id: String,
+        iteration: u64,
+        /// Resolution for this iteration: `approved`, `rejected`, `failed`, or `cancelled`.
+        resolution: String,
+        decision_activity_id: Option<String>,
+        wait_resolved_event_id: Option<String>,
+        by: Option<String>,
+        comment: Option<String>,
+        timed_out: Option<bool>,
+    },
+    /// Finish the entire loop node (writes `loopFinished`).
+    FinishLoop {
+        node_id: String,
+        final_iteration: u64,
+        /// Resolution for the overall loop: `approved`, `failed`, or `cancelled`.
+        resolution: String,
+        output_ref: Option<WorkflowOutputRef>,
+        error_code: Option<String>,
+        error_class: Option<String>,
+    },
 }
 
 impl OrchestratorAction {

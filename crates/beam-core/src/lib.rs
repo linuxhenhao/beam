@@ -90,7 +90,8 @@ pub use workflow_runtime::{
     WorkflowDispatchOutcome, WorkflowDispatchRun, WorkflowDispatchSession, WorkflowExecutionHooks,
     WorkflowRuntimeContext, complete_node_failed, complete_node_succeeded, complete_run_failed,
     complete_run_succeeded, derive_workflow_idempotency_key, dispatch_gate, dispatch_work,
-    get_host_executor_provider_meta, run_loop, run_tick,
+    finish_loop, finish_loop_iteration, get_host_executor_provider_meta, run_loop, run_tick,
+    start_loop, start_loop_iteration,
 };
 pub use workflow_sidecar::{load_effect_input_sidecar, write_effect_input_sidecar};
 pub use workflow_snapshot::{
