@@ -15,6 +15,7 @@ mod trigger_log;
 mod webhook_key;
 mod webhook_lifecycle;
 mod workflow_commands;
+mod workflow_event_fanout;
 mod workflow_host_executors;
 mod workflow_progress_card;
 mod workflow_reconcilers;
@@ -6115,6 +6116,12 @@ async fn run_workflow_runtime_once(state: &AppState, run_id: &str, workflow_json
             if meta.len() > last_len {
                 last_len = meta.len();
                 send_workflow_progress_card(&watch_state, &watch_run_id, &watch_workflow_id).await;
+                // Fanout approval cards for any newly-created human-gate waits.
+                let _ = workflow_event_fanout::fanout_with_lark_sender(
+                    &watch_state,
+                    &watch_run_id,
+                )
+                .await;
             }
             let Ok(snapshot) =
                 read_run_snapshot(&watch_state.paths.workflow_run_dir(&watch_run_id)).await
@@ -6146,6 +6153,10 @@ async fn run_workflow_runtime_once(state: &AppState, run_id: &str, workflow_json
             warn!("workflow runtime failed for {}: {}", run_id, err);
         }
     }
+
+    // Fanout approval cards for any human-gate waits created during this
+    // runtime tick.  This covers normal advancement, recovery, and resume.
+    let _ = workflow_event_fanout::fanout_with_lark_sender(state, run_id).await;
 }
 
 async fn bootstrap_and_start_workflow_run(

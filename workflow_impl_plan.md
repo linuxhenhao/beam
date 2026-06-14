@@ -389,22 +389,50 @@
 - ✅ 重复点击不重复写 `waitResolved`
 - ✅ `cargo test -p beam-daemon workflow` 全部 67 测试通过，无 warning
 
-### Task 5.3: 自动发送 approval card
+### Task 5.3: 自动发送 approval card ✅ 已完成
+
+状态：**已完成**
 
 建议新增文件：
 
-- `crates/beam-daemon/src/workflow_event_fanout.rs`
+- `crates/beam-daemon/src/workflow_event_fanout.rs` ✅
 
-任务：
+涉及文件：
 
-- 监听 workflow `events.ndjson`。
-- 发现新 `waitCreated` 且 `waitKind == human-gate` 时，读取 `chat-binding.json` 并发送 approval card。
-- card 包含 approve/reject/cancel 按钮、comment input、dashboard link。
+- `crates/beam-daemon/src/lib.rs`（`mod` 声明 + `run_workflow_runtime_once` 内集成 fanout）
 
-验收标准：
+实现说明：
 
-- workflow 进入 humanGate 后自动发送可点击 approval card。
-- 不依赖 dashboard 手动 approve。
+- 新增 `workflow_event_fanout.rs`，包含：
+  - `ApprovalCardSender` trait（测试 mock）/ `LarkCardSender`（真实 Lark 发送，复用 `send_lark_card_in_chat`）
+  - `ApprovalCardSentMarker`：基于文件的幂等标记（`approval-card-sent.json`），持久化已发送的 `{activity_id}::{attempt_id}`，daemon 重启后仍生效
+  - `build_approval_card()`：构建 Lark 交互卡片，包含 approve/reject/cancel 三个点击按钮、`wf_comment` input、📊 Open Dashboard url 链接按钮；按钮 value 字段与 Task 5.1/5.2 的 `parse_lark_card_action` 完全兼容
+  - `fanout_approval_cards_if_needed<S: ApprovalCardSender>()`：扫描 snapshot 中的 human-gate waits，自动发送卡片；缺失 chat binding / bot 时 graceful skip（warn + 不 crash）
+  - `fanout_with_lark_sender()`：便捷封装，用于 runtime 集成点
+- `lib.rs` 修改：
+  - `run_workflow_runtime_once` 内两处集成 fanout：(1) `run_loop` 完成后；(2) 后台 watcher loop 检测到新 events.ndjson 事件时。覆盖正常推进、recovery、cold attach、resume 全部场景
+- 幂等：通过 sidecar marker 文件实现，同一 wait 不会重复发送卡片，不依赖进程内 HashSet
+- 事件语义保持不变：approve/reject 写 `waitResolved`，cancel 写 `cancelRequested`（复用 Task 5.1/5.2 handler）
+
+测试覆盖（9 个）：
+
+- `human_gate_wait_triggers_approval_card_fanout`：humanGate wait → fanout 发送卡片
+- `repeated_fanout_does_not_duplicate`：重复 fanout 不重复发送（幂等验证）
+- `missing_chat_binding_does_not_crash`：缺少 chat binding → graceful skip
+- `terminal_run_skips_fanout`：terminal run 跳过 fanout
+- `fanout_with_lark_sender_no_bot_returns_zero`：bot 不存在的 graceful 处理
+- `non_human_gate_wait_is_not_fanned_out`：非 human-gate 不触发
+- `approval_card_contains_required_button_fields`：card JSON 结构验证（包含 dashboard URL）
+- `approval_card_omits_dashboard_button_when_url_is_none`：无 URL 时省略 dashboard 按钮
+- `marker_file_survives_reload`：marker 文件跨 reload 持久化
+
+验收状态：
+
+- ✅ workflow 进入 humanGate 后自动发送可点击 approval card（包含 approve/reject/cancel + comment input + dashboard link）
+- ✅ 不依赖 dashboard 手动 approve
+- ✅ 重复 runtime/recovery/cold attach 不重复发送同一 wait 的 approval card
+- ✅ card action 点击路径继续复用 Task 5.1/5.2 handler
+- ✅ `cargo test -p beam-daemon workflow` 全部 76 测试通过，无 warning
 
 ## Phase 6: Cancel Propagation
 
