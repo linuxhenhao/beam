@@ -882,12 +882,14 @@ Task 6.3 边界（未在本任务完成）：
 
 ## Phase 9: 清理与文档
 
-### Task 9.1: 拆分 daemon lib.rs 中的 workflow 代码
+### Task 9.1: 拆分 daemon lib.rs 中的 workflow 代码 ✅ 已完成
 
 涉及文件：
 
 - `crates/beam-daemon/src/lib.rs`
-- 新增 workflow 相关模块
+- 新增 `crates/beam-daemon/src/workflow_resume.rs`
+- 新增 `crates/beam-daemon/src/workflow_execution.rs`
+- 新增 `crates/beam-daemon/src/workflow_catalog.rs`
 
 任务：
 
@@ -898,6 +900,48 @@ Task 6.3 边界（未在本任务完成）：
 
 - `lib.rs` workflow 相关逻辑明显减少。
 - 每个模块有清晰职责。
+
+#### 最终合并状态
+
+三轮拆分完成后，`lib.rs` 从重构前约 18812 行缩减至约 16780 行，累计迁出约 2000+ 行至三个独立模块：
+
+| 模块 | 行数 | 职责 |
+|------|------|------|
+| `workflow_resume.rs` | ~1105 | Feishu IM 悬挂效果恢复、cold-attach 基础设施、恢复响应构建器、wait/cancel/worker-crashed 恢复助手 |
+| `workflow_execution.rs` | ~599 | `DaemonWorkflowExecutionHooks`（WorkflowExecutionHooks trait 完整实现）、subagent/host-executor 分发、worker 进程管理、bootstrap 辅助 |
+| `workflow_catalog.rs` | ~493 | workflow 文本命令解析、catalog DTO、定义搜索/加载、run 列表/错误提取 |
+
+`lib.rs` 中保留：
+- axum 路由处理器（`start_workflow_attempt_resume`、`resume_workflow_run`、`approve_workflow_run`、`list_workflow_definitions_api` 等）
+- AppState 与相关结构体定义（`AttemptResumeSidecar`、`FeishuResumeInput`、`FeishuResumeOutcome` 等）
+- 跨模块通用工具（`sha256_hex`、`write_json_blob`、`is_lark_message_withdrawn_error` 等）
+- 三个模块均通过 `pub(crate) use workflow_*::*;` 重导出，保持旧调用点（路由处理器、测试模块）兼容
+- 测试模块内补充了 `use beam_core::{BootstrapWorkflowRunInput, WorkflowDispatchOutcome, WorkflowDispatchRun, bootstrap_workflow_run};` 导入（`cargo fix --lib` 会移除仅测试使用的顶层导入）
+
+#### 测试结果
+
+```sh
+$ cargo test -p beam-daemon workflow
+test result: ok. 106 passed; 0 failed
+
+$ cargo test -p beam-daemon --lib
+test result: ok. 271 passed; 0 failed
+
+$ cargo build -p beam-daemon
+编译成功，无警告
+
+$ cargo build -p beam-cli
+编译成功，无错误
+```
+
+#### 边界说明
+
+- 未修改业务行为；未绕过 EventLog。
+- `resume_feishu_im_dangling_effects` 及其调用的助手函数虽然已不被当前正常路径使用（被 reconciler registry path 替代），但保留在模块中以供测试和潜在未来恢复路径使用；通过 `#![allow(dead_code)]` 抑制未使用警告。
+- 路由处理器留在 `lib.rs` 中作为对外 wrapper，内部通过 `pub(crate) use workflow_*::*;` 重导出调用已迁出的逻辑。
+- `sha256_hex` 和 `write_json_blob` 在 `lib.rs` 和 `workflow_reconcilers.rs` 中存在重复定义，未在本次任务中合并以避免扩大变更范围。
+- `run_workflow_subagent_session` 保持私有（仅在模块内被 `DaemonWorkflowExecutionHooks` 调用）；其余函数均为 `pub(crate)` 以支持跨模块和测试访问。
+- 迁出函数对 `AppState`、`create_session_internal`、`close_session` 等的访问通过 `crate::` 路径，这些项均为 `lib.rs` 私有，但因子模块可直接访问而不需修改可见性。
 
 ### Task 9.2: 更新 workflow 文档和示例
 
