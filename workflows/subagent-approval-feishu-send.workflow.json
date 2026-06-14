@@ -1,0 +1,44 @@
+{
+  "workflowId": "subagent-approval-feishu-send",
+  "version": 1,
+  "defaults": {
+    "retryPolicy": { "maxAttempts": 1, "backoff": "fixed", "baseMs": 1000 },
+    "timeoutMs": 120000,
+    "maxOutputBytes": 4096
+  },
+  "nodes": {
+    "draft": {
+      "type": "subagent",
+      "bot": "cli_canary_PLACEHOLDER",
+      "description": "Draft a message. Replace cli_canary_PLACEHOLDER with a real bot id from `beam bots list`. The preview is shown to the human approver; content is the full message to send.",
+      "prompt": "Draft a short announcement message. Return JSON: {\"preview\": string, \"content\": string}. Preview should be <200 chars; content is the full message to send.",
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": ["preview", "content"],
+        "properties": {
+          "preview": { "type": "string" },
+          "content": { "type": "string" }
+        }
+      }
+    },
+    "send": {
+      "type": "hostExecutor",
+      "executor": "feishu-send",
+      "depends": ["draft"],
+      "description": "Send the drafted message after human approval. The humanGate shows draft.output.preview on the approval card; clicking Approve sends draft.output.content to the target chat. This is the safe-by-default pattern: every side-effect executor carries its own humanGate.",
+      "humanGate": {
+        "stage": "before",
+        "prompt": { "$ref": "draft.output.preview" },
+        "deadlineMs": 600000,
+        "onTimeout": "fail"
+      },
+      "input": {
+        "larkAppId": "cli_canary_PLACEHOLDER",
+        "chatId": "oc_canary_PLACEHOLDER",
+        "content": { "$ref": "draft.output.content" },
+        "msgType": "text"
+      }
+    }
+  }
+}

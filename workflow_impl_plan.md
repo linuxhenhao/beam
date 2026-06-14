@@ -943,25 +943,43 @@ $ cargo build -p beam-cli
 - `run_workflow_subagent_session` 保持私有（仅在模块内被 `DaemonWorkflowExecutionHooks` 调用）；其余函数均为 `pub(crate)` 以支持跨模块和测试访问。
 - 迁出函数对 `AppState`、`create_session_internal`、`close_session` 等的访问通过 `crate::` 路径，这些项均为 `lib.rs` 私有，但因子模块可直接访问而不需修改可见性。
 
-### Task 9.2: 更新 workflow 文档和示例
+### Task 9.2: 更新 workflow 文档和示例 ✅ 已完成
+
+状态：**已完成**（2026-06-14 验收修正：修复 loop 事件名表述 + 示例重构为 safe-by-default 结构）
 
 涉及文件：
 
-- `README.md`
-- `workflows/*.workflow.json`
-- 可新增 `docs/workflow.md`
+- `README.md`（新增 workflow 文档入口链接）
+- `docs/workflow.md`（新增，~317 行；验收修正：loop runtime 事件名从错误的 `loopSucceeded`/`loopFailed` 改为正确的 `loopFinished`）
+- `workflows/subagent-approval-feishu-send.workflow.json`（新增，draft subagent → send hostExecutor 含 humanGate 的二节点安全示例；验收修正：移除 confirm subagent + unsafeAllowUngated，改为 send 自身带 humanGate）
+- `crates/beam-core/src/workflow_definition.rs`（新增 parse 测试；验收修正：断言改为验证 send 有 humanGate 且无 unsafeAllowUngated）
 
-任务：
+实现说明：
 
-- 说明支持的 node 类型。
-- 说明 side-effect executor 默认需要 humanGate。
-- 说明 approval/cancel/recovery 行为。
-- 修正或标注 loop 示例。
+1. **新增 `docs/workflow.md`**：完整的用户可读 workflow 使用指南，覆盖：
+   - Node 类型说明（subagent、hostExecutor、humanGate、loop、Decision）及关键字段表格
+   - Side-effect hostExecutor（feishu-send/feishu-reply/beam-schedule）默认需要 humanGate，`unsafeAllowUngated` 的风险说明与合法使用场景
+   - Approval card / approve / reject / cancel 行为：approve/reject 写 `waitResolved` → runtime 推进；cancel 写 `cancelRequested` → runtime 传播 `activityCanceled`/`runCanceled`；Lark 和 Dashboard 入口统一语义；卡片发送幂等
+   - Recovery 行为：EventLog 是事实来源；effectAttempted 先于 provider 调用；run_loop/cold attach/dashboard resume 统一语义；dangling effect recovery（ProviderReconciler）；dangling wait resolution
+   - Loop runtime 完整说明（使用正确的 EventLog 事件名 `loopStarted`/`loopIterationStarted`/`loopIterationFinished`/`loopFinished`）：approve → loopFinished(resolution=approved)；reject → 下一轮迭代；maxIterations/body failure → loopFinished(resolution=failed)；activity id 格式；loop definition validation 规则
+   - Node 公共字段表格、完整示例文件清单
+2. **新增 `workflows/subagent-approval-feishu-send.workflow.json`**：安全最小 DAG（draft subagent 产出 content + preview → send hostExecutor 带 `humanGate(stage=before)` 审批 draft.output.preview 后发送）。不使用 `unsafeAllowUngated`，humanGate 直接挂在 side-effect executor 上，作为"每个副作用节点自行携带门控"的 safe-by-default 模板
+3. **更新 `README.md`**：在"文档"部分新增 `docs/workflow.md` 入口链接
+4. **新增 parse 测试**：`accept_subagent_approval_feishu_send_workflow_json` 验证新示例正确 parse、send 节点有 humanGate 且无 unsafeAllowUngated
+5. **loop 示例说明**：`code-review-loop.workflow.json` 的描述本身未误导用户（不含"not implemented"等表述），`docs/workflow.md` 明确说明 loop runtime 已完成并提供可运行的完整行为描述（使用正确的 EventLog 事件名）
 
-验收标准：
+验证结果：
 
-- 用户按文档能创建一个 subagent -> approval -> feishu-send workflow。
-- loop 示例在 loop runtime 完成前不会误导用户。
+- `cargo test -p beam-core workflow_definition`：41 passed，0 failed
+- `cargo test -p beam-core workflow`：77 passed，0 failed
+- `cargo build --workspace`：无 warning/error
+
+边界说明：
+
+- 未修改 runtime 行为；仅做文档和示例更新，不绕过 EventLog
+- `docs/workflow.md` 基于当前代码核对了关键行为（node 类型定义、side-effect gate 校验、loop runtime EventLog 事件名、approval/cancel handler、recovery 阶段），未照搬设计文档
+- `code-review-loop.workflow.json` 原文无"not implemented"等误导表述，无需修改；loop 行为在 `docs/workflow.md` 中已完整说明
+- 新增示例不再使用 `unsafeAllowUngated`；`docs/workflow.md` 仍保留了 unsafeAllowUngated 的风险说明与合法使用场景（如 canary-multistep），但不以此作为入门模板
 
 ## 推荐执行顺序
 

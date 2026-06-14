@@ -732,6 +732,30 @@ mod tests {
         assert!(def.nodes.contains_key("reviewDecision"));
     }
 
+    // -- Task 9.2: subagent-approval-feishu-send example parses --
+    #[test]
+    fn accept_subagent_approval_feishu_send_workflow_json() {
+        let raw =
+            include_str!("../../../workflows/subagent-approval-feishu-send.workflow.json");
+        let def = parse_workflow_definition(raw).expect("subagent-approval-feishu-send parsed");
+        assert_eq!(def.workflow_id, "subagent-approval-feishu-send");
+        assert_eq!(def.nodes.len(), 2);
+        assert!(def.nodes.contains_key("draft"));
+        assert!(def.nodes.contains_key("send"));
+        // send depends on draft
+        let send_node = def.nodes.get("send").unwrap();
+        match send_node {
+            // send is a gated feishu-send: humanGate present, unsafeAllowUngated absent
+            WorkflowNode::HostExecutor(n) => {
+                assert_eq!(n.executor, "feishu-send");
+                assert_eq!(n.base.depends.as_deref(), Some(vec!["draft".to_string()].as_slice()));
+                assert!(n.base.human_gate.is_some(), "send must have humanGate");
+                assert!(!n.base.unsafe_allow_ungated.unwrap_or(false), "send must NOT use unsafeAllowUngated");
+            }
+            _ => panic!("expected hostExecutor"),
+        }
+    }
+
     // -- Task 8.3: loop definition validation --
 
     // Rule 1: body nodes must exist

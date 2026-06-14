@@ -158,6 +158,7 @@ beam dashboard    # 打开 dashboard
 
 - 架构说明：[docs/design/beam-architecture.md](docs/design/beam-architecture.md)
 - 核心运行时设计：[docs/design/beam.md](docs/design/beam.md)
+- Workflow 使用指南：[docs/workflow.md](docs/workflow.md)
 - 当前对标状态：[docs/design/beam-parity-plan.md](docs/design/beam-parity-plan.md)
 - 平台与团队协作：[docs/platform-design.md](docs/platform-design.md)
 - 跨部署 federation：[docs/federation-design.md](docs/federation-design.md)
