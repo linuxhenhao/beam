@@ -14,6 +14,7 @@ mod terminal_proxy;
 mod trigger_log;
 mod webhook_key;
 mod webhook_lifecycle;
+mod workflow_commands;
 mod workflow_host_executors;
 mod workflow_progress_card;
 mod workflow_reconcilers;
@@ -34,16 +35,16 @@ use beam_core::{
     BackendType, BeamPaths, BootstrapWorkflowRunInput, BotConfig, BotSummary, ChatMode,
     CliUsageLimitState, ColdWorkflowRun, Config, CreateSessionRequest, DaemonOverview,
     DaemonRuntimeState, DaemonToWorker, DisplayMode, EventDraft, EventLog, EventWindowOpts,
-    FinalOutputKind, FinalOutputRequest, InitConfig, PendingResponseCardState, ResolveWaitInput,
+    FinalOutputKind, FinalOutputRequest, InitConfig, PendingResponseCardState,
     RestartSessionRequest, ResumeSessionRequest, RunChatBinding, RunStatus, ScreenStatus, Session,
     SessionGroup, SessionInputRequest, SessionLocateInfo, SessionScope, SessionStatus,
     SessionSummary, TalkEvaluation, TermActionKey, TuiPromptOption, WaitResolution, WorkerToDaemon,
     WorkflowActor, WorkflowDispatchOutcome, WorkflowDispatchRun, WorkflowDispatchSession,
     WorkflowExecutionHooks, WorkflowNode, WorkflowOutputRef, WorkflowRuntimeContext,
-    bootstrap_workflow_run, can_operate, complete_run_cancel, evaluate_talk, event_seq_from_id,
-    grant_restricted, infer_run_status, mint_workflow_run_id, parse_workflow_definition,
-    parse_workflow_output, read_event_window, read_run_events_pure, read_run_snapshot,
-    request_cancel, resolve_wait, run_loop, scan_cold_workflow_runs, with_workflow_output_protocol,
+    bootstrap_workflow_run, can_operate, evaluate_talk, event_seq_from_id, grant_restricted,
+    infer_run_status, mint_workflow_run_id, parse_workflow_definition, parse_workflow_output,
+    read_event_window, read_run_events_pure, read_run_snapshot, run_loop, scan_cold_workflow_runs,
+    with_workflow_output_protocol,
 };
 use chrono::Utc;
 use connector_store::{
@@ -8382,9 +8383,15 @@ async fn handle_lark_card_action_payload(
             };
             let operator = action.operator_open_id.as_deref().unwrap_or("unknown");
             let comment = action.workflow_comment.as_deref();
+
+            // Load existing frozen card records for idempotency.
             let mut workflow_cards = load_workflow_approval_cards(&state.paths, run_id)
                 .await
                 .map_err(internal_error)?;
+
+            // If the card was already frozen (repeated click), still succeed
+            // without re-writing events — the handler is still idempotent, but
+            // this early return avoids touching the log at all.
             if workflow_cards.contains_key(card_nonce) {
                 return Ok(Json(serde_json::json!({
                     "toast": {
@@ -8393,9 +8400,73 @@ async fn handle_lark_card_action_payload(
                     }
                 })));
             }
+
+            // Phase 5.1/5.2: write EventLog events AND push the runtime
+            // BEFORE updating the card.  On error the card stays un-frozen.
+            let action_str = action.action.as_str();
+            let handler_result = match action_str {
+                "wf_approve" | "wf_reject" => {
+                    let resolution = if action_str == "wf_approve" {
+                        WaitResolution::Approved
+                    } else {
+                        WaitResolution::Rejected
+                    };
+                    workflow_commands::lark_approve_or_reject_wait(
+                        &state,
+                        run_id,
+                        activity_id,
+                        attempt_id,
+                        operator,
+                        resolution,
+                        comment.map(|s| s.to_string()),
+                    )
+                    .await
+                    .map(|outcome| {
+                        if outcome.ok {
+                            Ok(format!(
+                                "workflow {} recorded",
+                                action_str.trim_start_matches("wf_")
+                            ))
+                        } else {
+                            Err(outcome
+                                .error_hint
+                                .unwrap_or_else(|| "unknown error".to_string()))
+                        }
+                    })
+                }
+                "wf_cancel" => {
+                    workflow_commands::cancel_run(&state, run_id, comment.map(|s| s.to_string()))
+                        .await
+                        .map(|outcome| {
+                            if outcome.ok {
+                                Ok("workflow cancel recorded".to_string())
+                            } else {
+                                Err(outcome
+                                    .error_hint
+                                    .unwrap_or_else(|| "cancel failed".to_string()))
+                            }
+                        })
+                }
+                _ => unreachable!(),
+            };
+
+            let (response_content, is_success) = match handler_result {
+                Ok(Ok(msg)) => (msg, true),
+                Ok(Err(err)) => (err, false),
+                Err(err) => (format!("workflow action failed: {}", err), false),
+            };
+
+            if !is_success {
+                return Ok(Json(build_lark_card_action_toast(
+                    "error",
+                    &response_content,
+                )));
+            }
+
+            // Event was written successfully — now freeze the card.
             let workflow_card =
                 serde_json::from_str::<Value>(&build_workflow_approval_resolved_card(
-                    action.action.as_str(),
+                    action_str,
                     run_id,
                     action.workflow_id.as_deref(),
                     action.workflow_revision_id.as_deref(),
@@ -8406,7 +8477,6 @@ async fn handle_lark_card_action_payload(
                     comment,
                 ))
                 .unwrap_or_else(|_| serde_json::json!({}));
-            let response_content = format!("workflow {} recorded", action.action);
             if let Some(message_id) = workflow_approval_target_message_id(&action) {
                 let card_json =
                     serde_json::to_string(&workflow_card).unwrap_or_else(|_| "{}".to_string());
@@ -8429,10 +8499,17 @@ async fn handle_lark_card_action_payload(
                             &response_content,
                         )))
                     }
-                    Err(err) => Ok(Json(build_lark_card_action_toast(
-                        "error",
-                        &format!("workflow action failed: {}", err),
-                    ))),
+                    Err(err) => {
+                        // Events already written; the card update is cosmetic.
+                        warn!(
+                            "lark card update failed for {} after event write: {}",
+                            run_id, err
+                        );
+                        Ok(Json(build_lark_card_action_toast(
+                            "warning",
+                            &format!("events recorded, but card update failed: {}", err),
+                        )))
+                    }
                 }
             } else {
                 Ok(Json(serde_json::json!({
@@ -8757,164 +8834,6 @@ async fn get_workflow_run_events(
         "hasOlder": window.has_older,
         "hasNewer": window.has_newer,
     })))
-}
-
-async fn resolve_dashboard_wait(
-    state: &AppState,
-    run_id: &str,
-    resolution: WaitResolution,
-    comment: Option<String>,
-) -> Result<(StatusCode, Json<Value>), (StatusCode, String)> {
-    let run_dir = state.paths.workflow_run_dir(run_id);
-    let Some(snapshot) = read_run_snapshot(&run_dir).await.map_err(internal_error)? else {
-        return Err((StatusCode::NOT_FOUND, "workflow run not found".to_string()));
-    };
-    if matches!(
-        snapshot.run.status,
-        RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled
-    ) {
-        return Ok((
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "ok": true,
-                "runId": run_id,
-                "resolution": if matches!(resolution, WaitResolution::Approved) { "approved" } else { "rejected" },
-                "activityId": "",
-                "attemptId": "",
-                "resolvedAt": snapshot.updated_at,
-                "lastSeq": snapshot.last_seq,
-                "alreadyTerminal": true,
-            })),
-        ));
-    }
-
-    let raw_def = tokio::fs::read_to_string(run_dir.join("workflow.json"))
-        .await
-        .map_err(internal_error)?;
-    let def = parse_workflow_definition(&raw_def).map_err(internal_error)?;
-
-    let mut candidates: Vec<(String, String, Option<Vec<String>>, Option<String>)> = Vec::new();
-    for activity_id in &snapshot.dangling.waits {
-        let Some(activity) = snapshot
-            .activities
-            .iter()
-            .find(|a| &a.activity_id == activity_id)
-        else {
-            continue;
-        };
-        let Some(attempt) = activity.attempts.last() else {
-            continue;
-        };
-        let Some(wait) = attempt.wait.as_ref() else {
-            continue;
-        };
-        if wait.wait_kind != "human-gate" {
-            continue;
-        }
-        candidates.push((
-            activity_id.clone(),
-            attempt.attempt_id.clone(),
-            wait.approvers.clone(),
-            activity.owner_node_id.clone(),
-        ));
-    }
-    if candidates.is_empty() {
-        return Err((
-            StatusCode::CONFLICT,
-            serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "error": "no_open_wait",
-                "hint": "No pending humanGate wait on this run.",
-            }))
-            .unwrap_or_else(|_| "{\"ok\":false,\"error\":\"no_open_wait\"}".to_string()),
-        ));
-    }
-    if candidates.len() > 1 {
-        return Err((
-            StatusCode::CONFLICT,
-            serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "error": "ambiguous_wait",
-                "hint": format!(
-                    "Run has {} pending humanGate waits; dashboard cannot pick one yet. Use the Lark approval card.",
-                    candidates.len()
-                ),
-            }))
-            .unwrap_or_else(|_| "{\"ok\":false,\"error\":\"ambiguous_wait\"}".to_string()),
-        ));
-    }
-    let (activity_id, attempt_id, approvers, owner_node_id) = candidates.remove(0);
-    if approvers
-        .as_ref()
-        .map(|items| !items.is_empty())
-        .unwrap_or(false)
-    {
-        return Err((
-            StatusCode::FORBIDDEN,
-            serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "error": "needs_lark_approval",
-                "hint": "This gate has an approver allowlist; the Lark approval card is the only path that authenticates the approver identity.",
-            }))
-            .unwrap_or_else(|_| "{\"ok\":false,\"error\":\"needs_lark_approval\"}".to_string()),
-        ));
-    }
-
-    let is_decision_node = owner_node_id
-        .as_deref()
-        .and_then(|node_id| def.nodes.get(node_id))
-        .map(|node| matches!(node, WorkflowNode::Decision(_)))
-        .unwrap_or(false);
-    let mut log = EventLog::new(run_id.to_string(), state.paths.workflow_runs_dir())
-        .map_err(internal_error)?;
-    let resolved = resolve_wait(
-        &mut log,
-        ResolveWaitInput {
-            activity_id: activity_id.clone(),
-            attempt_id: attempt_id.clone(),
-            resolution,
-            by: "dashboard".to_string(),
-            comment: comment.clone(),
-            output: None,
-            is_decision_node,
-        },
-    )
-    .await
-    .map_err(internal_error)?;
-    let events = log.read_all().map_err(internal_error)?;
-    let resolved_at = events
-        .iter()
-        .rev()
-        .find(|event| {
-            event.event_type == "waitResolved"
-                && event.payload.get("activityId").and_then(Value::as_str)
-                    == Some(activity_id.as_str())
-        })
-        .map(|event| event.timestamp)
-        .unwrap_or(snapshot.updated_at);
-
-    run_workflow_runtime_once(state, run_id, &raw_def).await;
-
-    let Some(after) = read_run_snapshot(&run_dir).await.map_err(internal_error)? else {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to re-read workflow after wait resolution".to_string(),
-        ));
-    };
-    Ok((
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "ok": true,
-            "runId": run_id,
-            "resolution": if matches!(resolution, WaitResolution::Approved) { "approved" } else { "rejected" },
-            "activityId": activity_id,
-            "attemptId": attempt_id,
-            "resolvedAt": resolved_at,
-            "lastSeq": after.last_seq,
-            "pending": !matches!(after.run.status, RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled),
-            "waitResolvedEventId": resolved["resolutionEventId"],
-        })),
-    ))
 }
 
 fn attempt_resume_key(run_id: &str, activity_id: &str, attempt_id: &str) -> String {
@@ -9386,7 +9305,13 @@ async fn approve_workflow_run(
     AxumPath(run_id): AxumPath<String>,
     Json(req): Json<WorkflowWaitActionRequest>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, String)> {
-    resolve_dashboard_wait(&state, &run_id, WaitResolution::Approved, req.comment).await
+    workflow_commands::dashboard_approve_or_reject_wait(
+        &state,
+        &run_id,
+        WaitResolution::Approved,
+        req.comment,
+    )
+    .await
 }
 
 async fn reject_workflow_run(
@@ -9394,7 +9319,13 @@ async fn reject_workflow_run(
     AxumPath(run_id): AxumPath<String>,
     Json(req): Json<WorkflowWaitActionRequest>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, String)> {
-    resolve_dashboard_wait(&state, &run_id, WaitResolution::Rejected, req.comment).await
+    workflow_commands::dashboard_approve_or_reject_wait(
+        &state,
+        &run_id,
+        WaitResolution::Rejected,
+        req.comment,
+    )
+    .await
 }
 
 async fn cancel_workflow_run(
@@ -9402,75 +9333,37 @@ async fn cancel_workflow_run(
     AxumPath(run_id): AxumPath<String>,
     Json(req): Json<WorkflowCancelRequest>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, String)> {
-    let run_dir = state.paths.workflow_run_dir(&run_id);
-    let Some(snapshot) = read_run_snapshot(&run_dir).await.map_err(internal_error)? else {
-        return Err((StatusCode::NOT_FOUND, "workflow run not found".to_string()));
-    };
-    if matches!(
-        snapshot.run.status,
-        RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled
-    ) {
-        return Ok((
+    let outcome = workflow_commands::cancel_run(&state, &run_id, req.reason)
+        .await
+        .map_err(internal_error)?;
+
+    if outcome.ok {
+        Ok((
             StatusCode::OK,
             Json(serde_json::json!({
                 "ok": true,
-                "runId": run_id,
-                "status": snapshot.run.status,
-                "alreadyTerminal": true,
-                "lastSeq": snapshot.last_seq,
+                "runId": outcome.run_id,
+                "status": outcome.status,
+                "alreadyCancelled": outcome.already_cancelled,
+                "alreadyTerminal": outcome.already_terminal,
+                "lastSeq": outcome.last_seq,
             })),
-        ));
+        ))
+    } else {
+        Err((
+            StatusCode::from_u16(
+                outcome
+                    .error_code
+                    .as_deref()
+                    .and_then(|_| Some(404_u16))
+                    .unwrap_or(500),
+            )
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            outcome
+                .error_hint
+                .unwrap_or_else(|| "cancel failed".to_string()),
+        ))
     }
-
-    let reason = req
-        .reason
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "cancelled via beam daemon".to_string());
-    let mut log =
-        EventLog::new(run_id.clone(), state.paths.workflow_runs_dir()).map_err(internal_error)?;
-    let cancel_requested = request_cancel(
-        &mut log,
-        beam_core::RequestCancelInput {
-            target: serde_json::json!({ "kind": "run", "runId": run_id }),
-            reason,
-            by: "beam-daemon".to_string(),
-        },
-        beam_core::WorkflowActor::Human,
-    )
-    .await
-    .map_err(internal_error)?;
-    let cancel_event_id = cancel_requested
-        .get("eventId")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let _ = complete_run_cancel(
-        &mut log,
-        beam_core::CompleteRunCancelInput {
-            cancel_origin_event_id: cancel_event_id,
-        },
-        beam_core::WorkflowActor::Scheduler,
-    )
-    .await
-    .map_err(internal_error)?;
-
-    let Some(updated) = read_run_snapshot(&run_dir).await.map_err(internal_error)? else {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to re-read cancelled workflow".to_string(),
-        ));
-    };
-
-    Ok((
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "ok": true,
-            "runId": run_id,
-            "status": updated.run.status,
-            "alreadyTerminal": false,
-            "lastSeq": updated.last_seq,
-        })),
-    ))
 }
 
 #[allow(dead_code)]

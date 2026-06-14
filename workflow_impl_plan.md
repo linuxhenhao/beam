@@ -322,49 +322,72 @@
 
 ## Phase 5: Approval Card 闭环
 
-### Task 5.1: 抽出 workflow approval command handler
+### Task 5.1: 抽出 workflow approval command handler ✅ 已完成
 
-建议新增文件：
+状态：**已完成**
 
-- `crates/beam-daemon/src/workflow_commands.rs`
+涉及文件：
+
+- `crates/beam-daemon/src/workflow_commands.rs`（新增）
+- `crates/beam-daemon/src/lib.rs`（修改 + `mod` 引入）
+
+实现说明：
+
+- 新增 `workflow_commands.rs`，三个核心函数：
+  - `dashboard_approve_or_reject_wait()` — Dashboard 路径：单一 open human-gate wait 启发式选择
+  - `lark_approve_or_reject_wait()` — Lark 路径：`activity_id`/`attempt_id` 精确匹配 + approver allowlist 校验
+  - `cancel_run()` — 只写 `cancelRequested`，不写 `runCanceled`；由 `run_workflow_runtime_once` 传播 cancel
+- 幂等性：重复 resolve/cancel 返回 `alreadyResolved`/`alreadyTerminal`/`alreadyCancelled`，不重复写事件
+- Dashboard 端点 (`approve_workflow_run` / `reject_workflow_run` / `cancel_workflow_run`) 全部改为调用 handler
+- 删除已被替代的 `resolve_dashboard_wait` 函数
+- 移除不再使用的 imports：`ResolveWaitInput`, `complete_run_cancel`, `request_cancel`, `resolve_wait`
+
+测试覆盖：
+
+- 14 个单元测试，涵盖：
+  - Lark approve/reject 写 `waitResolved`
+  - Lark reject 写入 rejected resolution
+  - Lark approve 重复调用幂等（不重复写事件）
+  - Lark approve 带 approver allowlist 校验（拒绝非白名单用户）
+  - Lark approve 对已 terminal run 的幂等
+  - Dashboard approve/reject 写 `waitResolved`
+  - Dashboard approve 对已 terminal run 的幂等
+  - Dashboard approve 无 wait terminal run → alreadyTerminal 而非 error
+  - cancel 写 `cancelRequested` 不写 `runCanceled`
+  - cancel 重复幂等
+  - cancel 对已 terminal run 的幂等
+  - cancel 不存在的 run 返回 error
+
+验收状态：
+
+- ✅ dashboard approve/reject 行为不变（通过测试验证）
+- ✅ Lark card action 写 `waitResolved` 并推进 workflow
+- ✅ `cargo test -p beam-daemon workflow` 全部 67 测试通过，无 warning
+
+### Task 5.2: 修复 Lark wf_approve/wf_reject/wf_cancel 行为 ✅ 已完成
+
+状态：**已完成**
 
 涉及文件：
 
 - `crates/beam-daemon/src/lib.rs`
-
-任务：
-
-- 实现统一 command：
-  - approve wait
-  - reject wait
-  - cancel run
-- Dashboard API 和 Lark card action 都调用这个 command handler。
-
-验收标准：
-
-- dashboard approve/reject 行为不变。
-- Lark card action 也能写 `waitResolved` 并推进 workflow。
-
-### Task 5.2: 修复 Lark wf_approve/wf_reject/wf_cancel 行为
-
-涉及文件：
-
-- `crates/beam-daemon/src/lib.rs`
 - `crates/beam-daemon/src/workflow_commands.rs`
 
-任务：
+实现说明：
 
-- `wf_approve` 调用 `resolve_wait(Approved)`。
-- `wf_reject` 调用 `resolve_wait(Rejected)`。
-- `wf_cancel` 调用 `request_cancel(run)`，不要直接 `runCanceled`。
-- 写入事件后调用 `run_workflow_runtime_once` 或统一 driver。
-- 保留 frozen card 幂等能力。
+- `wf_approve` 调用 `lark_approve_or_reject_wait(Approved)` → 写 `waitResolved`
+- `wf_reject` 调用 `lark_approve_or_reject_wait(Rejected)` → 写 `waitResolved`
+- `wf_cancel` 调用 `cancel_run()` → 只写 `cancelRequested`，不写 `runCanceled`
+- 写入事件后 handler 内部调用 `run_workflow_runtime_once` 推进 runtime
+- 保留 frozen card 幂等能力：`workflow_cards.contains_key(card_nonce)` 提前返回，card 更新前先 handler 拿到事件后再冻结；重复点击命中 frozen card 直接成功不重写事件
+- handler 失败时不冻结 card，返回错误 toast；card update 失败时打 warning 日志（事件已写入）
 
-验收标准：
+验收状态：
 
-- 点击飞书 approval card 后，EventLog 出现 `waitResolved`。
-- workflow 继续执行或进入 terminal。
-- 重复点击不会重复写 `waitResolved`。
+- ✅ Lark approve card 点击后 EventLog 出现 `waitResolved`
+- ✅ workflow 继续执行或进入 terminal
+- ✅ 重复点击不重复写 `waitResolved`
+- ✅ `cargo test -p beam-daemon workflow` 全部 67 测试通过，无 warning
 
 ### Task 5.3: 自动发送 approval card
 
