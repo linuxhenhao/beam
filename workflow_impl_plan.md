@@ -742,11 +742,14 @@ Task 6.3 边界（未在本任务完成）：
 
 - `cargo test -p beam-core workflow`：63 passed，0 failed。
 
-### Task 8.2: 实现 loop dispatch pass
+### Task 8.2: 实现 loop dispatch pass ✅ 已完成
 
 涉及文件：
 
 - `crates/beam-core/src/workflow_orchestrator.rs`
+- `crates/beam-core/src/workflow_runtime.rs`
+- `crates/beam-core/src/workflow_binding.rs`
+- `crates/beam-core/src/workflow_definition.rs`
 
 任务：
 
@@ -767,6 +770,46 @@ Task 6.3 边界（未在本任务完成）：
 - `workflows/code-review-loop.workflow.json` 可以执行到 approval wait。
 - reject 后进入下一轮。
 - approve 后 loop succeeded，run 可以 succeeded。
+
+**实现摘要**：
+
+- `workflow_definition.rs`：移除 parse 阶段对 Loop/Decision 节点的硬拒绝，允许通过解析。
+- `workflow_orchestrator.rs`：
+  - 新增 `loop_gate_activity_id` / `loop_work_activity_id`（活动 id 格式对齐计划）、`body_topological_order`（body 节点拓扑排序）、`node_human_gate`、`extract_wait_resolution_meta` 辅助函数。
+  - 新增 `decide_loop_advancement` 和 `process_loop_iteration_body`，处理 loop 起动、body 节点 gate/work 调度、decision 决议（approve/reject/timeout）、maxIterations/body failure 引起的 loop failed。
+  - 修改 `decide_next_actions`：将 Loop 节点从跳过改为调用 loop dispatch 逻辑。
+  - 修改 `find_sinks`：允许 Loop 节点作为 sink。
+  - 修改 `action_serialization_key`：四个 loop action 分别使用独立序列化键，避免 `select_tick_actions` 误去重。
+  - `select_tick_actions`：settle action 不消耗并发配额，确保 `FinishLoopIteration` + `FinishLoop` 成对调度。
+- `workflow_binding.rs`：
+  - Decision `.previous.` 在 iteration 1 返回空合成 JSON `{"by":null,"comment":""}`，`walk_path` 产出空字符串，`${reviewDecision.previous.comment}` 不报错。
+  - Decision `.previous.` 在 iteration ≥2 从 `snapshot.loops[loop_id].iterations[N].decision_by/decision_comment` 读取（不依赖 output blob，支持 rejected 场景）。
+  - 普通 null 插值保持字面 `"null"`，未改全局语义。
+- `workflow_runtime.rs`：
+  - `dispatch_gate` 的 `BindingContext.loop_context` 改为从 activity id 解析，支持 loop 作用域内的 gate prompt 绑定。
+  - `loopIterationFinished` 元数据（`decisionActivityId`、`waitResolvedEventId`、`by`、`comment`、`timedOut`）从 gate activity 的 `wait.resolution` 提取写入，不再硬编码为 None。
+
+**测试覆盖**（新增/补充 14 个，总计 77）：
+
+- Orchestrator 单测 4 个：loop start、decision approve finish、max iterations fail、reject next iteration。
+- Runtime 集成测试 6 个：
+  - `loop_depends_met_produces_start_loop_and_first_iteration`
+  - `code_review_loop_reaches_human_gate_wait_with_correct_activity_id`（简化 def，验证 activity id 格式）
+  - `reject_decision_enters_next_iteration`
+  - `approve_decision_finishes_loop_and_run_succeeds`
+  - `body_failure_causes_loop_failed`
+  - `max_iterations_reject_causes_loop_failed`
+- 真实 `code-review-loop.workflow.json` 集成测试 3 个：
+  - `real_code_review_loop_iter1_reaches_awaiting_wait`（`.previous.` 不报错）
+  - `real_code_review_loop_reject_enters_iter2_with_comment`（metadata 写入 + iter2 prompt 含 reject comment）
+  - `real_code_review_loop_approve_succeeds`（approve → loop/run succeeded）
+- 绑定单元测试 1 个：`string_interpolation_null_produces_literal_null`（锁死普通 null 插值语义）
+
+**验证结果**：
+
+- `cargo test -p beam-core workflow`：77 passed，0 failed。
+- `cargo test -p beam-daemon workflow`：106 passed，0 failed。
+- `cargo test --workspace`：全部通过，无回归。
 
 ### Task 8.3: 补齐 loop definition validation
 

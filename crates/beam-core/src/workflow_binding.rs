@@ -179,13 +179,50 @@ async fn resolve_output_ref(ref_spec: &str, ctx: &BindingContext<'_>) -> Result<
                 ref_spec
             ))?;
             if loop_ctx.iteration <= 1 {
-                anyhow::bail!(
-                    "$ref '{}' has no previous iteration for iteration 1",
-                    ref_spec
-                );
+                // First iteration has no previous.  For Decision nodes
+                // produce an empty synthetic JSON so that string
+                // interpolation (e.g. ${reviewDecision.previous.comment})
+                // yields an empty string without changing the global
+                // null → "null" mapping.
+                if let Some(crate::WorkflowNode::Decision(_)) = ctx.def.nodes.get(node_id) {
+                    let empty = serde_json::json!({"by": null, "comment": ""});
+                    return walk_path(empty, &path, ref_spec);
+                }
+                return Ok(Value::Null);
             }
+            let prev_iteration = loop_ctx.iteration - 1;
+
+            // For Decision nodes, read decision metadata from the loop
+            // iteration state rather than from activity outputs.  This
+            // supports `${reviewDecision.previous.comment}` even when
+            // the previous iteration was rejected (activityFailed, no
+            // output blob).
+            if let Some(crate::WorkflowNode::Decision(_)) = ctx.def.nodes.get(node_id) {
+                if let Some(iter_state) = ctx
+                    .snapshot
+                    .loops
+                    .as_ref()
+                    .and_then(|loops| loops.get(loop_ctx.loop_id))
+                    .and_then(|ls| {
+                        ls.iterations
+                            .iter()
+                            .find(|it| it.iteration == prev_iteration)
+                    })
+                {
+                    let decision_data = serde_json::json!({
+                        "by": iter_state.decision_by,
+                        "comment": iter_state.decision_comment,
+                    });
+                    return walk_path(decision_data, &path, ref_spec);
+                }
+                // No previous iteration data yet — for Decision
+                // nodes return empty synthetic JSON.
+                let empty = serde_json::json!({"by": null, "comment": ""});
+                return walk_path(empty, &path, ref_spec);
+            }
+
             (
-                previous_loop_output_ref(node_id, ctx, loop_ctx.loop_id, loop_ctx.iteration - 1)?
+                previous_loop_output_ref(node_id, ctx, loop_ctx.loop_id, prev_iteration)?
                     .ok_or_else(|| anyhow::anyhow!(
                         "$ref '{}' references node '{}' which has not produced a successful output yet",
                         ref_spec, node_id
@@ -539,6 +576,113 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(resolved.as_str(), Some("hello beam ok"));
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    /// Null in string interpolation remains the literal "null".
+    #[tokio::test]
+    async fn string_interpolation_null_produces_literal_null() {
+        let temp = std::env::temp_dir().join(format!("beam-binding-null-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+
+        let snapshot = RunSnapshotDTO {
+            run_id: "run-null".to_string(),
+            run: RunState {
+                run_id: "run-null".to_string(),
+                status: RunStatus::Running,
+                workflow_id: None,
+                revision_id: None,
+                initiator: None,
+                input: None,
+                output: None,
+                failed_node_id: None,
+                root_cause_event_id: None,
+                cancel_origin_event_id: None,
+                bot_snapshots: None,
+                cancelled_run_intent: None,
+                cancelled_node_intents: BTreeMap::new(),
+            },
+            last_seq: 0,
+            nodes: vec![crate::NodeState {
+                node_id: "a".to_string(),
+                status: NodeStatus::Succeeded,
+                activity_id: Some("run-null::work::a".to_string()),
+                retry_count: 0,
+                next_attempt_at: None,
+                error_class: None,
+                condition_event_id: None,
+                cancel_origin_event_id: None,
+            }],
+            activities: Vec::new(),
+            loops: None,
+            dangling: crate::DanglingSnapshot {
+                activities: Vec::new(),
+                effect_attempted: Vec::new(),
+                waits: Vec::new(),
+                wait_resolutions: Vec::new(),
+                cancels: Vec::new(),
+            },
+            outputs: BTreeMap::from([(
+                "run-null::work::a".to_string(),
+                WorkflowOutputRef {
+                    output_hash: "sha256:null-out".to_string(),
+                    output_path: temp.join("null-out.json").display().to_string(),
+                    output_bytes: 16,
+                    output_schema_version: 1,
+                    content_type: Some("application/json".to_string()),
+                },
+            )]),
+            attempt_io: BTreeMap::new(),
+            chat_binding: None,
+            updated_at: 1,
+        };
+        // Output blob: { "val": null }
+        fs::write(
+            temp.join("null-out.json"),
+            r#"{"val":null}"#,
+        )
+        .unwrap();
+
+        let def = WorkflowDefinition {
+            workflow_id: "flow-null".to_string(),
+            version: 1,
+            params: None,
+            defaults: None,
+            nodes: BTreeMap::from([(
+                "a".to_string(),
+                WorkflowNode::Subagent(crate::SubagentNode {
+                    base: NodeBase {
+                        description: None,
+                        depends: None,
+                        human_gate: None,
+                        retry_policy: None,
+                        timeout_ms: None,
+                        max_output_bytes: None,
+                        output_schema: None,
+                        unsafe_allow_ungated: None,
+                    },
+                    bot: "bot-a".to_string(),
+                    prompt: Value::String("x".to_string()),
+                    working_dir: None,
+                    model_overrides: None,
+                    tool_policy: None,
+                }),
+            )]),
+        };
+
+        // ${a.output.val} — the val field is null.
+        let resolved = resolve_bindings(
+            &Value::String("before ${a.output.val} after".to_string()),
+            &ctx(&temp, &snapshot, &def),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            resolved.as_str(),
+            Some("before null after"),
+            "null interpolation should produce literal 'null'"
+        );
         let _ = fs::remove_dir_all(&temp);
     }
 }

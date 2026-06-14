@@ -204,19 +204,14 @@ pub fn validate_workflow_definition(def: &WorkflowDefinition) -> Result<()> {
         }
     }
     for (node_id, node) in &def.nodes {
-        // Reject unimplemented node types
         match node {
+            // Loop and Decision nodes are now implemented (Phase 8.2)
             WorkflowNode::Loop(_) => {
-                anyhow::bail!(
-                    "nodeId '{}': loop runtime is not implemented yet",
-                    node_id
-                );
+                // Loop validation will be enhanced in Task 8.3
             }
             WorkflowNode::Decision(_) => {
-                anyhow::bail!(
-                    "nodeId '{}': loop runtime is not implemented yet (standalone Decision requires loop)",
-                    node_id
-                );
+                // Standalone Decision nodes are only valid as loop body nodes,
+                // but full validation is deferred to Task 8.3
             }
             WorkflowNode::HostExecutor(host) => {
                 // Side-effect executors must be gated
@@ -458,30 +453,25 @@ mod tests {
         assert!(def.nodes.contains_key("a"));
     }
 
-    // -- Task 1.3: reject unimplemented loop and standalone Decision --
+    // -- Task 8.2: loop nodes are now accepted (validation deferred to Task 8.3) --
 
     #[test]
-    fn reject_loop_node_current_behavior() {
-        let err = parse_workflow_definition(
-            r#"{"workflowId":"f","version":1,"nodes":{"l":{"type":"loop","maxIterations":3,"body":[],"terminate":{"node":"d","via":"approve"}}}}"#,
+    fn accept_loop_node_with_minimal_body() {
+        // Loop with empty body + decision terminate node
+        let def = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision"},"l":{"type":"loop","maxIterations":3,"body":["d"],"depends":[],"terminate":{"node":"d","via":"humanGate"}}}}"#,
         )
-        .unwrap_err();
-        assert!(
-            err.to_string().contains("loop runtime is not implemented yet"),
-            "got: {err}"
-        );
+        .expect("loop accepted");
+        assert!(def.nodes.contains_key("l"));
     }
 
     #[test]
-    fn reject_standalone_decision_node_current_behavior() {
-        let err = parse_workflow_definition(
+    fn accept_standalone_decision_node() {
+        let def = parse_workflow_definition(
             r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision"}}}"#,
         )
-        .unwrap_err();
-        assert!(
-            err.to_string().contains("loop runtime is not implemented yet"),
-            "got: {err}"
-        );
+        .expect("decision accepted");
+        assert!(def.nodes.contains_key("d"));
     }
 
     #[test]
@@ -493,14 +483,14 @@ mod tests {
         assert_eq!(def.nodes.len(), 2);
     }
 
-    // -- Task 1.3: real code-review-loop workflow must fail due to unimplemented loop --
+    // -- Task 8.2: code-review-loop workflow now parses successfully --
     #[test]
-    fn reject_code_review_loop_workflow_json() {
+    fn accept_code_review_loop_workflow_json() {
         let raw = include_str!("../../../workflows/code-review-loop.workflow.json");
-        let err = parse_workflow_definition(raw).unwrap_err();
-        assert!(
-            err.to_string().contains("loop runtime is not implemented yet"),
-            "got: {err}"
-        );
+        let def = parse_workflow_definition(raw).expect("code-review-loop parsed");
+        assert!(def.nodes.contains_key("review-loop"));
+        assert!(def.nodes.contains_key("implement"));
+        assert!(def.nodes.contains_key("review"));
+        assert!(def.nodes.contains_key("reviewDecision"));
     }
 }
