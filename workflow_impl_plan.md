@@ -216,50 +216,65 @@
 - `reconcile_activity()` 和 `reconcile_provider_dangling_effects()` 已完整实现（含 prior reconcileResult recovery、input validation、readOnlyLookup/idempotentSubmit 决策、错误分类），但暂未替代现有 `resume_schedule_dangling_effects` / `resume_feishu_im_dangling_effects`。
 - 两个 reconciler 实现了完整的 trait 语义，后续合并只需将 daemon resume handler 中的 provider-specific 调用替换为 `reconcile_provider_dangling_effects()`。
 
-### Task 3.2: 合并 resume 决策树
+### Task 3.2: 合并 resume 决策树 ✅ 已完成
 
-状态：**未完成**（前置基础已就绪，`reconcile_activity` / `reconcile_provider_dangling_effects` 已实现但尚需集成到 daemon resume handler 中替代现有两套独立入口）
+状态：**已完成**
 
 涉及文件：
+- `crates/beam-daemon/src/workflow_reconcilers.rs`（主路径 + hash 校验）
+- `crates/beam-daemon/src/lib.rs`（daemon resume handler 集成 + 类型转换）
+- `crates/beam-core/src/workflow_resume.rs`（保留旧函数兼容，不再作为主入口）
 
-- `crates/beam-core/src/workflow_resume.rs`
-- `crates/beam-core/src/workflow_snapshot.rs`
+实现说明：
+- `resume_workflow_run` 不再调用 provider-specific 的 `resume_schedule_dangling_effects` / `resume_feishu_im_dangling_effects`，统一通过 `reconcile_provider_dangling_effects(registry, …)` 对 `"beam-schedule"` 和 `"feishu-im"` 分别恢复。
+- `ProviderReconciler` trait 新增 `supports_read_only_lookup()` / `supports_idempotent_submit()` 能力声明，用于决策树分支。
+- `reconcile_activity` 加载 sidecar 后计算 canonical input 的 sha256 hex，与 `effectAttempted.inputHash` 比较；mismatch 时写入 `reconcileResult{decision=manual, evidence.source=effectInputSidecar, returned=hashMismatch}` + `activityFailed{errorCode=EffectInputHashMismatch}`，不调用 provider。
+- 不需要 sidecar 的 reconciler（如 beam-schedule readOnlyLookup）不受 hash 校验影响。
+- 旧函数保留并标记 `#[allow(dead_code)]`，保持向后兼容。
+- 新增 5 个测试（total: 25）：freshRetry via registry、schedule/feishu 能力声明、feishu hash mismatch → manual（不调 provider）、feishu hash match → 正常 fallthrough。
 
-任务：
-
-- 实现通用 `resume_dangling_effects`。
-- 逻辑包含：
-  - prior `reconcileResult` recovery
-  - missing reconciler -> manual failure
-  - missing effect input -> manual failure
-  - input hash mismatch -> manual failure
-  - readOnlyLookup success -> `activitySucceeded`
-  - idempotentSubmit success -> `activitySucceeded`
-  - retryable failure -> 保持 dangling，返回 transient failure
-
-验收标准：
-
-- schedule 和 feishu 都通过同一个 resume 函数恢复。
-- 现有 `workflow_resume.rs` 测试通过并新增 feishu/schedule registry 测试。
+任务覆盖的全部语义：
+- prior `reconcileResult` recovery ✅
+- missing reconciler -> manual failure ✅
+- missing effect input -> manual failure ✅
+- input hash mismatch -> manual failure ✅
+- readOnlyLookup success -> `activitySucceeded` ✅
+- idempotentSubmit success -> `activitySucceeded` ✅
+- retryable failure -> 保持 dangling，返回 transient failure ✅
 
 ## Phase 4: run_loop 内置 Recovery
 
-### Task 4.1: 在 run_loop 前置 recovery 阶段
+### Task 4.1: 在 run_loop 前置 recovery 阶段 ✅ 已完成
+
+状态：**已完成**
 
 涉及文件：
+- `crates/beam-core/src/workflow_runtime.rs`（新增 `RecoveryResult`、`WorkflowExecutionHooks::recover_dangling_effects`、`run_loop` recovery phase）
+- `crates/beam-core/src/lib.rs`（公开导出 `RecoveryResult`）
+- `crates/beam-daemon/src/lib.rs`（`DaemonWorkflowExecutionHooks` 实现 event-count-based recovery）
+- `crates/beam-daemon/src/workflow_reconcilers.rs`（`reconcile_activity` 用 `supports_read_only_lookup()` 做能力门禁）
 
-- `crates/beam-core/src/workflow_runtime.rs`
-- `crates/beam-core/src/workflow_resume.rs`
-- `crates/beam-daemon/src/lib.rs`
+实现说明：
+- `run_loop` 每轮在 `check_pending_cancels` 之后、`run_tick` 之前插入 recovery 阶段：读取 snapshot → 若 `dangling.effect_attempted` 非空 → 调用 `hooks.recover_dangling_effects()` → 若 `had_progress=true`（有新事件写入）则 `continue`（replay snapshot，不消耗 tick）；否则 fall through 到 `run_tick`。
+- `WorkflowExecutionHooks` trait 新增 `recover_dangling_effects` 方法，默认实现返回 `had_progress=false, has_remaining_dangling=!dangling.is_empty()`。
+- Daemon 实现通过 `global_reconciler_registry()` 遍历所有已注册 provider 调用 `reconcile_provider_dangling_effects`，再用 `handle_missing_provider_dangling_effects` 处理无 reconciler 的 provider；以 EventLog 事件数量 delta 精确判断 `had_progress`（避免 prior freshRetry 不写新事件却被误判为 progress 导致无限循环）。
+- `reconcile_activity` 的 readOnlyLookup 分支现由 `supports_read_only_lookup()` 显式门控，消除该方法的 dead_code warning。
+- 新增 5 个测试：
+  - `run_loop_calls_recovery_when_dangling_effects_present`（core）
+  - `run_loop_replays_after_recovery_writes_events`（core：recovery 写入事件 → replay → 继续推进）
+  - `run_loop_no_infinite_loop_when_recovery_cannot_progress`（core：无法恢复 → NoProgress，不卡死）
+  - `default_recovery_result_has_correct_semantics`（core：默认实现 has_remaining_dangling 语义正确）
+  - `prior_fresh_retry_does_not_write_new_events_on_second_reconciliation`（daemon reconciler：prior freshRetry 不写新事件）
+
+剩余差距：
+- Dashboard `/resume` 仍保留兼容响应构造和显式 registry 恢复逻辑（在调用 `run_workflow_runtime_once` 前单独执行），与 run_loop 内置 recovery 冗余但向后兼容。后续可简化为仅写 `resumeStarted` → 调用 `run_loop` → 从最终 snapshot 构建响应，进一步收敛。
 
 任务：
-
 - 修改 `run_loop`：每轮 `decide_next_actions` 前先处理 dangling 状态。
 - 如果 recovery 写入了事件，重新 replay 并进入下一轮。
 - 如果 recovery 无法推进，返回 `NoProgress`。
 
 验收标准：
-
 - cold attach 非 terminal workflow 时会自动尝试 recover dangling effect。
 - dashboard `/resume` 不再包含大量 provider-specific 恢复逻辑，只是调用统一 run loop 或 recovery API。
 

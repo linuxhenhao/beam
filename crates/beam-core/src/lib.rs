@@ -86,7 +86,7 @@ pub use workflow_run::{
     bootstrap_workflow_run, mint_workflow_run_id,
 };
 pub use workflow_runtime::{
-    HostExecutorPrepareResult, RunLoopResult, RunLoopStopReason, RunTickResult,
+    HostExecutorPrepareResult, RecoveryResult, RunLoopResult, RunLoopStopReason, RunTickResult,
     WorkflowDispatchOutcome, WorkflowDispatchRun, WorkflowDispatchSession, WorkflowExecutionHooks,
     WorkflowRuntimeContext, complete_node_failed, complete_node_succeeded, complete_run_failed,
     complete_run_succeeded, derive_workflow_idempotency_key, dispatch_gate, dispatch_work,

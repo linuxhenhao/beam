@@ -1,26 +1,22 @@
 //! ProviderReconciler trait and registry for workflow effect reconciliation.
 //!
-//! ... (see module-level doc)
-//!
 //! ## Error handling convention
 //!
 //! - Missing reconciler → `manual` recovery (provider is unknown).
 //! - Missing effect input when required → `manual` failure.
+//! - Input hash mismatch → `manual` failure (no provider call).
 //! - Retryable provider errors → transient failure (effect stays dangling).
 //! - Non-retryable provider errors → `manual` failure.
 //!
 //! ## Implementation status
 //!
-//! - **Task 3.1** (done): trait, registry, reconciler implementations, missing-provider
-//!   detection wired into daemon resume flow.
-//! - **Task 3.2** (pending): `reconcile_activity` / `reconcile_provider_dangling_effects`
-//!   are ready but not yet called; existing `resume_schedule_dangling_effects` /
-//!   `resume_feishu_im_dangling_effects` still handle registered providers directly.
-//!
-//! The unused-code annotations below are intentional – they keep Task 3.2
-//! infrastructure available without generating noise.
-
-#![allow(dead_code)]
+//! - **Task 3.1** (done): trait, registry, reconciler implementations.
+//! - **Task 3.2** (done): `reconcile_activity` / `reconcile_provider_dangling_effects`
+//!   are the primary recovery path for all registered providers, replacing the
+//!   legacy provider-specific `resume_schedule_dangling_effects` /
+//!   `resume_feishu_im_dangling_effects` in the daemon resume handler.
+//! - `handle_missing_provider_dangling_effects` catches unregistered providers
+//!   after registered-provider reconciliation completes.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -41,10 +37,9 @@ use crate::AppState;
 
 /// A reconciler that recovers dangling effects for a specific provider.
 ///
-/// Note: The full trait methods are defined here for Task 3.2 (merged resume
-/// decision tree). Currently only `handle_missing_provider_dangling_effects`
-/// and the registry are used in the daemon's resume flow.
-#[allow(dead_code)]
+/// All trait methods are now exercised through the unified
+/// `reconcile_activity` / `reconcile_provider_dangling_effects` path
+/// (Task 3.2 merged resume decision tree).
 #[async_trait]
 pub trait ProviderReconciler: Send + Sync {
     /// The provider name this reconciler handles (e.g. `"beam-schedule"`, `"feishu-im"`).
@@ -103,6 +98,21 @@ pub trait ProviderReconciler: Send + Sync {
     /// retried on the next resume cycle. Non-retryable errors result in a
     /// `manual` failure.
     fn is_retryable_error(&self, err: &anyhow::Error) -> bool;
+
+    /// Whether this reconciler supports `readOnlyLookup`.
+    ///
+    /// If `readOnlyLookup` is supported and returns `None`, and
+    /// `supports_idempotent_submit()` is false, the reconciler will issue a
+    /// `freshRetry` (instead of falling through to idempotent submit which
+    /// would fail).
+    fn supports_read_only_lookup(&self) -> bool {
+        false
+    }
+
+    /// Whether this reconciler supports `idempotentSubmit`.
+    fn supports_idempotent_submit(&self) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +214,14 @@ impl ProviderReconciler for BeamScheduleReconciler {
         // File system / local store errors are not retryable in the provider sense
         false
     }
+
+    fn supports_read_only_lookup(&self) -> bool {
+        true
+    }
+
+    fn supports_idempotent_submit(&self) -> bool {
+        false
+    }
 }
 
 /// Reconciler for `feishu-im`: re-sends a chat message as idempotent submit.
@@ -293,6 +311,14 @@ impl ProviderReconciler for FeishuImReconciler {
     fn is_retryable_error(&self, err: &anyhow::Error) -> bool {
         crate::is_retryable_feishu_resume_error(err)
     }
+
+    fn supports_read_only_lookup(&self) -> bool {
+        false
+    }
+
+    fn supports_idempotent_submit(&self) -> bool {
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -329,6 +355,7 @@ pub enum ReconcileActivityOutcome {
         reason: String,
     },
     /// This activity was skipped (not applicable to this reconciler).
+    #[allow(dead_code)]
     Skipped {
         activity_id: String,
         reason: String,
@@ -343,6 +370,11 @@ pub enum ReconcileActivityOutcome {
 /// 3. If the reconciler supports `idempotentSubmit`, tries that next.
 /// 4. On success, writes `reconcileResult` + `activitySucceeded`.
 /// 5. On failure, writes `reconcileResult` + `activityFailed` (manual recovery) or returns transient failure.
+///
+/// If `expected_input_hash` is provided and the reconciler requires effect input,
+/// the canonical input hash is validated against the expected hash from the
+/// original `effectAttempted` event before calling `idempotentSubmit`.
+/// A mismatch results in `manual` recovery without contacting the provider.
 #[allow(clippy::too_many_arguments)]
 pub async fn reconcile_activity(
     reconciler: &dyn ProviderReconciler,
@@ -353,6 +385,7 @@ pub async fn reconcile_activity(
     attempt_id: &str,
     idempotency_key: &str,
     sidecar_input: Option<&Value>,
+    expected_input_hash: Option<&str>,
 ) -> Result<Vec<ReconcileActivityOutcome>> {
     let mut outcomes = Vec::new();
 
@@ -392,74 +425,157 @@ pub async fn reconcile_activity(
         }
     }
 
-    // --- Step 2: Try readOnlyLookup ---
-    match reconciler
-        .read_only_lookup(state, &state.paths, idempotency_key)
-        .await
-    {
-        Ok(Some(evidence)) => {
-            let external_refs = evidence
-                .get("externalRefs")
-                .cloned()
-                .and_then(|v| v.as_object().cloned().map(Value::Object))
-                .unwrap_or_else(|| evidence.clone());
-            let output_ref = write_json_blob(log, external_refs.clone())?;
-            let _ = log.append(EventDraft {
-                event_type: "reconcileResult".to_string(),
-                actor: WorkflowActor::System,
-                payload: serde_json::json!({
-                    "activityId": activity_id,
-                    "idempotencyKey": idempotency_key,
-                    "capability": "readOnlyLookup",
-                    "decision": "completedByIdempotentSubmit",
-                    "evidence": evidence,
-                }),
-                timestamp: None,
-                payload_hash: None,
-            })?;
-            let _ = log.append(EventDraft {
-                event_type: "activitySucceeded".to_string(),
-                actor: WorkflowActor::System,
-                payload: serde_json::json!({
-                    "activityId": activity_id,
-                    "attemptId": attempt_id,
-                    "outputRef": output_ref,
-                    "externalRefs": { "taskId": external_refs.get("taskId") },
-                }),
-                timestamp: None,
-                payload_hash: None,
-            })?;
-            outcomes.push(ReconcileActivityOutcome::Reconciled {
-                activity_id: activity_id.to_string(),
-                attempt_id: attempt_id.to_string(),
-                decision: "completedByIdempotentSubmit".to_string(),
-            });
-            return Ok(outcomes);
-        }
-        Ok(None) => {
-            // readOnlyLookup found nothing – fall through to idempotentSubmit
-        }
-        Err(err) => {
-            // readOnlyLookup failed – treat as transient unless we have idempotentSubmit fallback
-            if reconciler.is_retryable_error(&err) {
-                outcomes.push(ReconcileActivityOutcome::TransientFailure {
+    // --- Step 2: Try readOnlyLookup (only if the reconciler declares support) ---
+    if reconciler.supports_read_only_lookup() {
+        match reconciler
+            .read_only_lookup(state, &state.paths, idempotency_key)
+            .await
+        {
+            Ok(Some(evidence)) => {
+                let external_refs = evidence
+                    .get("externalRefs")
+                    .cloned()
+                    .and_then(|v| v.as_object().cloned().map(Value::Object))
+                    .unwrap_or_else(|| evidence.clone());
+                let output_ref = write_json_blob(log, external_refs.clone())?;
+                let _ = log.append(EventDraft {
+                    event_type: "reconcileResult".to_string(),
+                    actor: WorkflowActor::System,
+                    payload: serde_json::json!({
+                        "activityId": activity_id,
+                        "idempotencyKey": idempotency_key,
+                        "capability": "readOnlyLookup",
+                        "decision": "completedByIdempotentSubmit",
+                        "evidence": evidence,
+                    }),
+                    timestamp: None,
+                    payload_hash: None,
+                })?;
+                let _ = log.append(EventDraft {
+                    event_type: "activitySucceeded".to_string(),
+                    actor: WorkflowActor::System,
+                    payload: serde_json::json!({
+                        "activityId": activity_id,
+                        "attemptId": attempt_id,
+                        "outputRef": output_ref,
+                        "externalRefs": { "taskId": external_refs.get("taskId") },
+                    }),
+                    timestamp: None,
+                    payload_hash: None,
+                })?;
+                outcomes.push(ReconcileActivityOutcome::Reconciled {
                     activity_id: activity_id.to_string(),
                     attempt_id: attempt_id.to_string(),
-                    provider: reconciler.provider_name().to_string(),
-                    idempotency_key: idempotency_key.to_string(),
-                    error_code: "ReconcilerReadOnlyLookupError".to_string(),
-                    error_message: format!("{:#}", err),
+                    decision: "completedByIdempotentSubmit".to_string(),
                 });
                 return Ok(outcomes);
             }
-            // Non-retryable read-only error: fall through to try idempotentSubmit
+            Ok(None) => {
+                // readOnlyLookup found nothing.
+                // If this reconciler does NOT support idempotentSubmit, issue
+                // freshRetry so the caller can recreate the effect from scratch.
+                if !reconciler.supports_idempotent_submit() {
+                    let _ = log.append(EventDraft {
+                        event_type: "reconcileResult".to_string(),
+                        actor: WorkflowActor::System,
+                        payload: serde_json::json!({
+                            "activityId": activity_id,
+                            "idempotencyKey": idempotency_key,
+                            "capability": "readOnlyLookup",
+                            "decision": "freshRetry",
+                            "evidence": {
+                                "source": "getTask",
+                                "returned": "undefined",
+                            },
+                        }),
+                        timestamp: None,
+                        payload_hash: None,
+                    })?;
+                    outcomes.push(ReconcileActivityOutcome::FreshRetry {
+                        activity_id: activity_id.to_string(),
+                        attempt_id: attempt_id.to_string(),
+                    });
+                    return Ok(outcomes);
+                }
+                // Otherwise fall through to idempotentSubmit
+            }
+            Err(err) => {
+                // readOnlyLookup failed – treat as transient unless we have idempotentSubmit fallback
+                if reconciler.is_retryable_error(&err) {
+                    outcomes.push(ReconcileActivityOutcome::TransientFailure {
+                        activity_id: activity_id.to_string(),
+                        attempt_id: attempt_id.to_string(),
+                        provider: reconciler.provider_name().to_string(),
+                        idempotency_key: idempotency_key.to_string(),
+                        error_code: "ReconcilerReadOnlyLookupError".to_string(),
+                        error_message: format!("{:#}", err),
+                    });
+                    return Ok(outcomes);
+                }
+                // Non-retryable read-only error: fall through to try idempotentSubmit
+            }
         }
     }
 
     // --- Step 3: Try idempotentSubmit ---
     let canonical_input = if let Some(raw) = sidecar_input {
         match reconciler.canonical_input(raw) {
-            Ok(ci) => Some(ci),
+            Ok(ci) => {
+                // --- Validate input hash against the original effectAttempted.inputHash ---
+                if let Some(expected) = expected_input_hash {
+                    if !expected.is_empty() {
+                        let actual_bytes = serde_json::to_vec(&ci)?;
+                        let actual_hash = sha256_hex(&actual_bytes);
+                        if actual_hash != expected {
+                            let _ = log.append(EventDraft {
+                                event_type: "reconcileResult".to_string(),
+                                actor: WorkflowActor::System,
+                                payload: serde_json::json!({
+                                    "activityId": activity_id,
+                                    "attemptId": attempt_id,
+                                    "idempotencyKey": idempotency_key,
+                                    "capability": "idempotentSubmit",
+                                    "decision": "manual",
+                                    "evidence": {
+                                        "source": "effectInputSidecar",
+                                        "returned": "hashMismatch",
+                                        "expectedHash": expected,
+                                        "actualHash": actual_hash,
+                                    },
+                                }),
+                                timestamp: None,
+                                payload_hash: None,
+                            })?;
+                            let _ = log.append(EventDraft {
+                                event_type: "activityFailed".to_string(),
+                                actor: WorkflowActor::System,
+                                payload: serde_json::json!({
+                                    "activityId": activity_id,
+                                    "attemptId": attempt_id,
+                                    "error": {
+                                        "errorCode": "EffectInputHashMismatch",
+                                        "errorClass": "manual",
+                                        "errorMessage": format!(
+                                            "effect input hash mismatch: expected {expected}, got {actual_hash}"
+                                        ),
+                                    }
+                                }),
+                                timestamp: None,
+                                payload_hash: None,
+                            })?;
+                            outcomes.push(ReconcileActivityOutcome::ManualRecovery {
+                                activity_id: activity_id.to_string(),
+                                attempt_id: attempt_id.to_string(),
+                                reason: format!(
+                                    "effect input hash mismatch: expected {expected}, got {actual_hash}"
+                                ),
+                            });
+                            return Ok(outcomes);
+                        }
+                    }
+                }
+                Some(ci)
+            }
             Err(err) => {
                 // Invalid input – manual failure
                 let _ = log.append(EventDraft {
@@ -789,6 +905,7 @@ pub async fn reconcile_provider_dangling_effects(
             &latest.attempt_id,
             &effect_attempted.idempotency_key,
             sidecar.as_ref(),
+            Some(&effect_attempted.input_hash),
         )
         .await?;
 
@@ -1561,6 +1678,139 @@ mod tests {
         let _ = std::fs::remove_dir_all(paths.root());
     }
 
+    #[tokio::test]
+    async fn reconcile_schedule_dangling_via_registry_issues_fresh_retry_when_task_missing() {
+        let paths = temp_paths("registry-schedule-freshretry");
+        let _ = std::fs::remove_dir_all(paths.root());
+
+        let params = BTreeMap::from([(String::from("name"), String::from("beam"))]);
+        let run_id = "run-reg-sched-fr";
+        bootstrap_workflow_run(
+            &paths,
+            BootstrapWorkflowRunInput {
+                run_id,
+                workflow_json: r#"{"workflowId":"flow-a","version":1,"nodes":{"a":{"type":"hostExecutor","executor":"beam-schedule","input":{"name":"schedule-demo","schedule":"0 9 * * *","parsed":{"kind":"cron","expr":"0 9 * * *","display":"0 9 * * *"},"prompt":"demo","workingDir":"/tmp","chatId":"oc_","scope":"thread"},"unsafeAllowUngated":true}}}"#,
+                expected_workflow_id: Some("flow-a"),
+                params: &params,
+                initiator: "cli",
+                chat_binding: Some(RunChatBinding {
+                    chat_id: "chat-1".to_string(),
+                    lark_app_id: "app-1".to_string(),
+                }),
+            },
+        )
+        .unwrap();
+
+        // Write events but DO NOT create the task – simulate missing effect
+        {
+            let mut log =
+                EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
+            let _ = log
+                .append(EventDraft {
+                    event_type: "attemptCreated".to_string(),
+                    actor: WorkflowActor::Scheduler,
+                    payload: serde_json::json!({
+                        "nodeId": "a",
+                        "activityId": "act-1",
+                        "attemptId": "act-1::att-1",
+                        "attemptNumber": 1,
+                        "inputRef": {
+                            "outputHash": "sha256:dummy",
+                            "outputPath": "dummy",
+                            "outputBytes": 1,
+                            "outputSchemaVersion": 1,
+                            "contentType": "application/json",
+                        }
+                    }),
+                    timestamp: None,
+                    payload_hash: None,
+                })
+                .unwrap();
+            let _ = log
+                .append(EventDraft {
+                    event_type: "effectAttempted".to_string(),
+                    actor: WorkflowActor::HostExecutor,
+                    payload: serde_json::json!({
+                        "activityId": "act-1",
+                        "attemptId": "act-1::att-1",
+                        "idempotencyKey": "wf-key-nonexistent",
+                        "inputHash": "sha256:1",
+                        "idempotencyTtlMs": 9999999u64,
+                        "provider": "beam-schedule",
+                    }),
+                    timestamp: None,
+                    payload_hash: None,
+                })
+                .unwrap();
+        }
+
+        let snapshot = beam_core::read_run_snapshot(&paths.workflow_run_dir(run_id))
+            .await
+            .unwrap()
+            .expect("snapshot");
+        let state = make_state(&paths);
+        let mut log =
+            EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
+        let registry = default_reconciler_registry();
+
+        let result = reconcile_provider_dangling_effects(
+            &registry,
+            &state,
+            &mut log,
+            &paths.workflow_run_dir(run_id),
+            "beam-schedule",
+            &snapshot,
+        )
+        .await
+        .expect("reconcile");
+
+        // Should produce freshRetry (not manual and not reconciled)
+        assert_eq!(
+            result.fresh_retry.len(),
+            1,
+            "should have one freshRetry when task doesn't exist"
+        );
+        assert_eq!(
+            result.fresh_retry[0].decision, "freshRetry",
+            "decision should be freshRetry"
+        );
+        assert!(result.reconciled.is_empty(), "no reconciled expected");
+        assert!(
+            result.transient_failures.is_empty(),
+            "no transient failures expected"
+        );
+
+        let events = log.read_all().unwrap();
+        let reconcile_result = events
+            .iter()
+            .find(|e| e.event_type == "reconcileResult")
+            .expect("should have reconcileResult");
+        assert_eq!(
+            reconcile_result.payload["decision"], "freshRetry",
+            "reconcileResult decision should be freshRetry"
+        );
+        assert_eq!(
+            reconcile_result.payload["capability"], "readOnlyLookup",
+            "should use readOnlyLookup capability"
+        );
+
+        let _ = std::fs::remove_dir_all(paths.root());
+    }
+
+    #[test]
+    fn beam_schedule_supports_read_only_lookup_only() {
+        let r = BeamScheduleReconciler;
+        assert!(r.supports_read_only_lookup());
+        assert!(!r.supports_idempotent_submit());
+    }
+
+    #[test]
+    fn feishu_im_supports_idempotent_submit_only() {
+        let r = FeishuImReconciler;
+        assert!(!r.supports_read_only_lookup());
+        assert!(r.supports_idempotent_submit());
+    }
+
     // -----------------------------------------------------------------------
     // Feishu reconciler trait behaviour
     // -----------------------------------------------------------------------
@@ -1618,6 +1868,440 @@ mod tests {
         );
         // Missing bot is NOT retryable
         assert!(!r.is_retryable_error(&err));
+        let _ = std::fs::remove_dir_all(paths.root());
+    }
+
+    // -----------------------------------------------------------------------
+    // Hash mismatch → manual failure (no provider call)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn feishu_im_hash_mismatch_produces_manual_failure_without_provider_call() {
+        let paths = temp_paths("feishu-hash-mismatch");
+        let _ = std::fs::remove_dir_all(paths.root());
+        let run_id = "run-hash-mismatch";
+
+        bootstrap_workflow_run(
+            &paths,
+            BootstrapWorkflowRunInput {
+                run_id,
+                workflow_json: r#"{"workflowId":"flow-a","version":1,"nodes":{"a":{"type":"hostExecutor","executor":"feishu-send","input":{"larkAppId":"app-1","chatId":"chat-1","content":"hello"},"unsafeAllowUngated":true}}}"#,
+                expected_workflow_id: Some("flow-a"),
+                params: &BTreeMap::new(),
+                initiator: "cli",
+                chat_binding: None,
+            },
+        )
+        .unwrap();
+
+        let run_dir = paths.workflow_run_dir(run_id);
+
+        // Write attemptCreated + effectAttempted with a deliberately wrong inputHash
+        {
+            let mut log =
+                EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
+            let _ = log
+                .append(EventDraft {
+                    event_type: "attemptCreated".to_string(),
+                    actor: WorkflowActor::Scheduler,
+                    payload: serde_json::json!({
+                        "nodeId": "a",
+                        "activityId": "act-feishu-1",
+                        "attemptId": "act-feishu-1::att-1",
+                        "attemptNumber": 1,
+                        "inputRef": {
+                            "outputHash": "sha256:dummy",
+                            "outputPath": "dummy",
+                            "outputBytes": 1,
+                            "outputSchemaVersion": 1,
+                            "contentType": "application/json",
+                        }
+                    }),
+                    timestamp: None,
+                    payload_hash: None,
+                })
+                .unwrap();
+            let _ = log
+                .append(EventDraft {
+                    event_type: "effectAttempted".to_string(),
+                    actor: WorkflowActor::HostExecutor,
+                    payload: serde_json::json!({
+                        "activityId": "act-feishu-1",
+                        "attemptId": "act-feishu-1::att-1",
+                        "idempotencyKey": "wf-key-feishu",
+                        "inputHash": "deadbeef_wrong_hash_123",
+                        "idempotencyTtlMs": 9999999u64,
+                        "provider": "feishu-im",
+                    }),
+                    timestamp: None,
+                    payload_hash: None,
+                })
+                .unwrap();
+        }
+
+        // Write a sidecar with valid content (different from what the wrong hash represents)
+        let sidecar_dir = run_dir
+            .join("attempts")
+            .join("act-feishu-1")
+            .join("act-feishu-1::att-1");
+        std::fs::create_dir_all(&sidecar_dir).unwrap();
+        let sidecar_content = serde_json::json!({
+            "larkAppId": "app-1",
+            "chatId": "chat-1",
+            "content": "hello"
+        });
+        std::fs::write(
+            sidecar_dir.join("effect-input.json"),
+            serde_json::to_vec_pretty(&sidecar_content).unwrap(),
+        )
+        .unwrap();
+
+        let snapshot = beam_core::read_run_snapshot(&run_dir)
+            .await
+            .unwrap()
+            .expect("snapshot");
+        let state = make_state(&paths);
+        let mut log =
+            EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
+        let registry = default_reconciler_registry();
+
+        let result = reconcile_provider_dangling_effects(
+            &registry,
+            &state,
+            &mut log,
+            &run_dir,
+            "feishu-im",
+            &snapshot,
+        )
+        .await
+        .expect("reconcile_provider_dangling_effects");
+
+        // Should produce manual recovery — NOT call the provider
+        assert!(
+            !result.reconciled.is_empty(),
+            "should produce manual recovery"
+        );
+        let manual = result.reconciled.iter().find(|o| o.decision == "manual");
+        assert!(
+            manual.is_some(),
+            "should have manual decision due to hash mismatch"
+        );
+
+        // Verify the EventLog has reconcileResult with hashMismatch evidence
+        let events = log.read_all().unwrap();
+        let reconcile_result = events
+            .iter()
+            .find(|e| e.event_type == "reconcileResult")
+            .expect("should have reconcileResult");
+        assert_eq!(
+            reconcile_result.payload["decision"], "manual",
+            "decision should be manual"
+        );
+        assert_eq!(
+            reconcile_result.payload["evidence"]["source"], "effectInputSidecar",
+            "evidence source should be effectInputSidecar"
+        );
+        assert_eq!(
+            reconcile_result.payload["evidence"]["returned"], "hashMismatch",
+            "evidence should indicate hashMismatch"
+        );
+        assert!(
+            reconcile_result.payload["evidence"]["expectedHash"]
+                .as_str()
+                .unwrap()
+                .contains("deadbeef"),
+            "expectedHash should be the wrong hash from effectAttempted"
+        );
+
+        let activity_failed = events
+            .iter()
+            .find(|e| e.event_type == "activityFailed")
+            .expect("should have activityFailed");
+        assert_eq!(
+            activity_failed.payload["error"]["errorCode"],
+            "EffectInputHashMismatch"
+        );
+        assert_eq!(
+            activity_failed.payload["error"]["errorClass"], "manual",
+            "errorClass should be manual"
+        );
+
+        let _ = std::fs::remove_dir_all(paths.root());
+    }
+
+    #[tokio::test]
+    async fn feishu_im_hash_match_falls_through_to_idempotent_submit_not_hash_mismatch() {
+        // Verify that when the hash MATCHES, the code falls through to
+        // idempotentSubmit (which fails because bot is missing — but the error
+        // should be "bot not registered", NOT "hash mismatch").
+        let paths = temp_paths("feishu-hash-match");
+        let _ = std::fs::remove_dir_all(paths.root());
+        let run_id = "run-hash-match";
+
+        bootstrap_workflow_run(
+            &paths,
+            BootstrapWorkflowRunInput {
+                run_id,
+                workflow_json: r#"{"workflowId":"flow-a","version":1,"nodes":{"a":{"type":"hostExecutor","executor":"feishu-send","input":{"larkAppId":"app-nonexistent","chatId":"chat-1","content":"hello"},"unsafeAllowUngated":true}}}"#,
+                expected_workflow_id: Some("flow-a"),
+                params: &BTreeMap::new(),
+                initiator: "cli",
+                chat_binding: None,
+            },
+        )
+        .unwrap();
+
+        let run_dir = paths.workflow_run_dir(run_id);
+
+        // The canonical input for feishu-im sidecar {"larkAppId":"app-nonexistent","chatId":"chat-1","content":"hello"}
+        // Compute the matching hash so the hash check passes.
+        let sidecar_content = serde_json::json!({
+            "larkAppId": "app-nonexistent",
+            "chatId": "chat-1",
+            "content": "hello"
+        });
+        let r = FeishuImReconciler;
+        let canonical = r.canonical_input(&sidecar_content).expect("canonical_input");
+        let canonical_bytes = serde_json::to_vec(&canonical).unwrap();
+        let correct_hash = sha256_hex(&canonical_bytes);
+
+        // Write attemptCreated + effectAttempted with the CORRECT hash
+        {
+            let mut log =
+                EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
+            let _ = log
+                .append(EventDraft {
+                    event_type: "attemptCreated".to_string(),
+                    actor: WorkflowActor::Scheduler,
+                    payload: serde_json::json!({
+                        "nodeId": "a",
+                        "activityId": "act-feishu-2",
+                        "attemptId": "act-feishu-2::att-1",
+                        "attemptNumber": 1,
+                        "inputRef": {
+                            "outputHash": "sha256:dummy",
+                            "outputPath": "dummy",
+                            "outputBytes": 1,
+                            "outputSchemaVersion": 1,
+                            "contentType": "application/json",
+                        }
+                    }),
+                    timestamp: None,
+                    payload_hash: None,
+                })
+                .unwrap();
+            let _ = log
+                .append(EventDraft {
+                    event_type: "effectAttempted".to_string(),
+                    actor: WorkflowActor::HostExecutor,
+                    payload: serde_json::json!({
+                        "activityId": "act-feishu-2",
+                        "attemptId": "act-feishu-2::att-1",
+                        "idempotencyKey": "wf-key-feishu-2",
+                        "inputHash": &correct_hash,
+                        "idempotencyTtlMs": 9999999u64,
+                        "provider": "feishu-im",
+                    }),
+                    timestamp: None,
+                    payload_hash: None,
+                })
+                .unwrap();
+        }
+
+        // Write the sidecar
+        let sidecar_dir = run_dir
+            .join("attempts")
+            .join("act-feishu-2")
+            .join("act-feishu-2::att-1");
+        std::fs::create_dir_all(&sidecar_dir).unwrap();
+        std::fs::write(
+            sidecar_dir.join("effect-input.json"),
+            serde_json::to_vec_pretty(&sidecar_content).unwrap(),
+        )
+        .unwrap();
+
+        let snapshot = beam_core::read_run_snapshot(&run_dir)
+            .await
+            .unwrap()
+            .expect("snapshot");
+        let state = make_state(&paths);
+        let mut log =
+            EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
+        let registry = default_reconciler_registry();
+
+        let result = reconcile_provider_dangling_effects(
+            &registry,
+            &state,
+            &mut log,
+            &run_dir,
+            "feishu-im",
+            &snapshot,
+        )
+        .await
+        .expect("reconcile_provider_dangling_effects");
+
+        // Should produce manual recovery because bot is missing, NOT because of hash mismatch
+        let manual = result.reconciled.iter().find(|o| o.decision == "manual");
+        assert!(
+            manual.is_some(),
+            "should have manual decision (bot missing, not hash mismatch)"
+        );
+
+        // Verify the events do NOT contain hashMismatch
+        let events = log.read_all().unwrap();
+        let has_hash_mismatch = events
+            .iter()
+            .any(|e| {
+                e.event_type == "reconcileResult"
+                    && e.payload
+                        .get("evidence")
+                        .and_then(|v| v.get("returned"))
+                        .and_then(|v| v.as_str())
+                        == Some("hashMismatch")
+            });
+        assert!(
+            !has_hash_mismatch,
+            "should NOT have hashMismatch when hash matches"
+        );
+
+        // Verify activityFailed has bot-related error (not EffectInputHashMismatch)
+        let activity_failed = events
+            .iter()
+            .find(|e| e.event_type == "activityFailed")
+            .expect("should have activityFailed");
+        let error_code = activity_failed.payload["error"]["errorCode"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            error_code != "EffectInputHashMismatch",
+            "error should NOT be EffectInputHashMismatch, got: {error_code}"
+        );
+
+        let _ = std::fs::remove_dir_all(paths.root());
+    }
+
+    #[tokio::test]
+    async fn prior_fresh_retry_does_not_write_new_events_on_second_reconciliation() {
+        let paths = temp_paths("prior-freshretry-noprogress");
+        let _ = std::fs::remove_dir_all(paths.root());
+
+        let params = BTreeMap::from([(String::from("name"), String::from("beam"))]);
+        let run_id = "run-prior-fr";
+        bootstrap_workflow_run(
+            &paths,
+            BootstrapWorkflowRunInput {
+                run_id,
+                workflow_json: r#"{"workflowId":"flow-a","version":1,"nodes":{"a":{"type":"hostExecutor","executor":"beam-schedule","input":{"name":"schedule-demo","schedule":"0 9 * * *","parsed":{"kind":"cron","expr":"0 9 * * *","display":"0 9 * * *"},"prompt":"demo","workingDir":"/tmp","chatId":"oc_","scope":"thread"},"unsafeAllowUngated":true}}}"#,
+                expected_workflow_id: Some("flow-a"),
+                params: &params,
+                initiator: "cli",
+                chat_binding: Some(RunChatBinding {
+                    chat_id: "chat-1".to_string(),
+                    lark_app_id: "app-1".to_string(),
+                }),
+            },
+        )
+        .unwrap();
+
+        // Write dangling effectAttempted (task does NOT exist → freshRetry).
+        {
+            let mut log =
+                EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
+            let _ = log
+                .append(EventDraft {
+                    event_type: "attemptCreated".to_string(),
+                    actor: WorkflowActor::Scheduler,
+                    payload: serde_json::json!({
+                        "nodeId": "a",
+                        "activityId": "act-1",
+                        "attemptId": "act-1::att-1",
+                        "attemptNumber": 1,
+                        "inputRef": {
+                            "outputHash": "sha256:dummy",
+                            "outputPath": "dummy",
+                            "outputBytes": 1,
+                            "outputSchemaVersion": 1,
+                            "contentType": "application/json",
+                        }
+                    }),
+                    timestamp: None,
+                    payload_hash: None,
+                })
+                .unwrap();
+            let _ = log
+                .append(EventDraft {
+                    event_type: "effectAttempted".to_string(),
+                    actor: WorkflowActor::HostExecutor,
+                    payload: serde_json::json!({
+                        "activityId": "act-1",
+                        "attemptId": "act-1::att-1",
+                        "idempotencyKey": "wf-key-nonexistent",
+                        "inputHash": "sha256:1",
+                        "idempotencyTtlMs": 9999999u64,
+                        "provider": "beam-schedule",
+                    }),
+                    timestamp: None,
+                    payload_hash: None,
+                })
+                .unwrap();
+        }
+
+        let state = make_state(&paths);
+        let mut log =
+            EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
+        let registry = default_reconciler_registry();
+
+        // --- First reconciliation: should write reconcileResult{decision=freshRetry} ---
+        let snap1 = beam_core::read_run_snapshot(&paths.workflow_run_dir(run_id))
+            .await
+            .unwrap()
+            .expect("snapshot 1");
+        let result1 = reconcile_provider_dangling_effects(
+            &registry,
+            &state,
+            &mut log,
+            &paths.workflow_run_dir(run_id),
+            "beam-schedule",
+            &snap1,
+        )
+        .await
+        .expect("first reconcile");
+
+        assert_eq!(result1.fresh_retry.len(), 1, "first call: should have freshRetry");
+        let events_after_first = log.read_all().unwrap();
+        let count_after_first = events_after_first.len();
+        let has_reconcile_result = events_after_first
+            .iter()
+            .any(|e| e.event_type == "reconcileResult");
+        assert!(has_reconcile_result, "first call should write reconcileResult");
+
+        // --- Second reconciliation: prior freshRetry exists, must NOT write new events ---
+        let snap2 = beam_core::read_run_snapshot(&paths.workflow_run_dir(run_id))
+            .await
+            .unwrap()
+            .expect("snapshot 2");
+        let _result2 = reconcile_provider_dangling_effects(
+            &registry,
+            &state,
+            &mut log,
+            &paths.workflow_run_dir(run_id),
+            "beam-schedule",
+            &snap2,
+        )
+        .await
+        .expect("second reconcile");
+
+        // The result may still reference the prior freshRetry outcome,
+        // but NO new events should have been appended.
+        let events_after_second = log.read_all().unwrap();
+        assert_eq!(
+            events_after_second.len(),
+            count_after_first,
+            "second reconciliation must NOT write new events when prior freshRetry exists; \
+             before={count_after_first} after={}",
+            events_after_second.len()
+        );
+
         let _ = std::fs::remove_dir_all(paths.root());
     }
 }

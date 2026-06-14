@@ -856,6 +856,70 @@ impl WorkflowExecutionHooks for DaemonWorkflowExecutionHooks {
             })
         }
     }
+
+    async fn recover_dangling_effects(
+        &mut self,
+        log: &mut beam_core::EventLog,
+        _snapshot: &beam_core::RunSnapshotDTO,
+    ) -> anyhow::Result<beam_core::RecoveryResult> {
+        let registry = workflow_reconcilers::global_reconciler_registry();
+        let run_dir = self.state.paths.workflow_run_dir(&log.run_id);
+
+        // Record event count before any reconciliation — only *new* events
+        // written during this recovery pass count as progress.
+        let events_before = log.read_all()?.len();
+
+        // Step 1: Reconcile dangling effects for all registered providers.
+        // Re-read the snapshot after each provider because earlier providers
+        // may have written terminal events that affect subsequent lookups.
+        let known_providers: Vec<String> =
+            registry.providers().map(|s| s.to_string()).collect();
+        for provider in &known_providers {
+            let current_snapshot = beam_core::read_run_snapshot(&run_dir)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("snapshot disappeared during recovery"))?;
+            let _ = workflow_reconcilers::reconcile_provider_dangling_effects(
+                registry,
+                &self.state,
+                log,
+                &run_dir,
+                provider,
+                &current_snapshot,
+            )
+            .await?;
+        }
+
+        // Step 2: Handle dangling effects from providers with no reconciler.
+        let after_registered = beam_core::read_run_snapshot(&run_dir)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("snapshot disappeared after registered providers"))?;
+        let _ = workflow_reconcilers::handle_missing_provider_dangling_effects(
+            registry,
+            log,
+            &after_registered,
+        )?;
+
+        // Determine progress by event-count delta: only events that were
+        // actually appended during this recovery pass count as progress.
+        // This correctly handles cases like a prior freshRetry that yields
+        // a result without writing any new event.
+        let events_after = log.read_all()?.len();
+        let had_progress = events_after > events_before;
+
+        // Check remaining dangling effects after full recovery pass.
+        let final_snapshot = beam_core::read_run_snapshot(&run_dir)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("snapshot disappeared after full recovery"))?;
+        let has_remaining = !final_snapshot
+            .dangling
+            .effect_attempted
+            .is_empty();
+
+        Ok(beam_core::RecoveryResult {
+            had_progress,
+            has_remaining_dangling: has_remaining,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9411,6 +9475,7 @@ async fn cancel_workflow_run(
     ))
 }
 
+#[allow(dead_code)]
 async fn resume_feishu_im_dangling_effects(
     log: &mut EventLog,
     state: &AppState,
@@ -9710,6 +9775,75 @@ fn resume_started_event_json(event: &beam_core::WorkflowEventEnvelope) -> Value 
         "payload": event.payload,
         "payloadHash": event.payload_hash,
     })
+}
+
+/// Convert a unified `ProviderResumeResult` (from the reconciler registry path)
+/// to the legacy `ScheduleResumeResult` for backward-compatible API responses.
+fn provider_result_to_schedule_result(
+    result: workflow_reconcilers::ProviderResumeResult,
+) -> beam_core::ScheduleResumeResult {
+    beam_core::ScheduleResumeResult {
+        reconciled: result
+            .reconciled
+            .into_iter()
+            .map(|o| beam_core::ScheduleResumeOutcome {
+                activity_id: o.activity_id,
+                attempt_id: o.attempt_id,
+                decision: o.decision,
+            })
+            .collect(),
+        fresh_retry: result
+            .fresh_retry
+            .into_iter()
+            .map(|o| beam_core::ScheduleResumeOutcome {
+                activity_id: o.activity_id,
+                attempt_id: o.attempt_id,
+                decision: o.decision,
+            })
+            .collect(),
+        skipped: result.skipped,
+    }
+}
+
+/// Convert a unified `ProviderResumeResult` (from the reconciler registry path)
+/// to the legacy `FeishuResumeResult` for backward-compatible API responses.
+fn provider_result_to_feishu_result(
+    result: workflow_reconcilers::ProviderResumeResult,
+) -> FeishuResumeResult {
+    FeishuResumeResult {
+        reconciled: result
+            .reconciled
+            .into_iter()
+            .map(|o| FeishuResumeOutcome {
+                activity_id: o.activity_id,
+                attempt_id: o.attempt_id,
+                decision: o.decision,
+            })
+            .collect(),
+        fresh_retry: result
+            .fresh_retry
+            .into_iter()
+            .map(|o| FeishuResumeOutcome {
+                activity_id: o.activity_id,
+                attempt_id: o.attempt_id,
+                decision: o.decision,
+            })
+            .collect(),
+        transient_failures: result
+            .transient_failures
+            .into_iter()
+            .map(|f| FeishuTransientFailure {
+                activity_id: f.activity_id,
+                attempt_id: f.attempt_id,
+                provider: f.provider,
+                idempotency_key: f.idempotency_key,
+                error_code: f.error_code,
+                error_class: "retryable".to_string(),
+                error_message: f.error_message,
+            })
+            .collect(),
+        skipped: result.skipped,
+    }
 }
 
 fn build_workflow_resume_response(
@@ -10241,11 +10375,41 @@ async fn resume_workflow_run(
     let mut log =
         EventLog::new(run_id.clone(), state.paths.workflow_runs_dir()).map_err(internal_error)?;
 
-    let schedule_result = beam_core::resume_schedule_dangling_effects(
+    // Write resumeStarted event (previously written by resume_schedule_dangling_effects).
+    // This event serves as the checkpoint marker for the resume cycle and is used
+    // by the response builder to distinguish recovered vs new events.
+    let last_seen_event_id = log
+        .read_all()
+        .map_err(internal_error)?
+        .last()
+        .map(|event| event.event_id.clone())
+        .unwrap_or_default();
+    let _ = log
+        .append(EventDraft {
+            event_type: "resumeStarted".to_string(),
+            actor: WorkflowActor::System,
+            payload: serde_json::json!({
+                "daemonId": "beam-daemon",
+                "lastSeenEventId": last_seen_event_id,
+                "reason": req.reason.as_deref(),
+            }),
+            timestamp: None,
+            payload_hash: None,
+        })
+        .map_err(internal_error)?;
+
+    // --- Unified reconciler dispatch: registered providers go through the
+    //     registry-driven reconcile_provider_dangling_effects path ---
+    let reconciler_registry = workflow_reconcilers::global_reconciler_registry();
+
+    // Reconcile beam-schedule dangling effects via registry
+    let schedule_result_raw = workflow_reconcilers::reconcile_provider_dangling_effects(
+        reconciler_registry,
+        &state,
         &mut log,
-        &state.paths,
-        "beam-daemon",
-        req.reason.as_deref(),
+        &run_dir,
+        "beam-schedule",
+        &snapshot,
     )
     .await
     .map_err(internal_error)?;
@@ -10259,21 +10423,27 @@ async fn resume_workflow_run(
         ));
     };
 
-    let feishu_result =
-        resume_feishu_im_dangling_effects(&mut log, &state, &run_dir, &after_schedule_snapshot)
-            .await
-            .map_err(internal_error)?;
+    // Reconcile feishu-im dangling effects via registry
+    let feishu_result_raw = workflow_reconcilers::reconcile_provider_dangling_effects(
+        reconciler_registry,
+        &state,
+        &mut log,
+        &run_dir,
+        "feishu-im",
+        &after_schedule_snapshot,
+    )
+    .await
+    .map_err(internal_error)?;
 
     // --- Reconciler registry check: handle any remaining dangling effects for
     //     providers that have no reconciler registered ---
-    let registry = workflow_reconcilers::global_reconciler_registry();
     let after_feishu_snapshot =
         read_run_snapshot(&run_dir).await.map_err(internal_error)?;
     let (registry_covered, registry_missing) = if let Some(after_feishu) =
         after_feishu_snapshot.as_ref()
     {
         workflow_reconcilers::handle_missing_provider_dangling_effects(
-            registry,
+            reconciler_registry,
             &mut log,
             after_feishu,
         )
@@ -10285,6 +10455,11 @@ async fn resume_workflow_run(
         covered_providers: registry_covered,
         missing_providers: registry_missing,
     };
+
+    // Convert unified ProviderResumeResult to legacy types for
+    // backward-compatible API response.
+    let schedule_result = provider_result_to_schedule_result(schedule_result_raw);
+    let feishu_result = provider_result_to_feishu_result(feishu_result_raw);
 
     let raw_def = tokio::fs::read_to_string(run_dir.join("workflow.json"))
         .await
