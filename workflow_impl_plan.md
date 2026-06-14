@@ -278,13 +278,34 @@
 - cold attach 非 terminal workflow 时会自动尝试 recover dangling effect。
 - dashboard `/resume` 不再包含大量 provider-specific 恢复逻辑，只是调用统一 run loop 或 recovery API。
 
-### Task 4.2: 增加 dangling wait resolution 投影
+### Task 4.2: 增加 dangling wait resolution 投影 ✅ 已完成
+
+状态：**已完成**
 
 涉及文件：
 
-- `crates/beam-core/src/workflow_snapshot.rs`
-- `crates/beam-core/src/workflow_actions.rs`
-- `crates/beam-core/src/workflow_resume.rs`
+- `crates/beam-core/src/workflow_snapshot.rs`（`DanglingSnapshot` 新增 `wait_resolutions: Vec<String>`，`ReplaySnapshot` 新增 `dangling_wait_resolutions`，replay 末尾正确传播）
+- `crates/beam-core/src/workflow_runtime.rs`（`run_loop` 新增 wait resolution recovery 阶段：在 effect recovery 后、`run_tick` 前检查 `dangling.wait_resolutions`，通过 `resolve_wait_terminals()` 按 resolution kind 物化 `activitySucceeded`/`activityFailed`）
+- `crates/beam-core/src/workflow_binding.rs`（更新 `DanglingSnapshot` 构造）
+- `crates/beam-core/src/workflow_orchestrator.rs`（更新 `DanglingSnapshot` 构造）
+- `crates/beam-daemon/src/lib.rs`（更新 `DanglingSnapshot` 构造）
+- `crates/beam-daemon/src/workflow_progress_card.rs`（更新 `DanglingSnapshot` 构造）
+
+实现说明：
+
+- replay 中 `dangling_wait_resolutions` 在 Phase 4.1 期间已经计算但被丢弃，本任务将其接入 `ReplaySnapshot` 和 `DanglingSnapshot` 序列化。
+- `run_loop` 的 wait resolution recovery 是确定性恢复（无需外部 provider 调用），因此直接内联在 run_loop 中而非通过 hooks。
+- recovery 区分：
+  - resolved（approved/external）→ 写 `activitySucceeded`（含 externalRefs: resolution/by/comment）
+  - resolved（rejected）→ 写 `activityFailed`（InputValidationFailed）
+  - deadlineExceeded（onTimeout=success）→ 写 `activitySucceeded`（defaultedToTimeout）
+  - deadlineExceeded（onTimeout=fail/未指定）→ 写 `activityFailed`（WaitDeadlineExceeded）
+- open wait 保持 `AwaitingWait`（`dangling.waits` 不变，run_loop 不会误 terminalize）。
+
+测试覆盖：
+
+- `open_wait_makes_run_loop_return_awaiting_wait`：验证 open wait → snapshot 中 `wait_resolutions` 为空、`waits` 非空，run_loop 返回 `AwaitingWait`
+- `run_loop_materializes_terminal_for_resolved_wait`：验证 resolved-but-no-terminal → snapshot 中 `wait_resolutions` 非空、`waits` 为空；run_loop recovery 写入 `activitySucceeded`，后续可继续推进
 
 任务：
 
@@ -296,8 +317,8 @@
 
 验收标准：
 
-- open wait 让 run_loop 返回 `AwaitingWait`。
-- resolved-but-no-terminal wait 会被 resume 写入 terminal event。
+- open wait 让 run_loop 返回 `AwaitingWait`。 ✅
+- resolved-but-no-terminal wait 会被 resume 写入 terminal event。 ✅
 
 ## Phase 5: Approval Card 闭环
 

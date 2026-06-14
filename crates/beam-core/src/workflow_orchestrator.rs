@@ -496,6 +496,7 @@ mod tests {
                 activities: Vec::new(),
                 effect_attempted: Vec::new(),
                 waits: Vec::new(),
+                wait_resolutions: Vec::new(),
                 cancels: Vec::new(),
             },
             outputs: BTreeMap::new(),

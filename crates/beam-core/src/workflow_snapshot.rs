@@ -389,6 +389,10 @@ pub struct DanglingSnapshot {
     pub activities: Vec<String>,
     pub effect_attempted: Vec<String>,
     pub waits: Vec<String>,
+    /// Activities where a wait resolution (waitResolved or waitDeadlineExceeded)
+    /// was written but the terminal activity event (activitySucceeded / activityFailed)
+    /// has not been written yet.  These should be materialised by recovery/resume.
+    pub wait_resolutions: Vec<String>,
     pub cancels: Vec<String>,
 }
 
@@ -421,6 +425,7 @@ pub async fn read_run_snapshot(run_dir: &Path) -> Result<Option<RunSnapshotDTO>>
             activities: snap.dangling_activities,
             effect_attempted: snap.dangling_effect_attempted,
             waits: snap.dangling_waits,
+            wait_resolutions: snap.dangling_wait_resolutions,
             cancels: snap.dangling_cancels,
         },
         outputs: snap.outputs,
@@ -441,6 +446,7 @@ struct ReplaySnapshot {
     dangling_activities: Vec<String>,
     dangling_effect_attempted: Vec<String>,
     dangling_waits: Vec<String>,
+    dangling_wait_resolutions: Vec<String>,
     dangling_cancels: Vec<String>,
 }
 
@@ -476,6 +482,7 @@ fn replay_events(events: &[WorkflowEventEnvelope]) -> Result<ReplaySnapshot> {
         dangling_activities: Vec::new(),
         dangling_effect_attempted: Vec::new(),
         dangling_waits: Vec::new(),
+        dangling_wait_resolutions: Vec::new(),
         dangling_cancels: Vec::new(),
     };
     let mut waits_open = BTreeSet::new();
@@ -1088,6 +1095,7 @@ fn replay_events(events: &[WorkflowEventEnvelope]) -> Result<ReplaySnapshot> {
         dangling_activities,
         dangling_effect_attempted,
         dangling_waits: waits_open.into_iter().collect(),
+        dangling_wait_resolutions,
         dangling_cancels,
     })
 }

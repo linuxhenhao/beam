@@ -156,6 +156,7 @@ mod tests {
                 activities: vec![],
                 effect_attempted: vec![],
                 waits: vec![],
+                wait_resolutions: vec![],
                 cancels: vec![],
             },
             outputs: BTreeMap::new(),

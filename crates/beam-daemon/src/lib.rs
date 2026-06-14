@@ -32,19 +32,18 @@ use base64::Engine;
 use beam_core::{
     AdoptCandidate, AdoptTmuxSessionRequest, AdoptedFrom, ApiHealth, AttemptResumeRequest,
     BackendType, BeamPaths, BootstrapWorkflowRunInput, BotConfig, BotSummary, ChatMode,
-    CliUsageLimitState, ColdWorkflowRun, Config, CreateSessionRequest,
-    DaemonOverview, DaemonRuntimeState, DaemonToWorker, DisplayMode, EventDraft, EventLog,
-    EventWindowOpts, FinalOutputKind, FinalOutputRequest, InitConfig, PendingResponseCardState,
-    ResolveWaitInput, RestartSessionRequest, ResumeSessionRequest, RunChatBinding, RunStatus,
-    ScreenStatus, Session, SessionGroup, SessionInputRequest,
-    SessionLocateInfo, SessionScope, SessionStatus, SessionSummary, TalkEvaluation, TermActionKey,
-    TuiPromptOption, WaitResolution, WorkerToDaemon, WorkflowActor, WorkflowDispatchOutcome,
-    WorkflowDispatchRun, WorkflowDispatchSession, WorkflowExecutionHooks, WorkflowNode,
-    WorkflowOutputRef, WorkflowRuntimeContext, bootstrap_workflow_run, can_operate,
-    complete_run_cancel, evaluate_talk, event_seq_from_id, grant_restricted,
-    infer_run_status, mint_workflow_run_id, parse_workflow_definition, parse_workflow_output,
-    read_event_window, read_run_events_pure, read_run_snapshot, request_cancel, resolve_wait,
-    run_loop, scan_cold_workflow_runs, with_workflow_output_protocol,
+    CliUsageLimitState, ColdWorkflowRun, Config, CreateSessionRequest, DaemonOverview,
+    DaemonRuntimeState, DaemonToWorker, DisplayMode, EventDraft, EventLog, EventWindowOpts,
+    FinalOutputKind, FinalOutputRequest, InitConfig, PendingResponseCardState, ResolveWaitInput,
+    RestartSessionRequest, ResumeSessionRequest, RunChatBinding, RunStatus, ScreenStatus, Session,
+    SessionGroup, SessionInputRequest, SessionLocateInfo, SessionScope, SessionStatus,
+    SessionSummary, TalkEvaluation, TermActionKey, TuiPromptOption, WaitResolution, WorkerToDaemon,
+    WorkflowActor, WorkflowDispatchOutcome, WorkflowDispatchRun, WorkflowDispatchSession,
+    WorkflowExecutionHooks, WorkflowNode, WorkflowOutputRef, WorkflowRuntimeContext,
+    bootstrap_workflow_run, can_operate, complete_run_cancel, evaluate_talk, event_seq_from_id,
+    grant_restricted, infer_run_status, mint_workflow_run_id, parse_workflow_definition,
+    parse_workflow_output, read_event_window, read_run_events_pure, read_run_snapshot,
+    request_cancel, resolve_wait, run_loop, scan_cold_workflow_runs, with_workflow_output_protocol,
 };
 use chrono::Utc;
 use connector_store::{
@@ -872,8 +871,7 @@ impl WorkflowExecutionHooks for DaemonWorkflowExecutionHooks {
         // Step 1: Reconcile dangling effects for all registered providers.
         // Re-read the snapshot after each provider because earlier providers
         // may have written terminal events that affect subsequent lookups.
-        let known_providers: Vec<String> =
-            registry.providers().map(|s| s.to_string()).collect();
+        let known_providers: Vec<String> = registry.providers().map(|s| s.to_string()).collect();
         for provider in &known_providers {
             let current_snapshot = beam_core::read_run_snapshot(&run_dir)
                 .await?
@@ -910,10 +908,7 @@ impl WorkflowExecutionHooks for DaemonWorkflowExecutionHooks {
         let final_snapshot = beam_core::read_run_snapshot(&run_dir)
             .await?
             .ok_or_else(|| anyhow::anyhow!("snapshot disappeared after full recovery"))?;
-        let has_remaining = !final_snapshot
-            .dangling
-            .effect_attempted
-            .is_empty();
+        let has_remaining = !final_snapshot.dangling.effect_attempted.is_empty();
 
         Ok(beam_core::RecoveryResult {
             had_progress,
@@ -6374,12 +6369,15 @@ async fn list_workflow_runs(
 fn project_workflow_run_row(run_id: &str, snapshot: &beam_core::RunSnapshotDTO) -> WorkflowRunRow {
     let effect_set: HashSet<_> = snapshot.dangling.effect_attempted.iter().cloned().collect();
     let wait_set: HashSet<_> = snapshot.dangling.waits.iter().cloned().collect();
+    let wr_set: HashSet<_> = snapshot.dangling.wait_resolutions.iter().cloned().collect();
     let d_act = snapshot
         .dangling
         .activities
         .iter()
         .filter(|activity_id| {
-            !effect_set.contains(*activity_id) && !wait_set.contains(*activity_id)
+            !effect_set.contains(*activity_id)
+                && !wait_set.contains(*activity_id)
+                && !wr_set.contains(*activity_id)
         })
         .count();
     let (error_code, error_class, error_message) = find_workflow_run_error(snapshot);
@@ -10437,20 +10435,18 @@ async fn resume_workflow_run(
 
     // --- Reconciler registry check: handle any remaining dangling effects for
     //     providers that have no reconciler registered ---
-    let after_feishu_snapshot =
-        read_run_snapshot(&run_dir).await.map_err(internal_error)?;
-    let (registry_covered, registry_missing) = if let Some(after_feishu) =
-        after_feishu_snapshot.as_ref()
-    {
-        workflow_reconcilers::handle_missing_provider_dangling_effects(
-            reconciler_registry,
-            &mut log,
-            after_feishu,
-        )
-        .map_err(internal_error)?
-    } else {
-        (Vec::new(), Vec::new())
-    };
+    let after_feishu_snapshot = read_run_snapshot(&run_dir).await.map_err(internal_error)?;
+    let (registry_covered, registry_missing) =
+        if let Some(after_feishu) = after_feishu_snapshot.as_ref() {
+            workflow_reconcilers::handle_missing_provider_dangling_effects(
+                reconciler_registry,
+                &mut log,
+                after_feishu,
+            )
+            .map_err(internal_error)?
+        } else {
+            (Vec::new(), Vec::new())
+        };
     let registry_result = workflow_reconcilers::ReconcilerRegistryCheckResult {
         covered_providers: registry_covered,
         missing_providers: registry_missing,
@@ -14290,6 +14286,7 @@ mod tests {
                 activities: vec![],
                 effect_attempted: vec![],
                 waits: vec![],
+                wait_resolutions: vec![],
                 cancels: vec![],
             },
             outputs: Default::default(),
