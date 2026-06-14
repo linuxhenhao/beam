@@ -14,6 +14,7 @@ mod terminal_proxy;
 mod trigger_log;
 mod webhook_key;
 mod webhook_lifecycle;
+mod workflow_host_executors;
 mod workflow_progress_card;
 
 use anyhow::{Context, Result};
@@ -771,8 +772,8 @@ struct FeishuResumeResult {
     skipped: Vec<String>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-struct WorkflowFeishuSendInput {
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub(crate) struct WorkflowFeishuSendInput {
     #[serde(rename = "larkAppId")]
     lark_app_id: String,
     #[serde(rename = "chatId")]
@@ -782,8 +783,8 @@ struct WorkflowFeishuSendInput {
     _msg_type: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-struct WorkflowFeishuReplyInput {
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub(crate) struct WorkflowFeishuReplyInput {
     #[serde(rename = "larkAppId")]
     lark_app_id: String,
     #[serde(rename = "rootMessageId")]
@@ -2298,7 +2299,7 @@ async fn lark_tenant_token(state: &AppState, bot: &BotConfig) -> Result<String> 
     Ok(token)
 }
 
-async fn lark_reply_message(
+pub(crate) async fn lark_reply_message(
     state: &AppState,
     bot: &BotConfig,
     message_id: &str,
@@ -2351,7 +2352,7 @@ async fn lark_reply_message_with_opts(
         .context("lark reply missing message_id")
 }
 
-async fn lark_send_chat_message(
+pub(crate) async fn lark_send_chat_message(
     state: &AppState,
     bot: &BotConfig,
     chat_id: &str,
@@ -5911,6 +5912,17 @@ async fn run_workflow_host_executor(
     node: &beam_core::HostExecutorNode,
     resolved_input: Value,
 ) -> Result<WorkflowDispatchOutcome> {
+    // Phase 2.1: delegate to the HostExecutorRegistry.
+    // If the executor is not registered, fall back to the legacy match arms
+    // (which also return UnknownProviderError/manual for anything not matching).
+    let registry = workflow_host_executors::global_host_executor_registry();
+    if let Some(executor) = registry.get(&node.executor) {
+        let parsed = executor.parse_input(&resolved_input)
+            .map_err(|err| anyhow::anyhow!("{} parse_input failed: {:#}", executor.name(), err))?;
+        return executor.invoke(state, ctx, node, &parsed).await;
+    }
+
+    // Legacy path – will be removed in Phase 2.3.
     match node.executor.as_str() {
         "feishu-send" => {
             let input: WorkflowFeishuSendInput = serde_json::from_value(resolved_input.clone())
@@ -6018,7 +6030,7 @@ async fn run_workflow_host_executor(
     }
 }
 
-fn derive_workflow_idempotency_key(
+pub(crate) fn derive_workflow_idempotency_key(
     workflow_id: &str,
     revision_id: &str,
     run_id: &str,
@@ -13370,7 +13382,7 @@ mod tests {
         let dir_b = paths.root().join("workflows-b");
         std::fs::create_dir_all(&dir_a).unwrap();
         std::fs::create_dir_all(&dir_b).unwrap();
-        let def_a = r#"{"workflowId":"flow-a","version":1,"params":{"name":{"type":"string","required":true}},"nodes":{"root":{"type":"hostExecutor","executor":"beam-schedule","input":{"name":"demo","schedule":"0 9 * * *","parsed":{"kind":"cron","expr":"0 9 * * *","display":"0 9 * * *"},"prompt":"Schedule demo","workingDir":"/tmp/demo","chatId":"oc_demo","scope":"thread"}}}}"#;
+        let def_a = r#"{"workflowId":"flow-a","version":1,"params":{"name":{"type":"string","required":true}},"nodes":{"root":{"type":"hostExecutor","executor":"beam-schedule","input":{"name":"demo","schedule":"0 9 * * *","parsed":{"kind":"cron","expr":"0 9 * * *","display":"0 9 * * *"},"prompt":"Schedule demo","workingDir":"/tmp/demo","chatId":"oc_demo","scope":"thread"},"unsafeAllowUngated":true}}}"#;
         let def_b = r#"{"workflowId":"flow-a","version":2,"nodes":{"alt":{"type":"subagent","bot":"bot-a","prompt":"hi"}}}"#;
         tokio::fs::write(dir_a.join("flow-a.workflow.json"), def_a)
             .await

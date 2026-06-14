@@ -162,6 +162,13 @@ pub fn parse_workflow_definition(raw: &str) -> Result<WorkflowDefinition> {
     Ok(def)
 }
 
+/// Side-effect executors that MUST be gated (humanGate or unsafeAllowUngated).
+const SIDE_EFFECT_EXECUTORS: &[&str] = &["feishu-send", "feishu-reply", "beam-schedule"];
+
+fn is_side_effect_executor(executor: &str) -> bool {
+    SIDE_EFFECT_EXECUTORS.contains(&executor)
+}
+
 pub fn validate_workflow_definition(def: &WorkflowDefinition) -> Result<()> {
     if def.workflow_id.trim().is_empty() {
         anyhow::bail!("workflowId 缺失");
@@ -173,11 +180,58 @@ pub fn validate_workflow_definition(def: &WorkflowDefinition) -> Result<()> {
         anyhow::bail!("Workflow must declare at least one node");
     }
     for node_id in def.nodes.keys() {
+        // Node id must match ^[A-Za-z0-9_.-]+$ (non-empty)
+        if node_id.is_empty() {
+            anyhow::bail!(
+                "nodeId '' rejected: must match ^[A-Za-z0-9_.-]+$"
+            );
+        }
+        if !node_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == '-')
+        {
+            anyhow::bail!(
+                "nodeId '{}' rejected: must match ^[A-Za-z0-9_.-]+$",
+                node_id
+            );
+        }
+        // Preserve existing path-traversal rejection
         if node_id == "." || node_id == ".." || node_id.contains("..") {
             anyhow::bail!(
                 "nodeId '{}' rejected: path-traversal style ids are not allowed",
                 node_id
             );
+        }
+    }
+    for (node_id, node) in &def.nodes {
+        // Reject unimplemented node types
+        match node {
+            WorkflowNode::Loop(_) => {
+                anyhow::bail!(
+                    "nodeId '{}': loop runtime is not implemented yet",
+                    node_id
+                );
+            }
+            WorkflowNode::Decision(_) => {
+                anyhow::bail!(
+                    "nodeId '{}': loop runtime is not implemented yet (standalone Decision requires loop)",
+                    node_id
+                );
+            }
+            WorkflowNode::HostExecutor(host) => {
+                // Side-effect executors must be gated
+                if is_side_effect_executor(&host.executor)
+                    && host.base.human_gate.is_none()
+                    && !host.base.unsafe_allow_ungated.unwrap_or(false)
+                {
+                    anyhow::bail!(
+                        "nodeId '{}': side-effect executor '{}' must have a humanGate or set unsafeAllowUngated: true",
+                        node_id,
+                        host.executor
+                    );
+                }
+            }
+            _ => {}
         }
     }
     for (node_id, node) in &def.nodes {
@@ -263,5 +317,190 @@ mod tests {
         .expect("definition");
         assert_eq!(def.workflow_id, "flow-a");
         assert_eq!(def.nodes.len(), 2);
+    }
+
+    // -- Task 1.1: node id validation --
+
+    #[test]
+    fn reject_node_id_with_slash() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"node/a":{"type":"subagent","bot":"b","prompt":"p"}}}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("nodeId"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_node_id_with_space() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"node a":{"type":"subagent","bot":"b","prompt":"p"}}}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("nodeId"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_node_id_dotdot() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"..":{"type":"subagent","bot":"b","prompt":"p"}}}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("nodeId"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_node_id_containing_dotdot() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"a..b":{"type":"subagent","bot":"b","prompt":"p"}}}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("nodeId"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_empty_node_id() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"":{"type":"subagent","bot":"b","prompt":"p"}}}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("nodeId"), "got: {err}");
+    }
+
+    #[test]
+    fn accept_node_id_with_dash() {
+        let def = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"node-a":{"type":"subagent","bot":"b","prompt":"p"}}}"#,
+        )
+        .expect("dash ok");
+        assert!(def.nodes.contains_key("node-a"));
+    }
+
+    #[test]
+    fn accept_node_id_with_underscore() {
+        let def = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"node_a":{"type":"subagent","bot":"b","prompt":"p"}}}"#,
+        )
+        .expect("underscore ok");
+        assert!(def.nodes.contains_key("node_a"));
+    }
+
+    #[test]
+    fn accept_node_id_with_dot() {
+        let def = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"node.a":{"type":"subagent","bot":"b","prompt":"p"}}}"#,
+        )
+        .expect("dot ok");
+        assert!(def.nodes.contains_key("node.a"));
+    }
+
+    // -- Task 1.2: side-effect executor gate validation --
+
+    #[test]
+    fn reject_ungated_feishu_send() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"a":{"type":"hostExecutor","executor":"feishu-send","input":1}}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("humanGate") || err.to_string().contains("side-effect"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_ungated_feishu_reply() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"a":{"type":"hostExecutor","executor":"feishu-reply","input":1}}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("humanGate") || err.to_string().contains("side-effect"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_ungated_beam_schedule() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"a":{"type":"hostExecutor","executor":"beam-schedule","input":1}}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("humanGate") || err.to_string().contains("side-effect"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_gated_feishu_send() {
+        let def = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"a":{"type":"hostExecutor","executor":"feishu-send","input":1,"humanGate":{"stage":"before","prompt":"ok?"}}}}"#,
+        )
+        .expect("gated feishu-send ok");
+        assert!(def.nodes.contains_key("a"));
+    }
+
+    #[test]
+    fn accept_unsafe_allow_ungated_feishu_send() {
+        let def = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"a":{"type":"hostExecutor","executor":"feishu-send","input":1,"unsafeAllowUngated":true}}}"#,
+        )
+        .expect("unsafeAllowUngated ok");
+        assert!(def.nodes.contains_key("a"));
+    }
+
+    #[test]
+    fn accept_ungated_non_side_effect_executor() {
+        let def = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"a":{"type":"hostExecutor","executor":"custom-tool","input":1}}}"#,
+        )
+        .expect("non-side-effect ok");
+        assert!(def.nodes.contains_key("a"));
+    }
+
+    // -- Task 1.3: reject unimplemented loop and standalone Decision --
+
+    #[test]
+    fn reject_loop_node_current_behavior() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"l":{"type":"loop","maxIterations":3,"body":[],"terminate":{"node":"d","via":"approve"}}}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("loop runtime is not implemented yet"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_standalone_decision_node_current_behavior() {
+        let err = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"d":{"type":"decision"}}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("loop runtime is not implemented yet"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn ordinary_dag_workflow_accepted() {
+        let def = parse_workflow_definition(
+            r#"{"workflowId":"f","version":1,"nodes":{"a":{"type":"subagent","bot":"b","prompt":"p"},"c":{"type":"subagent","bot":"b","prompt":"q","depends":["a"]}}}"#,
+        )
+        .expect("ordinary DAG ok");
+        assert_eq!(def.nodes.len(), 2);
+    }
+
+    // -- Task 1.3: real code-review-loop workflow must fail due to unimplemented loop --
+    #[test]
+    fn reject_code_review_loop_workflow_json() {
+        let raw = include_str!("../../../workflows/code-review-loop.workflow.json");
+        let err = parse_workflow_definition(raw).unwrap_err();
+        assert!(
+            err.to_string().contains("loop runtime is not implemented yet"),
+            "got: {err}"
+        );
     }
 }

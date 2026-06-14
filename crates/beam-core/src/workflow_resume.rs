@@ -367,7 +367,7 @@ mod tests {
             &paths,
             BootstrapWorkflowRunInput {
                 run_id,
-                workflow_json: r#"{"workflowId":"flow-a","version":1,"nodes":{"a":{"type":"hostExecutor","executor":"beam-schedule","input":{"name":"schedule-demo daily 9am","schedule":"0 9 * * *","parsed":{"kind":"cron","expr":"0 9 * * *","display":"0 9 * * *"},"prompt":"Schedule demo","workingDir":"/tmp/beam-schedule-demo","chatId":"oc_workflow_demo","scope":"thread"}}}}"#,
+                workflow_json: r#"{"workflowId":"flow-a","version":1,"nodes":{"a":{"type":"hostExecutor","executor":"beam-schedule","input":{"name":"schedule-demo daily 9am","schedule":"0 9 * * *","parsed":{"kind":"cron","expr":"0 9 * * *","display":"0 9 * * *"},"prompt":"Schedule demo","workingDir":"/tmp/beam-schedule-demo","chatId":"oc_workflow_demo","scope":"thread"},"unsafeAllowUngated":true}}}"#,
                 expected_workflow_id: Some("flow-a"),
                 params: &params,
                 initiator: "cli",
