@@ -1,18 +1,28 @@
 # Stage 1: Release PR
 #
-# On every push to main (feature PR merge, etc.), release-plz checks for
-# unpublished conventional-commit changes and creates/updates a single
-# "Release PR".  That PR contains the version bumps, internal dependency
-# version updates, and the generated changelog.  Nothing is published yet.
+# Runs AFTER the "Release Tag" workflow completes successfully on main
+# (serialized to avoid the race condition where Stage 1 and Stage 2 ran
+# in parallel on push main, causing release-pr to open a duplicate
+# Release PR before release-tag had created the git tag).
+#
+# Also runnable manually via workflow_dispatch.
+#
+# release-plz checks for unpublished conventional-commit changes and
+# creates/updates a single "Release PR". That PR contains the version
+# bumps, internal dependency version updates, and the generated changelog.
+# Nothing is published yet.
 #
 # When the Release PR is merged, the Stage 2 workflow
-# (.github/workflows/release-tag.yml) creates the git tag and GitHub Release.
+# (.github/workflows/release-tag.yml) creates the git tag and GitHub Release,
+# which in turn triggers this workflow again — but since the crates were
+# just released, no new Release PR will be opened.
 
 name: Release PR
 
 on:
-  push:
-    branches: [main]
+  workflow_run:
+    workflows: ["Release Tag"]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -21,6 +31,13 @@ permissions:
 
 jobs:
   release-pr:
+    # Run on manual dispatch, or when Release Tag succeeded on main.
+    # Skipping failed/cancelled runs avoids unnecessary runs on broken pushes.
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
