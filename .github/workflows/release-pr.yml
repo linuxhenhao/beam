@@ -1,0 +1,36 @@
+# Stage 1: Release PR
+#
+# On every push to main (feature PR merge, etc.), release-plz checks for
+# unpublished conventional-commit changes and creates/updates a single
+# "Release PR".  That PR contains the version bumps, internal dependency
+# version updates, and the generated changelog.  Nothing is published yet.
+#
+# When the Release PR is merged, the Stage 2 workflow
+# (.github/workflows/release-tag.yml) creates the git tag and GitHub Release.
+
+name: Release PR
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write       # needed to create / update the Release PR branch
+  pull-requests: write  # needed to create / update the Release PR
+
+jobs:
+  release-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history required for changelog / version diff
+
+      - name: Run release-plz PR
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+          config: release-plz.toml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
