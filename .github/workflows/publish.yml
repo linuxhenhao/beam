@@ -1,0 +1,139 @@
+# Stage 3: crates.io publish (gated)
+#
+# Triggered by ANY v* tag push or manual workflow_dispatch.
+# A validate-tag job checks that the tag is a stable semver (vX.Y.Z).
+# Prerelease tags (vX.Y.Z-beta.1, etc.) are skipped without triggering
+# the production environment approval.
+#
+# Publishing is gated behind the "production" GitHub Environment,
+# which can be configured with required reviewers in repo settings.
+#
+# Publish order (topological): beam-core → beam-daemon → beam-worker → beam-cli
+# Each crate is dry-run first (with retry), then published (with retry).
+# A 30 s sleep between crates accommodates crates.io index update delay.
+#
+# Required secrets / settings (see AGENTS.md):
+#   Secret:    CRATES_IO_TOKEN   (crates.io API token, scope: publish-update)
+#   Environment: production      (with required reviewers, if desired)
+
+name: Publish to crates.io
+
+on:
+  push:
+    tags:
+      # Match all v* tags. Validation (stable vs prerelease) happens in the
+      # validate-tag job so prereleases don't trigger a production approval.
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish from (e.g. v0.3.0 or refs/tags/v0.3.0)'
+        required: true
+        type: string
+
+jobs:
+  # ── pre-flight: determine the tag and check it is stable semver ──
+  # This job uses NO environment so prerelease tags never trigger
+  # a production-environment approval.
+  validate-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      stable: ${{ steps.check.outputs.stable }}
+      ref: ${{ steps.check.outputs.ref }}
+    steps:
+      - name: Validate tag is stable semver
+        id: check
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG_INPUT="${{ inputs.tag }}"
+            # Strip optional refs/tags/ prefix so users can paste
+            # either "v0.3.0" or "refs/tags/v0.3.0".
+            TAG="${TAG_INPUT#refs/tags/}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+
+          echo "Resolved tag: ${TAG}"
+
+          if [[ "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "✅ Stable semver tag — publish will proceed"
+            echo "stable=true" >> "$GITHUB_OUTPUT"
+            echo "ref=refs/tags/${TAG}" >> "$GITHUB_OUTPUT"
+          else
+            echo "⏭️  Not a stable semver tag (prerelease or invalid). Skipping crates.io publish."
+            echo "stable=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── publish crates (only for stable semver tags) ──
+  publish:
+    needs: validate-tag
+    if: needs.validate-tag.outputs.stable == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-tag.outputs.ref }}
+          fetch-depth: 0
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Publish crates in topological order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          publish_crate() {
+            local crate="$1"
+            local max_retries=6
+
+            # ── dry-run with retry (handles crates.io index delay) ──
+            echo "::group::Dry-run: cargo publish --dry-run -p ${crate}"
+            local ok=false
+            for i in $(seq 1 ${max_retries}); do
+              if cargo publish --dry-run -p "${crate}"; then
+                echo "✓ ${crate} dry-run successful (attempt ${i})"
+                ok=true
+                break
+              fi
+              if [ "${i}" -lt "${max_retries}" ]; then
+                echo "Dry-run attempt ${i}/${max_retries} failed — retrying in 30 s"
+                sleep 30
+              fi
+            done
+            echo "::endgroup::"
+            if [ "${ok}" != "true" ]; then
+              echo "::error::Dry-run failed for ${crate} after ${max_retries} attempts"
+              return 1
+            fi
+
+            # ── publish with retry (handles crates.io index delay) ──
+            echo "::group::Publishing ${crate}"
+            for i in $(seq 1 ${max_retries}); do
+              if cargo publish -p "${crate}"; then
+                echo "✓ ${crate} published successfully (attempt ${i})"
+                echo "::endgroup::"
+                return 0
+              fi
+              if [ "${i}" -lt "${max_retries}" ]; then
+                echo "Publish attempt ${i}/${max_retries} failed — retrying in 30 s (crates.io index delay)"
+                sleep 30
+              fi
+            done
+            echo "::endgroup::"
+            echo "::error::Failed to publish ${crate} after ${max_retries} attempts"
+            return 1
+          }
+
+          # Topological order: leaf → dependent
+          publish_crate beam-core
+          sleep 30   # let crates.io index pick up beam-core
+
+          publish_crate beam-daemon
+          sleep 30
+
+          publish_crate beam-worker
+          sleep 30
+
+          publish_crate beam-cli

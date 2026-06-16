@@ -316,8 +316,9 @@ async fn load_workflow_definition_path(workflow_id: &str) -> Result<PathBuf> {
     );
 }
 
-fn parse_raw_params(rest: &[String]) -> Result<BTreeMap<String, String>> {
+fn parse_raw_params(rest: &[String]) -> Result<BTreeMap<String, Value>> {
     let mut out = BTreeMap::new();
+    let mut seen = std::collections::HashSet::new();
     for part in rest {
         let Some((key, value)) = part.split_once('=') else {
             bail!("参数必须是 key=value，收到: {}", part);
@@ -326,7 +327,10 @@ fn parse_raw_params(rest: &[String]) -> Result<BTreeMap<String, String>> {
         if key.is_empty() {
             bail!("参数 key 不能为空: {}", part);
         }
-        out.insert(key.to_string(), value.to_string());
+        if !seen.insert(key.to_string()) {
+            bail!("重复参数: {}", key);
+        }
+        out.insert(key.to_string(), Value::String(value.to_string()));
     }
     Ok(out)
 }
@@ -794,8 +798,10 @@ mod tests {
     fn parse_raw_params_rejects_bad_pairs_and_keeps_order() {
         let parsed =
             parse_raw_params(&["foo=bar".to_string(), "baz=qux".to_string()]).expect("params");
-        assert_eq!(parsed.get("baz"), Some(&"qux".to_string()));
+        assert_eq!(parsed.get("baz"), Some(&Value::String("qux".to_string())));
+        assert_eq!(parsed.get("foo"), Some(&Value::String("bar".to_string())));
         assert!(parse_raw_params(&["missing_equal".to_string()]).is_err());
+        assert!(parse_raw_params(&["a=1".to_string(), "a=2".to_string()]).is_err());
     }
 
     #[test]

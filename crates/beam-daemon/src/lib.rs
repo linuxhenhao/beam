@@ -5995,7 +5995,10 @@ async fn handle_lark_event_payload(
                 workflow_id,
                 raw_params,
             } => {
-                let params_map: BTreeMap<String, String> = raw_params.into_iter().collect();
+                let params_map: BTreeMap<String, Value> = raw_params
+                    .into_iter()
+                    .map(|(k, v)| (k, Value::String(v)))
+                    .collect();
                 let params = if params_map.is_empty() {
                     String::new()
                 } else {
@@ -6011,7 +6014,7 @@ async fn handle_lark_event_payload(
                 let raw_def = tokio::fs::read_to_string(&def_path)
                     .await
                     .map_err(internal_error)?;
-                let bootstrap = bootstrap_and_start_workflow_run(
+                let bootstrap = match bootstrap_and_start_workflow_run(
                     &state,
                     &workflow_id,
                     &raw_def,
@@ -6023,7 +6026,17 @@ async fn handle_lark_event_payload(
                     }),
                 )
                 .await
-                .map_err(internal_error)?;
+                {
+                    Ok(b) => b,
+                    Err(e) => {
+                        let reply = format!("workflow run failed: {}", e);
+                        let _ = lark_reply_message(&state, &bot, message_id, &reply).await;
+                        return Ok(Json(serde_json::json!({
+                            "ok": true,
+                            "workflow": "failed",
+                        })));
+                    }
+                };
                 let reply = if params.is_empty() {
                     format!(
                         "workflow run queued: {}\nrunId: {}",
@@ -7765,11 +7778,16 @@ async fn trigger_workflow_run(
     let raw_def = tokio::fs::read_to_string(&def_path)
         .await
         .map_err(internal_error)?;
+    let params: BTreeMap<String, Value> = req
+        .raw_params
+        .into_iter()
+        .map(|(k, v)| (k, Value::String(v)))
+        .collect();
     let bootstrap = bootstrap_and_start_workflow_run(
         &state,
         &workflow_id,
         &raw_def,
-        &req.raw_params,
+        &params,
         req.initiator.as_deref().unwrap_or("dashboard"),
         req.chat_binding.clone(),
     )
@@ -7828,17 +7846,7 @@ async fn trigger_workflow_definition_run_api(
     let raw_def = tokio::fs::read_to_string(&def_path)
         .await
         .map_err(internal_error)?;
-    let params = req
-        .params
-        .into_iter()
-        .map(|(key, value)| {
-            let text = value
-                .as_str()
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| value.to_string());
-            (key, text)
-        })
-        .collect::<BTreeMap<_, _>>();
+    let params = req.params;
     let bootstrap = bootstrap_and_start_workflow_run(
         &state,
         &workflow_id,
@@ -10162,7 +10170,7 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
                 &state,
                 &workflow_id,
                 &raw_def,
-                &BTreeMap::from([(String::from("event"), event_json)]),
+                &BTreeMap::from([(String::from("event"), Value::String(event_json))]),
                 "external",
                 Some(RunChatBinding {
                     chat_id: chat_id.clone(),
@@ -11535,12 +11543,14 @@ mod tests {
     async fn list_workflow_runs_respects_terminal_filter_and_status_filters() {
         let paths = temp_paths("workflow-runs");
         maybe_remove_dir(&paths.root().to_path_buf());
-        let params = BTreeMap::from([(String::from("name"), String::from("beam"))]);
+        let params: BTreeMap<String, Value> = BTreeMap::from([
+            (String::from("name"), Value::String("beam".to_string())),
+        ]);
         bootstrap_workflow_run(
             &paths,
             BootstrapWorkflowRunInput {
                 run_id: "run-active",
-                workflow_json: r#"{"workflowId":"flow-active","version":1,"nodes":{"a":{"type":"subagent","bot":"bot-a","prompt":"hello"}}}"#,
+                workflow_json: r#"{"workflowId":"flow-active","version":1,"params":{"name":{"type":"string"}},"nodes":{"a":{"type":"subagent","bot":"bot-a","prompt":"hello"}}}"#,
                 expected_workflow_id: Some("flow-active"),
                 params: &params,
                 initiator: "cli",
@@ -11555,7 +11565,7 @@ mod tests {
             &paths,
             BootstrapWorkflowRunInput {
                 run_id: "run-done",
-                workflow_json: r#"{"workflowId":"flow-done","version":1,"nodes":{"a":{"type":"subagent","bot":"bot-a","prompt":"hello"}}}"#,
+                workflow_json: r#"{"workflowId":"flow-done","version":1,"params":{"name":{"type":"string"}},"nodes":{"a":{"type":"subagent","bot":"bot-a","prompt":"hello"}}}"#,
                 expected_workflow_id: Some("flow-done"),
                 params: &params,
                 initiator: "cli",
@@ -12076,6 +12086,7 @@ mod tests {
 
     #[test]
     fn parse_workflow_text_command_handles_run_and_cancel() {
+        // ── basic run with unquoted params ─────────────────────────
         match parse_workflow_text_command("/workflow run demo.flow foo=bar baz=qux") {
             Some(WorkflowTextCommand::Run {
                 workflow_id,
@@ -12087,18 +12098,186 @@ mod tests {
             }
             other => panic!("unexpected parse result: {:?}", other),
         }
+
+        // ── double-quoted value with spaces ───────────────────────
+        match parse_workflow_text_command(
+            "/workflow run flow task=\"review and deploy PR #42\"",
+        ) {
+            Some(WorkflowTextCommand::Run {
+                workflow_id,
+                raw_params,
+            }) => {
+                assert_eq!(workflow_id, "flow");
+                assert_eq!(
+                    raw_params.get("task").map(String::as_str),
+                    Some("review and deploy PR #42")
+                );
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // ── single-quoted value with spaces ───────────────────────
+        match parse_workflow_text_command(
+            "/workflow run flow task='review and deploy PR #42'",
+        ) {
+            Some(WorkflowTextCommand::Run {
+                workflow_id,
+                raw_params,
+            }) => {
+                assert_eq!(workflow_id, "flow");
+                assert_eq!(
+                    raw_params.get("task").map(String::as_str),
+                    Some("review and deploy PR #42")
+                );
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // ── escaped double-quote inside double-quoted value ───────
+        match parse_workflow_text_command(
+            "/workflow run flow task=\"say \\\"hello\\\"\"",
+        ) {
+            Some(WorkflowTextCommand::Run {
+                workflow_id,
+                raw_params,
+            }) => {
+                assert_eq!(workflow_id, "flow");
+                assert_eq!(
+                    raw_params.get("task").map(String::as_str),
+                    Some("say \"hello\"")
+                );
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // ── empty value ────────────────────────────────────────────
+        match parse_workflow_text_command("/workflow run flow foo=") {
+            Some(WorkflowTextCommand::Run {
+                workflow_id,
+                raw_params,
+            }) => {
+                assert_eq!(workflow_id, "flow");
+                assert_eq!(raw_params.get("foo").map(String::as_str), Some(""));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // ── mixed quoted and unquoted params ──────────────────────
+        match parse_workflow_text_command(
+            "/workflow run flow task=\"do stuff\" verbose=true count=10",
+        ) {
+            Some(WorkflowTextCommand::Run {
+                workflow_id,
+                raw_params,
+            }) => {
+                assert_eq!(workflow_id, "flow");
+                assert_eq!(
+                    raw_params.get("task").map(String::as_str),
+                    Some("do stuff")
+                );
+                assert_eq!(
+                    raw_params.get("verbose").map(String::as_str),
+                    Some("true")
+                );
+                assert_eq!(raw_params.get("count").map(String::as_str), Some("10"));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // ── JSON payload in single-quoted value ───────────────────
+        match parse_workflow_text_command(
+            "/workflow run flow payload='{\"a\":1}'",
+        ) {
+            Some(WorkflowTextCommand::Run {
+                workflow_id,
+                raw_params,
+            }) => {
+                assert_eq!(workflow_id, "flow");
+                assert_eq!(
+                    raw_params.get("payload").map(String::as_str),
+                    Some("{\"a\":1}")
+                );
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // ── basic cancel ──────────────────────────────────────────
         match parse_workflow_text_command("/workflow cancel run-123") {
             Some(WorkflowTextCommand::Cancel { run_id }) => {
                 assert_eq!(run_id, "run-123");
             }
             other => panic!("unexpected parse result: {:?}", other),
         }
+
+        // ── missing workflow id ────────────────────────────────────
         match parse_workflow_text_command("/workflow run") {
             Some(WorkflowTextCommand::Invalid { error, usage }) => {
                 assert_eq!(error, "缺少 workflow id");
                 assert!(usage.contains("/workflow run"));
             }
             other => panic!("unexpected parse result: {:?}", other),
+        }
+
+        // ── unclosed double quote ──────────────────────────────────
+        match parse_workflow_text_command("/workflow run flow task=\"unclosed") {
+            Some(WorkflowTextCommand::Invalid { error, .. }) => {
+                assert!(error.contains("参数引号不匹配"), "got: {error}");
+                assert!(error.contains("missing closing quote"), "got: {error}");
+            }
+            other => panic!("expected Invalid, got: {:?}", other),
+        }
+
+        // ── unclosed single quote ──────────────────────────────────
+        match parse_workflow_text_command("/workflow run flow task='unclosed") {
+            Some(WorkflowTextCommand::Invalid { error, .. }) => {
+                assert!(error.contains("参数引号不匹配"), "got: {error}");
+                assert!(error.contains("missing closing quote"), "got: {error}");
+            }
+            other => panic!("expected Invalid, got: {:?}", other),
+        }
+
+        // ── token without = ────────────────────────────────────────
+        match parse_workflow_text_command("/workflow run flow foo=bar baz") {
+            Some(WorkflowTextCommand::Invalid { error, .. }) => {
+                assert!(error.contains("key=value"), "got: {error}");
+                assert!(error.contains("baz"), "got: {error}");
+            }
+            other => panic!("expected Invalid, got: {:?}", other),
+        }
+
+        // ── empty key (=value) ─────────────────────────────────────
+        match parse_workflow_text_command("/workflow run flow =value") {
+            Some(WorkflowTextCommand::Invalid { error, .. }) => {
+                assert!(error.contains("参数名不能为空"), "got: {error}");
+            }
+            other => panic!("expected Invalid, got: {:?}", other),
+        }
+
+        // ── duplicate key ──────────────────────────────────────────
+        match parse_workflow_text_command("/workflow run flow foo=bar foo=qux") {
+            Some(WorkflowTextCommand::Invalid { error, .. }) => {
+                assert!(error.contains("重复参数"), "got: {error}");
+                assert!(error.contains("foo"), "got: {error}");
+            }
+            other => panic!("expected Invalid, got: {:?}", other),
+        }
+
+        // ── adjacent quoted/unquoted concatenation (shell-like) ──
+        // In shell word parsing, `"done"extra` concatenates to `doneextra`.
+        match parse_workflow_text_command(
+            "/workflow run flow task=\"done\"extra",
+        ) {
+            Some(WorkflowTextCommand::Run {
+                workflow_id,
+                raw_params,
+            }) => {
+                assert_eq!(workflow_id, "flow");
+                assert_eq!(
+                    raw_params.get("task").map(String::as_str),
+                    Some("doneextra")
+                );
+            }
+            other => panic!("expected Run with concatenated value, got: {:?}", other),
         }
     }
 
@@ -16493,7 +16672,7 @@ mod tests {
                 run_id,
                 workflow_json: def,
                 expected_workflow_id: Some("flow-a"),
-                params: &std::collections::BTreeMap::new(),
+                params: &BTreeMap::<String, Value>::new(),
                 initiator: "test",
                 chat_binding: None,
             },
@@ -16540,7 +16719,7 @@ mod tests {
 
         let lark_app_id = "app-cold-scan";
         let def = r#"{"workflowId":"flow-cs","version":1,"nodes":{"a":{"type":"subagent","bot":"bot","prompt":"hello"}}}"#;
-        let params = std::collections::BTreeMap::new();
+        let params: BTreeMap<String, Value> = BTreeMap::new();
         let binding = beam_core::RunChatBinding {
             chat_id: "chat-1".to_string(),
             lark_app_id: lark_app_id.to_string(),
@@ -16620,7 +16799,7 @@ mod tests {
                 run_id,
                 workflow_json: def,
                 expected_workflow_id: Some("flow-co"),
-                params: &std::collections::BTreeMap::new(),
+                params: &BTreeMap::<String, Value>::new(),
                 initiator: "test",
                 chat_binding: Some(binding),
             },
@@ -16685,7 +16864,7 @@ mod tests {
                 run_id,
                 workflow_json: def,
                 expected_workflow_id: Some("flow-cr"),
-                params: &std::collections::BTreeMap::new(),
+                params: &BTreeMap::<String, Value>::new(),
                 initiator: "test",
                 chat_binding: Some(binding),
             },

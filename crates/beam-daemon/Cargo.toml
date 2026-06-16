@@ -42,3 +42,4 @@ uuid.workspace = true
 feishu-sdk.workspace = true
 libc.workspace = true
 rustls.workspace = true
+shell-words.workspace = true

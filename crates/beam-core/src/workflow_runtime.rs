@@ -1490,13 +1490,15 @@ mod tests {
         fs::write(run_dir.join("params.json"), r#"{"name":"beam"}"#).unwrap();
 
         let paths = crate::BeamPaths::from_root(run_dir.clone());
-        let params = BTreeMap::from([(String::from("name"), String::from("beam"))]);
+        let params: BTreeMap<String, Value> = BTreeMap::from([
+            (String::from("name"), Value::String("beam".to_string())),
+        ]);
         let run_id = "run-1";
         let bootstrap = crate::bootstrap_workflow_run(
             &paths,
             crate::BootstrapWorkflowRunInput {
                 run_id,
-                workflow_json: r#"{"workflowId":"flow-a","version":1,"nodes":{"a":{"type":"subagent","bot":"bot-a","prompt":"hello ${params.name}"}}}"#,
+                workflow_json: r#"{"workflowId":"flow-a","version":1,"params":{"name":{"type":"string"}},"nodes":{"a":{"type":"subagent","bot":"bot-a","prompt":"hello ${params.name}"}}}"#,
                 expected_workflow_id: Some("flow-a"),
                 params: &params,
                 initiator: "cli",
@@ -1534,7 +1536,7 @@ mod tests {
         let _ = fs::remove_dir_all(&run_dir);
         fs::create_dir_all(run_dir.join("blobs")).unwrap();
         let paths = crate::BeamPaths::from_root(run_dir.clone());
-        let params = BTreeMap::new();
+        let params: BTreeMap<String, Value> = BTreeMap::new();
         let run_id = "run-cap";
         crate::bootstrap_workflow_run(
             &paths,
@@ -1622,7 +1624,7 @@ mod tests {
         let _ = fs::remove_dir_all(&run_dir);
         fs::create_dir_all(run_dir.join("blobs")).unwrap();
         let paths = crate::BeamPaths::from_root(run_dir.clone());
-        let params = BTreeMap::new();
+        let params: BTreeMap<String, Value> = BTreeMap::new();
         let run_id = "run-concurrent";
         crate::bootstrap_workflow_run(
             &paths,
@@ -1742,7 +1744,7 @@ mod tests {
         let _ = fs::remove_dir_all(&run_dir);
         fs::create_dir_all(run_dir.join("blobs")).unwrap();
         let paths = crate::BeamPaths::from_root(run_dir.clone());
-        let params = BTreeMap::new();
+        let params: BTreeMap<String, Value> = BTreeMap::new();
         let run_id = "run-same-bot";
         crate::bootstrap_workflow_run(
             &paths,
@@ -2211,13 +2213,15 @@ mod tests {
         let _ = fs::remove_dir_all(&run_dir);
         fs::create_dir_all(run_dir.join("blobs")).unwrap();
         let paths = crate::BeamPaths::from_root(run_dir.clone());
-        let params = BTreeMap::from([(String::from("name"), String::from("beam"))]);
+        let params: BTreeMap<String, Value> = BTreeMap::from([
+            (String::from("name"), Value::String("beam".to_string())),
+        ]);
         let run_id = "run-1";
         crate::bootstrap_workflow_run(
             &paths,
             crate::BootstrapWorkflowRunInput {
                 run_id,
-                workflow_json: r#"{"workflowId":"flow-a","version":1,"nodes":{"a":{"type":"subagent","bot":"bot-a","prompt":"hello ${params.name}"}}}"#,
+                workflow_json: r#"{"workflowId":"flow-a","version":1,"params":{"name":{"type":"string"}},"nodes":{"a":{"type":"subagent","bot":"bot-a","prompt":"hello ${params.name}"}}}"#,
                 expected_workflow_id: Some("flow-a"),
                 params: &params,
                 initiator: "cli",
@@ -4239,7 +4243,7 @@ mod tests {
         let _ = fs::remove_dir_all(&run_dir);
         fs::create_dir_all(run_dir.join("blobs")).unwrap();
         let paths = crate::BeamPaths::from_root(run_dir.clone());
-        let params = BTreeMap::new();
+        let params: BTreeMap<String, Value> = BTreeMap::new();
         let run_id = "run-loop-depends";
         crate::bootstrap_workflow_run(
             &paths,
@@ -5132,7 +5136,9 @@ mod tests {
         fs::create_dir_all(run_dir.join("blobs")).unwrap();
         let paths = crate::BeamPaths::from_root(run_dir.clone());
         let run_id = "run-real-crl-1";
-        let params = BTreeMap::from([(String::from("task"), String::from("add CLI echo command"))]);
+        let params: BTreeMap<String, Value> = BTreeMap::from([
+            (String::from("task"), Value::String("add CLI echo command".to_string())),
+        ]);
         crate::bootstrap_workflow_run(
             &paths,
             crate::BootstrapWorkflowRunInput {
@@ -5219,7 +5225,9 @@ mod tests {
         fs::create_dir_all(run_dir.join("blobs")).unwrap();
         let paths = crate::BeamPaths::from_root(run_dir.clone());
         let run_id = "run-real-crl-rej";
-        let params = BTreeMap::from([(String::from("task"), String::from("add test"))]);
+        let params: BTreeMap<String, Value> = BTreeMap::from([
+            (String::from("task"), Value::String("add test".to_string())),
+        ]);
         crate::bootstrap_workflow_run(
             &paths,
             crate::BootstrapWorkflowRunInput {
@@ -5352,7 +5360,9 @@ mod tests {
         fs::create_dir_all(run_dir.join("blobs")).unwrap();
         let paths = crate::BeamPaths::from_root(run_dir.clone());
         let run_id = "run-real-crl-app";
-        let params = BTreeMap::from([(String::from("task"), String::from("add feature"))]);
+        let params: BTreeMap<String, Value> = BTreeMap::from([
+            (String::from("task"), Value::String("add feature".to_string())),
+        ]);
         crate::bootstrap_workflow_run(
             &paths,
             crate::BootstrapWorkflowRunInput {

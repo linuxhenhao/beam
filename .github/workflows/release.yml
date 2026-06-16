@@ -1,4 +1,19 @@
-name: Release
+# Stage 2 companion: build & upload binary to GitHub Release
+#
+# Triggered by ANY v* tag push (stable or prerelease).
+# The tag is created by release-plz when the Release PR is merged
+# (see .github/workflows/release-plz.yml).
+#
+# This workflow:
+#   1. Runs the full test suite
+#   2. Builds the `beam-cli` binary in release mode
+#   3. Uploads `target/release/beam` as an asset to the GitHub Release
+#      that release-plz already created (or creates one if missing).
+#
+# NOTE: The `body` is intentionally left empty so that release-plz's
+#       generated changelog on the GitHub Release is preserved.
+
+name: Release Binary
 
 on:
   push:
@@ -26,9 +41,9 @@ jobs:
       - name: Build release binary
         run: cargo build -p beam-cli --release
 
-      - name: Create GitHub Release
+      - name: Upload binary to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: target/release/beam
-          body: ${{ github.event.head_commit.message }}
+          # Don't set `body` — preserves the changelog release-plz wrote.
           prerelease: ${{ contains(github.ref, '-') }}

@@ -83,7 +83,7 @@ pub use workflow_resume::{
 };
 pub use workflow_run::{
     BootstrapWorkflowRunInput, RunChatBinding, WorkflowOutputRef, WorkflowRunBootstrap,
-    bootstrap_workflow_run, mint_workflow_run_id,
+    bootstrap_workflow_run, mint_workflow_run_id, normalize_workflow_params,
 };
 pub use workflow_runtime::{
     HostExecutorPrepareResult, RecoveryResult, RunLoopResult, RunLoopStopReason, RunTickResult,
