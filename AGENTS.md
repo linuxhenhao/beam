@@ -48,5 +48,5 @@ These must be configured manually (one-time setup) for the release pipelines to 
 | `production` | Create this environment. Optionally add **required reviewers** (up to 6) to gate crates.io publish. The `publish.yml` workflow references `environment: production`. |
 
 ### Branch protection (optional but recommended)
-- Protect `main`: require status checks (`Parity Gate` / `rust-tests`) to pass before merging.
+- Protect `main`: require status checks (`Rust CI` / `rust-tests`) to pass before merging.
 - Require a pull request before merging (the Release PR workflow depends on PR merges to trigger Stage 2).
