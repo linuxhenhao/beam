@@ -23,7 +23,7 @@
 - **Do not hand-edit `Cargo.toml` / `Cargo.lock` versions.**
   - Version bumps, internal path-dependency version updates, and changelogs are automatically managed by `release-plz`.
 - Release flow (3 stages, automated via GitHub Actions):
-  1. **Release PR** — On every push to `master`, `.github/workflows/release-plz.yml` runs `release-plz PR` to create or update a single Release PR containing version bumps, dependency updates, and the generated changelog. Nothing is published yet.
+  1. **Release PR** — On every push to `main`, `.github/workflows/release-plz.yml` runs `release-plz PR` to create or update a single Release PR containing version bumps, dependency updates, and the generated changelog. Nothing is published yet.
   2. **Git Tag + GitHub Release** — When the Release PR is merged, the same workflow runs `release-plz release`, which creates a git tag and a GitHub Release with the changelog. The `v*` tag push also triggers `.github/workflows/release.yml` to build the `beam-cli` binary and upload it as a release asset. **No crates.io publish occurs at this stage.**
   3. **crates.io Publish** — Any `v*` tag push or manual `workflow_dispatch` triggers `.github/workflows/publish.yml`. A `validate-tag` job checks that the tag is a **stable semver** (`vX.Y.Z` only; no prerelease suffix); prerelease tags are skipped without triggering the production environment. Only stable tags proceed to the `publish` job, which is gated by the `production` GitHub Environment (can be configured with required reviewers). Crates are published in topological order: `beam-core` → `beam-daemon` → `beam-worker` → `beam-cli`, each with dry-run retry first, then publish retry (handles crates.io index delay).
   - **Prerelease tags** (e.g. `vX.Y.Z-beta.1`, `vX.Y.Z-canary.1`) trigger the binary build & GitHub Release upload, but are **NOT** published to crates.io (crates.io has no dist-tag / non-latest concept).
@@ -48,5 +48,5 @@ These must be configured manually (one-time setup) for the release pipelines to 
 | `production` | Create this environment. Optionally add **required reviewers** (up to 6) to gate crates.io publish. The `publish.yml` workflow references `environment: production`. |
 
 ### Branch protection (optional but recommended)
-- Protect `master`: require status checks (`Parity Gate` / `rust-tests`) to pass before merging.
+- Protect `main`: require status checks (`Parity Gate` / `rust-tests`) to pass before merging.
 - Require a pull request before merging (the Release PR workflow depends on PR merges to trigger Stage 2).
