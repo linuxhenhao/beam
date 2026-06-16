@@ -11,6 +11,23 @@
 # The tag push additionally triggers:
 #   • .github/workflows/release.yml   → build & upload binary
 #   • .github/workflows/publish.yml   → crates.io publish (stable tags only)
+#
+# When this workflow finishes successfully on main, it triggers Stage 1
+# (.github/workflows/release-pr.yml) to serially create/update the
+# Release PR.  This prevents the race condition where both workflows ran
+# in parallel on push main, and release-pr opened a duplicate Release PR
+# before the tag was created.
+#
+# Token note:
+#   Tags created with the default GITHUB_TOKEN do NOT recursively trigger
+#   downstream tag-based workflows (release.yml / publish.yml) because
+#   GitHub suppresses workflow runs triggered by GITHUB_TOKEN events
+#   (to prevent infinite loops).  To enable automatic triggering of those
+#   downstream workflows, configure a RELEASE_PLZ_TOKEN secret
+#   (fine-grained PAT with contents: write and, if needed, workflow: write
+#   permissions).  The workflow will prefer that token when available.
+#   Without it, tags will still be created but you may need to manually
+#   re-run release.yml or publish.yml.
 
 name: Release Tag
 
@@ -36,4 +53,7 @@ jobs:
           command: release
           config: release-plz.toml
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Prefer a PAT (RELEASE_PLZ_TOKEN) so that the tags it creates
+          # trigger downstream workflows (release.yml / publish.yml).
+          # Falls back to GITHUB_TOKEN if the PAT secret is not configured.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}

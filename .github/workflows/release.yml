@@ -2,7 +2,7 @@
 #
 # Triggered by ANY v* tag push (stable or prerelease).
 # The tag is created by release-plz when the Release PR is merged
-# (see .github/workflows/release-plz.yml).
+# (see .github/workflows/release-tag.yml).
 #
 # This workflow:
 #   1. Runs the full test suite
