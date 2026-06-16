@@ -1,0 +1,23 @@
+# release-plz configuration for beam workspace
+# Docs: https://release-plz.ieni.dev/docs/config
+#
+# Release flow (3 stages):
+#   Stage 1: push to master → release-plz PR created/updated with version bumps & changelog
+#   Stage 2: Release PR merged → release-plz creates git tag + GitHub Release (NO crates.io)
+#            → tag push triggers release.yml (binary build + upload to GitHub Release)
+#   Stage 3: stable tag push → publish.yml (crates.io publish, gated by production environment)
+
+[workspace]
+# CRITICAL: crates.io publish is handled by .github/workflows/publish.yml
+# (gated by production environment + CRATES_IO_TOKEN).
+# release-plz must NOT run `cargo publish` itself.
+publish = false
+
+# Changelog is generated via git-cliff (bundled with release-plz).
+# Commit messages use conventional commits: type(scope): 中文描述
+# Version bump rules (default git-cliff / release-plz behaviour):
+#   feat: minor bump (0.x.0)
+#   fix:   patch bump (0.0.x)
+#   breaking change (footer "BREAKING CHANGE" or "!" after type): major bump (x.0.0)
+# Commit types like docs, style, refactor, perf, test, chore, ci, build, revert
+# do NOT trigger version bumps by default (they appear in changelog only).

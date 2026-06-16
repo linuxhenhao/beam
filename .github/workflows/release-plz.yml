@@ -1,0 +1,58 @@
+# Stage 1 & 2: Release PR + Tag & GitHub Release (NO crates.io publish)
+#
+# Stage 1 — release-pr job:
+#   On every push to master (feature PR merge, etc.), release-plz checks for
+#   unpublished conventional-commit changes and creates/updates a single
+#   "Release PR".  That PR contains the version bumps, internal dependency
+#   version updates, and the generated changelog.  Nothing is published yet.
+#
+# Stage 2 — release job:
+#   When the Release PR is *merged* (push to master with bumped versions),
+#   release-plz creates the git tag and a GitHub Release with the changelog.
+#   It does NOT publish to crates.io — that is Stage 3 (publish.yml).
+#
+#   The tag push additionally triggers:
+#     • .github/workflows/release.yml   → build & upload binary
+#     • .github/workflows/publish.yml   → crates.io publish (stable tags only)
+
+name: Release PR & Release
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write       # needed to push tags + create GitHub Releases
+  pull-requests: write  # needed to create / update the Release PR
+
+jobs:
+  # ── Stage 1: open or update the Release PR ──────────────────────────────
+  release-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history required for changelog / version diff
+
+      - name: Run release-plz PR
+        uses: release-plz/release-plz-pr-action@v0.5
+        with:
+          config: release-plz.toml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Stage 2: create git tag & GitHub Release (after Release PR merge) ──
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run release-plz release
+        uses: release-plz/release-plz-release-action@v0.5
+        with:
+          config: release-plz.toml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
