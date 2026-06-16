@@ -440,6 +440,7 @@ pub(crate) async fn fanout_with_lark_sender(
 mod tests {
     use super::*;
     use beam_core::{BeamPaths, BootstrapWorkflowRunInput, bootstrap_workflow_run};
+    use serde_json::Value;
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -549,7 +550,7 @@ mod tests {
                 run_id,
                 workflow_json: def,
                 expected_workflow_id: Some("flow-gate"),
-                params: &BTreeMap::new(),
+                params: &BTreeMap::<String, Value>::new(),
                 initiator: "test",
                 chat_binding: Some(chat_binding),
             },
@@ -598,7 +599,7 @@ mod tests {
                 run_id,
                 workflow_json: def,
                 expected_workflow_id: Some("flow-repeat"),
-                params: &BTreeMap::new(),
+                params: &BTreeMap::<String, Value>::new(),
                 initiator: "test",
                 chat_binding: Some(chat_binding),
             },
@@ -635,7 +636,7 @@ mod tests {
                 run_id,
                 workflow_json: def,
                 expected_workflow_id: Some("flow-concurrent"),
-                params: &BTreeMap::new(),
+                params: &BTreeMap::<String, Value>::new(),
                 initiator: "test",
                 chat_binding: Some(RunChatBinding {
                     chat_id: "oc_test_chat".to_string(),
@@ -675,7 +676,7 @@ mod tests {
                 run_id,
                 workflow_json: def,
                 expected_workflow_id: Some("flow-nobind"),
-                params: &BTreeMap::new(),
+                params: &BTreeMap::<String, Value>::new(),
                 initiator: "test",
                 chat_binding: None, // <-- no binding
             },
@@ -714,7 +715,7 @@ mod tests {
                 run_id,
                 workflow_json: def,
                 expected_workflow_id: Some("flow-simple"),
-                params: &BTreeMap::new(),
+                params: &BTreeMap::<String, Value>::new(),
                 initiator: "test",
                 chat_binding: Some(chat_binding),
             },
@@ -740,7 +741,7 @@ mod tests {
                 run_id: run_id2,
                 workflow_json: def_simple,
                 expected_workflow_id: Some("flow-termin"),
-                params: &BTreeMap::new(),
+                params: &BTreeMap::<String, Value>::new(),
                 initiator: "test",
                 chat_binding: Some(RunChatBinding {
                     chat_id: "oc_test".to_string(),
@@ -809,7 +810,7 @@ mod tests {
                 run_id,
                 workflow_json: def,
                 expected_workflow_id: Some("flow-nongate"),
-                params: &BTreeMap::new(),
+                params: &BTreeMap::<String, Value>::new(),
                 initiator: "test",
                 chat_binding: Some(RunChatBinding {
                     chat_id: "oc_test".to_string(),

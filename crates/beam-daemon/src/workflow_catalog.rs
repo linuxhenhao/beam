@@ -46,21 +46,27 @@ pub(crate) fn parse_workflow_text_command(text: &str) -> Option<WorkflowTextComm
     if !trimmed.starts_with("/workflow") {
         return None;
     }
-    let parts = trimmed.split_whitespace().collect::<Vec<_>>();
-    if parts.first().copied() != Some("/workflow") {
-        return None;
-    }
+
+    let rest = trimmed["/workflow".len()..].trim();
     let usage =
         "用法：/workflow run <id> [key=value ...]\n或：/workflow cancel <runId>".to_string();
-    match parts.get(1).copied() {
-        Some("cancel") => {
-            let Some(run_id) = parts.get(2).copied() else {
+
+    // Extract the subcommand (first whitespace-delimited token).
+    let sub_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let subcommand = &rest[..sub_end];
+    let sub_rest = rest[sub_end..].trim();
+
+    match subcommand {
+        "cancel" => {
+            if sub_rest.is_empty() {
                 return Some(WorkflowTextCommand::Invalid {
                     error: "缺少 runId".to_string(),
                     usage,
                 });
-            };
-            if parts.len() > 3 {
+            }
+            let id_end = sub_rest.find(char::is_whitespace).unwrap_or(sub_rest.len());
+            let run_id = &sub_rest[..id_end];
+            if sub_rest[id_end..].trim().len() > 0 {
                 return Some(WorkflowTextCommand::Invalid {
                     error: "/workflow cancel 只接受 runId".to_string(),
                     usage,
@@ -70,51 +76,69 @@ pub(crate) fn parse_workflow_text_command(text: &str) -> Option<WorkflowTextComm
                 run_id: run_id.to_string(),
             })
         }
-        Some("run") => {
-            let Some(workflow_id) = parts.get(2).copied() else {
+        "run" => {
+            if sub_rest.is_empty() {
                 return Some(WorkflowTextCommand::Invalid {
                     error: "缺少 workflow id".to_string(),
                     usage,
                 });
-            };
-            let mut raw_params = HashMap::new();
-            for token in parts.iter().skip(3) {
-                let Some(eq) = token.find('=') else {
-                    return Some(WorkflowTextCommand::Invalid {
-                        error: format!("参数必须是 key=value 形式：{}", token),
-                        usage,
-                    });
-                };
-                if eq == 0 {
-                    return Some(WorkflowTextCommand::Invalid {
-                        error: format!("参数名不能为空：{}", token),
-                        usage,
-                    });
-                }
-                let key = &token[..eq];
-                let value = &token[eq + 1..];
-                if raw_params.contains_key(key) {
-                    return Some(WorkflowTextCommand::Invalid {
-                        error: format!("重复参数：{}", key),
-                        usage,
-                    });
-                }
-                raw_params.insert(key.to_string(), value.to_string());
             }
-            Some(WorkflowTextCommand::Run {
-                workflow_id: workflow_id.to_string(),
-                raw_params,
-            })
+            let id_end = sub_rest.find(char::is_whitespace).unwrap_or(sub_rest.len());
+            let workflow_id = &sub_rest[..id_end];
+            let params_str = sub_rest[id_end..].trim();
+
+            match tokenize_workflow_params(params_str) {
+                Ok(raw_params) => Some(WorkflowTextCommand::Run {
+                    workflow_id: workflow_id.to_string(),
+                    raw_params,
+                }),
+                Err(error) => Some(WorkflowTextCommand::Invalid { error, usage }),
+            }
         }
-        Some(_) => Some(WorkflowTextCommand::Invalid {
+        _ => Some(WorkflowTextCommand::Invalid {
             error: "只支持 /workflow run / cancel 子命令".to_string(),
             usage,
         }),
-        None => Some(WorkflowTextCommand::Invalid {
-            error: "缺少 workflow 子命令".to_string(),
-            usage,
-        }),
     }
+}
+
+/// Tokenize `key=value` parameters from a raw string using shell-like word parsing.
+///
+/// Delegates word splitting to [`shell_words::split`], which handles:
+/// - single-quoted strings (no escape inside)
+/// - double-quoted strings (backslash-escape for `$`, `` ` ``, `"`, `\\`, newline)
+/// - unquoted backslash escapes
+/// - adjacent quoted/unquoted concatenation (e.g. `"b"c` → `bc`)
+///
+/// After splitting, each word must be in `key=value` form (split on the first `=`).
+/// Validation rules:
+/// - Each token must contain `=`
+/// - Key must be non-empty
+/// - Duplicate keys are rejected
+/// - Unclosed quotes → [`shell_words::ParseError`] returned as `Invalid`
+fn tokenize_workflow_params(input: &str) -> Result<HashMap<String, String>, String> {
+    let tokens =
+        shell_words::split(input).map_err(|e| format!("参数引号不匹配: {}", e))?;
+
+    let mut params = HashMap::new();
+    for token in &tokens {
+        // Split on first `=` only.
+        let eq_pos = token
+            .find('=')
+            .ok_or_else(|| format!("参数必须是 key=value 形式：{}", token))?;
+
+        let key = &token[..eq_pos];
+        let value = &token[eq_pos + 1..];
+
+        if key.is_empty() {
+            return Err("参数名不能为空".to_string());
+        }
+        if params.contains_key(key) {
+            return Err(format!("重复参数：{}", key));
+        }
+        params.insert(key.to_string(), value.to_string());
+    }
+    Ok(params)
 }
 
 // ── Catalog / run DTOs ──────────────────────────────────────────────────

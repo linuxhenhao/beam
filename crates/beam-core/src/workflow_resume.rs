@@ -361,13 +361,15 @@ mod tests {
     async fn schedule_resume_reconciles_found_task() {
         let paths = temp_paths("found");
         let _ = std::fs::remove_dir_all(paths.root());
-        let params = BTreeMap::from([(String::from("name"), String::from("beam"))]);
+        let params: BTreeMap<String, Value> = BTreeMap::from([
+            (String::from("name"), Value::String("beam".to_string())),
+        ]);
         let run_id = "run-1";
         bootstrap_workflow_run(
             &paths,
             BootstrapWorkflowRunInput {
                 run_id,
-                workflow_json: r#"{"workflowId":"flow-a","version":1,"nodes":{"a":{"type":"hostExecutor","executor":"beam-schedule","input":{"name":"schedule-demo daily 9am","schedule":"0 9 * * *","parsed":{"kind":"cron","expr":"0 9 * * *","display":"0 9 * * *"},"prompt":"Schedule demo","workingDir":"/tmp/beam-schedule-demo","chatId":"oc_workflow_demo","scope":"thread"},"unsafeAllowUngated":true}}}"#,
+                workflow_json: r#"{"workflowId":"flow-a","version":1,"params":{"name":{"type":"string"}},"nodes":{"a":{"type":"hostExecutor","executor":"beam-schedule","input":{"name":"schedule-demo daily 9am","schedule":"0 9 * * *","parsed":{"kind":"cron","expr":"0 9 * * *","display":"0 9 * * *"},"prompt":"Schedule demo","workingDir":"/tmp/beam-schedule-demo","chatId":"oc_workflow_demo","scope":"thread"},"unsafeAllowUngated":true}}}"#,
                 expected_workflow_id: Some("flow-a"),
                 params: &params,
                 initiator: "cli",

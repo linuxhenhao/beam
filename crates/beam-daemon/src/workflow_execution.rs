@@ -578,7 +578,7 @@ pub(crate) async fn bootstrap_and_start_workflow_run(
     state: &AppState,
     workflow_id: &str,
     raw_def: &str,
-    params: &BTreeMap<String, String>,
+    params: &BTreeMap<String, Value>,
     initiator: &str,
     chat_binding: Option<RunChatBinding>,
 ) -> Result<beam_core::WorkflowRunBootstrap> {
