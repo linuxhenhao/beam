@@ -1,13 +1,13 @@
 # Stage 1 & 2: Release PR + Tag & GitHub Release (NO crates.io publish)
 #
 # Stage 1 — release-pr job:
-#   On every push to master (feature PR merge, etc.), release-plz checks for
+#   On every push to main (feature PR merge, etc.), release-plz checks for
 #   unpublished conventional-commit changes and creates/updates a single
 #   "Release PR".  That PR contains the version bumps, internal dependency
 #   version updates, and the generated changelog.  Nothing is published yet.
 #
 # Stage 2 — release job:
-#   When the Release PR is *merged* (push to master with bumped versions),
+#   When the Release PR is *merged* (push to main with bumped versions),
 #   release-plz creates the git tag and a GitHub Release with the changelog.
 #   It does NOT publish to crates.io — that is Stage 3 (publish.yml).
 #
@@ -19,7 +19,7 @@ name: Release PR & Release
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
