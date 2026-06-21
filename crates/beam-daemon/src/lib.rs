@@ -761,6 +761,8 @@ struct ParsedLarkInboundMessage {
     sender_open_id: Option<String>,
     mentions: Vec<LarkEventMention>,
     parent_id: Option<String>,
+    root_id: Option<String>,
+    thread_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4400,6 +4402,19 @@ fn decide_lark_routing<'a>(
         thread_id.filter(|value| !value.is_empty()),
     ) {
         let _ = thread_id;
+        // For p2p private chats, a message that carries both root_id and
+        // thread_id where root_id == message_id signals a *new* first
+        // message (the message is its own root), not a reply.  Use
+        // message_id as anchor so it does not falsely match an existing
+        // session and skips directory selection.
+        //
+        // When root_id != message_id we cannot reliably distinguish a true
+        // reply from a subsequent message in the same conversation that
+        // Feishu decorated with the same root.  Err on the safe side and
+        // always treat p2p messages as a fresh session.
+        if chat_type == Some("p2p") {
+            return (SessionScope::Thread, message_id);
+        }
         return (SessionScope::Thread, root_id);
     }
 
@@ -5359,6 +5374,8 @@ fn parse_lark_inbound_message(
         .get("thread_id")
         .and_then(Value::as_str)
         .filter(|v| !v.is_empty());
+    let root_id_owned = root_id.map(ToOwned::to_owned);
+    let thread_id_owned = thread_id.map(ToOwned::to_owned);
     let parent_id = message
         .get("parent_id")
         .and_then(Value::as_str)
@@ -5394,6 +5411,8 @@ fn parse_lark_inbound_message(
         sender_open_id,
         mentions,
         parent_id,
+        root_id: root_id_owned,
+        thread_id: thread_id_owned,
     })
 }
 
@@ -6124,6 +6143,19 @@ async fn handle_lark_event_payload(
         let sessions = state.sessions.lock().await;
         decide_lark_dispatch(&sessions, &app_id, &parsed)
     };
+    info!(
+        app_id = %app_id,
+        chat_id = %parsed.chat_id,
+        chat_type = ?parsed.chat_type,
+        message_id = %parsed.message_id,
+        root_id = ?parsed.root_id,
+        thread_id = ?parsed.thread_id,
+        scope = ?parsed.scope,
+        anchor = %parsed.anchor,
+        existing = existing.is_some(),
+        outcome = ?outcome,
+        "lark message dispatch",
+    );
     match outcome {
         LarkEventOutcome::ReplyOnly { reply } => {
             let _ = lark_reply_message(&state, &bot, message_id, &reply).await;
@@ -15735,7 +15767,8 @@ mod tests {
 
     #[test]
     fn dir_select_card_uses_action_buttons() {
-        // Verify that the card exposes directory choices as clickable buttons.
+        // Verify that the card exposes directory choices as clickable buttons
+        // AND a select_static dropdown as an alternative entry point.
         let all_dirs: Vec<String> = (0..10).map(|i| format!("project-{}", i)).collect();
         let card_json = dir_select::build_dir_select_card(
             "pid", "/root", "test", &all_dirs, &all_dirs, None, None, None,
@@ -15756,6 +15789,7 @@ mod tests {
             .iter()
             .flat_map(|e| e["actions"].as_array().into_iter().flatten())
             .collect();
+        // 10 dirs ≤ MAX_BUTTON_DIRS(40), so all show as buttons
         assert_eq!(buttons.len(), 10, "should have one button per directory");
         for (i, button) in buttons.iter().enumerate() {
             assert_eq!(
@@ -15771,12 +15805,23 @@ mod tests {
                 Some(format!("project-{}", i).as_str())
             );
         }
-        assert!(
-            elements
-                .iter()
-                .all(|e| e["tag"].as_str() != Some("select_static")),
-            "card should not use select_static for directory picking"
+        // Card now includes select_static as alternative entry point
+        let select_static = elements
+            .iter()
+            .find(|e| e["tag"].as_str() == Some("select_static"))
+            .expect("card should contain select_static dropdown");
+        let options = select_static["options"].as_array().unwrap();
+        assert_eq!(
+            options.len(),
+            10,
+            "select_static should have all 10 options"
         );
+        // Verify first option value is valid JSON with correct fields
+        let first_opt_val = options[0]["value"].as_str().unwrap();
+        let opt_parsed: Value = serde_json::from_str(first_opt_val).unwrap();
+        assert_eq!(opt_parsed["action"].as_str(), Some("dir_select_pick"));
+        assert_eq!(opt_parsed["pending_id"].as_str(), Some("pid"));
+        assert!(opt_parsed["working_dir"].as_str().is_some());
     }
 
     #[test]
@@ -16343,6 +16388,8 @@ mod tests {
             sender_open_id: Some("ou_user".to_string()),
             mentions: Vec::new(),
             parent_id: None,
+            root_id: None,
+            thread_id: None,
         };
 
         let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
@@ -16375,6 +16422,8 @@ mod tests {
             sender_open_id: Some("ou_user".to_string()),
             mentions: Vec::new(),
             parent_id: None,
+            root_id: None,
+            thread_id: None,
         };
 
         let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
@@ -17022,6 +17071,55 @@ mod tests {
                 Some("thread-1")
             ),
             (SessionScope::Thread, "root-1")
+        );
+    }
+
+    #[test]
+    fn decide_lark_routing_p2p_with_root_and_thread_uses_message_id_as_anchor() {
+        // When a p2p message arrives carrying both root_id and thread_id,
+        // root_id == message_id signals a new first message (the message
+        // is its own root). Anchor must be message_id so it does not
+        // falsely match an existing session and skip directory selection.
+        assert_eq!(
+            decide_lark_routing(
+                "msg-1",
+                "chat-dm",
+                Some("p2p"),
+                Some("msg-1"),
+                Some("omt_thread")
+            ),
+            (SessionScope::Thread, "msg-1")
+        );
+        // Even when root_id != message_id we cannot reliably distinguish a
+        // true p2p reply from a subsequent message that Feishu decorated
+        // with the same root. Err on the safe side and use message_id so
+        // every p2p message creates a fresh session by default.
+        assert_eq!(
+            decide_lark_routing(
+                "msg-2",
+                "chat-dm",
+                Some("p2p"),
+                Some("other-root"),
+                Some("omt_thread")
+            ),
+            (SessionScope::Thread, "msg-2")
+        );
+    }
+
+    #[test]
+    fn decide_lark_routing_group_with_root_and_thread_still_uses_root_id() {
+        // Group topic messages with root_id + thread_id must continue
+        // using root_id as the anchor so they correctly match existing
+        // topic sessions. This must not regress when fixing p2p routing.
+        assert_eq!(
+            decide_lark_routing(
+                "msg-2",
+                "chat-a",
+                Some("group"),
+                Some("topic-root"),
+                Some("omt_topic")
+            ),
+            (SessionScope::Thread, "topic-root")
         );
     }
 

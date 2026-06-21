@@ -20,7 +20,11 @@ const MAX_SCAN_DEPTH: usize = 3;
 const MAX_SCAN_CANDIDATES: usize = 500;
 const MAX_RECENT_DIRS: usize = 10;
 const MAX_RECOMMENDED_DIRS: usize = 8;
-const MAX_SHOWN_DIRS: usize = 150; // cap for rendered directory choices
+/// Maximum number of directory buttons rendered in the card.
+/// Beyond this, the user should use the select_static dropdown.
+const MAX_BUTTON_DIRS: usize = 40;
+/// Maximum number of options in the select_static dropdown.
+const MAX_SELECT_DIRS: usize = 150;
 /// TTL for pending create entries (30 minutes in milliseconds).
 /// Entries older than this are pruned and the user must send a new message.
 pub const PENDING_CREATE_TTL_MS: i64 = 30 * 60 * 1000;
@@ -404,12 +408,19 @@ pub fn prune_expired_pending_creates(
 
 /// Build the directory selection card JSON string.
 ///
+/// The card has two directory-picking entry points:
+/// 1. **Buttons** — primary for recommended/filtered dirs (capped at MAX_BUTTON_DIRS).
+/// 2. **select_static dropdown** — "more directories / more matches" fallback
+///    (capped at MAX_SELECT_DIRS). Each option value is a JSON string with
+///    `{ action, pending_id, working_dir }`, parsed by `parse_lark_card_action`
+///    via the `/action/option` fallback in lib.rs.
+///
 /// Parameters:
 /// - pending_id: unique ID for this pending session creation
 /// - root_dir: the root working directory (displayed to user)
 /// - title: the session title (user message summary)
 /// - recommended_dirs: list of recommended directories (relative paths from root)
-/// - all_candidates: all candidate directories (for the button list)
+/// - all_candidates: all candidate directories (for the select_static dropdown)
 /// - filter_result: optional filtered subset to show as current results
 /// - search_keyword: current search keyword (for restoring input field value)
 /// - message: optional info/warning message to display
@@ -418,15 +429,15 @@ pub fn build_dir_select_card(
     root_dir: &str,
     title: &str,
     recommended_dirs: &[String],
-    _all_candidates: &[String],
+    all_candidates: &[String],
     filter_result: Option<&[String]>,
     search_keyword: Option<&str>,
     message: Option<&str>,
 ) -> String {
     let mut elements: Vec<Value> = Vec::new();
 
-    // Header: root dir display
-    let display_root = truncate_str_tail(root_dir, 60);
+    // Header: root dir display (sanitize: escape backticks to avoid lark_md code tag errors)
+    let display_root = sanitize_lark_md(&truncate_str_tail(root_dir, 60));
     elements.push(serde_json::json!({
         "tag": "div",
         "text": {
@@ -435,8 +446,8 @@ pub fn build_dir_select_card(
         }
     }));
 
-    // Message summary
-    let display_title = truncate_str_head(title, 60);
+    // Message summary (sanitize: escape backticks in user text)
+    let display_title = sanitize_lark_md(&truncate_str_head(title, 60));
     elements.push(serde_json::json!({
         "tag": "div",
         "text": {
@@ -456,27 +467,54 @@ pub fn build_dir_select_card(
         }));
     }
 
-    // Recommended directories (capped to avoid blowing up the card)
-    let dirs_to_show_full = filter_result.unwrap_or(recommended_dirs);
-    let total_count = dirs_to_show_full.len();
-    let dirs_to_show = if dirs_to_show_full.len() > MAX_SHOWN_DIRS {
-        &dirs_to_show_full[..MAX_SHOWN_DIRS]
+    let is_filtered = filter_result.is_some();
+
+    // --- Determine button dirs and select_static dirs ---
+    let (button_dirs, select_dirs) = if let Some(fr) = filter_result {
+        // Filtered view: both buttons and select_static draw from filter results.
+        let btn: Vec<&String> = fr.iter().take(MAX_BUTTON_DIRS).collect();
+        let sel: Vec<&String> = fr.iter().take(MAX_SELECT_DIRS).collect();
+        (btn, sel)
     } else {
-        dirs_to_show_full
+        // Initial view: buttons from recommended, select_static from all_candidates.
+        let btn: Vec<&String> = recommended_dirs.iter().take(MAX_BUTTON_DIRS).collect();
+        let sel: Vec<&String> = all_candidates.iter().take(MAX_SELECT_DIRS).collect();
+        (btn, sel)
     };
-    if !dirs_to_show.is_empty() {
-        let section_label = if filter_result.is_some() {
-            if total_count > MAX_SHOWN_DIRS {
-                format!(
-                    "📋 **当前结果（共 {} 个，显示前 {} 个）：**",
-                    total_count, MAX_SHOWN_DIRS
-                )
-            } else {
-                format!("📋 **当前结果（{} 个）：**", total_count)
-            }
+
+    // --- Section label ---
+    let total_count = if let Some(fr) = filter_result {
+        fr.len()
+    } else {
+        select_dirs.len()
+    };
+    let section_label = if is_filtered {
+        if total_count > MAX_BUTTON_DIRS && button_dirs.len() < select_dirs.len() {
+            format!(
+                "📋 **当前结果（共 {} 个，按钮显示前 {} 个）：**",
+                total_count, MAX_BUTTON_DIRS
+            )
         } else {
-            "📋 **推荐目录：**".to_string()
-        };
+            format!("📋 **当前结果（{} 个）：**", total_count)
+        }
+    } else {
+        "📋 **推荐目录：**".to_string()
+    };
+
+    // --- Build button labels with smart display ---
+    // Recommended section: always short names (even if conflicting).
+    // Filtered section: conflict-aware (short name if unique, relative path if duplicate).
+    let button_labels = build_dir_labels(
+        &button_dirs
+            .iter()
+            .map(|d| d.to_string())
+            .collect::<Vec<String>>(),
+        root_dir,
+        is_filtered, // detect conflicts only in filtered mode
+    );
+
+    // --- Buttons ---
+    if !button_dirs.is_empty() {
         elements.push(serde_json::json!({
             "tag": "div",
             "text": {
@@ -485,100 +523,38 @@ pub fn build_dir_select_card(
             }
         }));
 
-        if filter_result.is_some() {
-            // Detect short-name conflicts within the filtered results.
-            // When multiple dirs share the same short display name, show the
-            // relative path instead so the user can distinguish them.
-            // The recommended-dir section (filter_result.is_none()) stays
-            // with short names regardless of conflicts.
-            let short_names: Vec<String> = dirs_to_show
-                .iter()
-                .map(|dir| {
-                    if dir == "." {
-                        root_dir_basename(root_dir)
-                    } else {
-                        dir_display_name(dir)
+        // Each directory gets its own action row with a single button
+        // (one button per row avoids the "two buttons per row" issue).
+        for (i, dir) in button_dirs.iter().enumerate() {
+            let display = &button_labels[i];
+            let conflict = display.1;
+            let label = &display.0;
+
+            let truncated = if !conflict || dir.as_str() == "." {
+                truncate_str(label, 22)
+            } else {
+                truncate_str_tail(label, 22)
+            };
+
+            let pick_value = serde_json::json!({
+                "action": "dir_select_pick",
+                "pending_id": pending_id,
+                "working_dir": dir
+            });
+            elements.push(serde_json::json!({
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {
+                            "tag": "plain_text",
+                            "content": truncated
+                        },
+                        "type": if dir.as_str() == "." { "primary" } else { "default" },
+                        "value": pick_value
                     }
-                })
-                .collect();
-            let mut name_count: HashMap<String, usize> = HashMap::new();
-            for sn in &short_names {
-                *name_count.entry(sn.clone()).or_insert(0) += 1;
-            }
-
-            for (i, dir) in dirs_to_show.iter().enumerate() {
-                let short = &short_names[i];
-                let conflict = name_count.get(short).copied().unwrap_or(1) > 1;
-
-                let display = if dir == "." {
-                    format!("📁 {}", root_dir_basename(root_dir))
-                } else if conflict {
-                    format!("📁 {}", dir)
-                } else {
-                    format!("📁 {}", short)
-                };
-
-                let truncated = if !conflict || dir == "." {
-                    truncate_str(&display, 22)
-                } else {
-                    truncate_str_tail(&display, 22)
-                };
-
-                let pick_value = serde_json::json!({
-                    "action": "dir_select_pick",
-                    "pending_id": pending_id,
-                    "working_dir": dir
-                });
-                elements.push(serde_json::json!({
-                    "tag": "action",
-                    "actions": [
-                        {
-                            "tag": "button",
-                            "text": {
-                                "tag": "plain_text",
-                                "content": truncated
-                            },
-                            "type": if dir == "." { "primary" } else { "default" },
-                            "value": pick_value
-                        }
-                    ]
-                }));
-            }
-        } else {
-            // Directory buttons (split into rows to avoid too-wide action groups).
-            let max_per_row = 4;
-            for chunk in dirs_to_show.chunks(max_per_row) {
-                if chunk.is_empty() {
-                    continue;
-                }
-                let actions: Vec<Value> = chunk
-                    .iter()
-                    .map(|dir| {
-                        let display = if dir == "." {
-                            format!("📁 {}", root_dir_basename(root_dir))
-                        } else {
-                            format!("📁 {}", dir_display_name(dir))
-                        };
-                        serde_json::json!({
-                            "tag": "button",
-                            "text": {
-                                "tag": "plain_text",
-                                "content": truncate_str(&display, 22)
-                            },
-                            "type": if dir == "." { "primary" } else { "default" },
-                            "value": {
-                                "action": "dir_select_pick",
-                                "pending_id": pending_id,
-                                "working_dir": dir
-                            }
-                        })
-                    })
-                    .collect();
-                elements.push(serde_json::json!({
-                    "tag": "action",
-                    "actions": actions
-                }));
-            }
+                ]
+            }));
         }
     } else {
         elements.push(serde_json::json!({
@@ -587,6 +563,87 @@ pub fn build_dir_select_card(
                 "tag": "lark_md",
                 "content": "⚠️ 没有匹配的目录，请尝试其他关键词。"
             }
+        }));
+    }
+
+    // --- select_static: "more directories / more matches" ---
+    if !select_dirs.is_empty() {
+        let select_total = if is_filtered {
+            if let Some(fr) = filter_result {
+                fr.len()
+            } else {
+                select_dirs.len()
+            }
+        } else {
+            all_candidates.len()
+        };
+        let select_shown = select_dirs.len();
+        let select_label = if is_filtered {
+            if select_total > select_shown {
+                format!(
+                    "📋 **更多匹配（共 {} 个，下拉显示前 {} 个）：**",
+                    select_total, select_shown
+                )
+            } else {
+                "📋 **下拉选择：**".to_string()
+            }
+        } else {
+            if select_total > select_shown {
+                format!(
+                    "📋 **更多目录（共 {} 个，下拉显示前 {} 个）：**",
+                    select_total, select_shown
+                )
+            } else {
+                format!("📋 **更多目录（共 {} 个）：**", select_total)
+            }
+        };
+        elements.push(serde_json::json!({
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": select_label
+            }
+        }));
+
+        let select_labels = build_dir_labels(
+            &select_dirs
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<String>>(),
+            root_dir,
+            is_filtered, // detect conflicts only in filtered mode
+        );
+
+        let mut options: Vec<Value> = Vec::new();
+        for (i, dir) in select_dirs.iter().enumerate() {
+            let display = &select_labels[i];
+            let label = &display.0;
+
+            // Option value is a JSON string containing action/pending_id/working_dir.
+            // Parsed by try_parse_select_option → parse_lark_card_action in lib.rs.
+            let option_value = serde_json::json!({
+                "action": "dir_select_pick",
+                "pending_id": pending_id,
+                "working_dir": dir,
+            });
+            let option_value_str = serde_json::to_string(&option_value).unwrap_or_default();
+
+            options.push(serde_json::json!({
+                "text": {
+                    "tag": "plain_text",
+                    "content": label
+                },
+                "value": option_value_str
+            }));
+        }
+
+        elements.push(serde_json::json!({
+            "tag": "select_static",
+            "placeholder": {
+                "tag": "plain_text",
+                "content": "请选择目录..."
+            },
+            "options": options
         }));
     }
 
@@ -690,7 +747,7 @@ pub fn build_dir_session_starting_card(working_dir: &str, title: &str) -> String
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": format!("✅ 已选择工作目录：{}\n\n正在启动会话：_{}_\n\n等待终端就绪...", working_dir, title)
+                    "content": format!("✅ 已选择工作目录：{}\n\n正在启动会话：_{}_\n\n等待终端就绪...", sanitize_lark_md(working_dir), sanitize_lark_md(title))
                 }
             }
         ]
@@ -699,6 +756,12 @@ pub fn build_dir_session_starting_card(working_dir: &str, title: &str) -> String
 }
 
 // --- Helpers ---
+
+/// Escape backticks in lark_md content to prevent Feishu from interpreting them
+/// as code tags (which triggers "unsupported html tag code" errors).
+fn sanitize_lark_md(s: &str) -> String {
+    s.replace('`', "'")
+}
 
 fn root_dir_basename(root_dir: &str) -> String {
     Path::new(root_dir)
@@ -718,6 +781,64 @@ fn dir_display_name(rel_path: &str) -> String {
         .and_then(|n| n.to_str())
         .unwrap_or(rel_path)
         .to_string()
+}
+
+/// Build display labels for a list of directories.
+///
+/// Returns a vector of `(label, is_conflict)` tuples.
+///
+/// - `detect_conflicts`: when true, short-name conflicts (multiple dirs sharing
+///   the same base name) are resolved by showing the full relative path for
+///   conflicting entries. When false, short names are always used.
+/// - The root directory "." is always shown as the root basename with a 📁 prefix.
+/// - Labels are NOT truncated here; callers apply truncation as needed.
+fn build_dir_labels(
+    dirs: &[String],
+    root_dir: &str,
+    detect_conflicts: bool,
+) -> Vec<(String, bool)> {
+    if dirs.is_empty() {
+        return Vec::new();
+    }
+
+    let short_names: Vec<String> = dirs
+        .iter()
+        .map(|dir| {
+            if dir == "." {
+                root_dir_basename(root_dir)
+            } else {
+                dir_display_name(dir)
+            }
+        })
+        .collect();
+
+    let conflict_map: HashMap<String, usize> = if detect_conflicts {
+        let mut map: HashMap<String, usize> = HashMap::new();
+        for sn in &short_names {
+            *map.entry(sn.clone()).or_insert(0) += 1;
+        }
+        map
+    } else {
+        HashMap::new()
+    };
+
+    dirs.iter()
+        .enumerate()
+        .map(|(i, dir)| {
+            let short = &short_names[i];
+            let conflict = detect_conflicts && conflict_map.get(short).copied().unwrap_or(1) > 1;
+
+            let display = if dir == "." {
+                format!("📁 {}", root_dir_basename(root_dir))
+            } else if conflict {
+                format!("📁 {}", dir)
+            } else {
+                format!("📁 {}", short)
+            };
+
+            (display, conflict)
+        })
+        .collect()
 }
 
 fn truncate_str(s: &str, max_len: usize) -> String {
@@ -1103,6 +1224,36 @@ mod tests {
             Some("pending-1")
         );
 
+        // Card should contain select_static dropdown for directory picking
+        let select_static = elements
+            .iter()
+            .find(|e| e["tag"].as_str() == Some("select_static"))
+            .expect("card should contain select_static dropdown");
+        let options = select_static["options"]
+            .as_array()
+            .expect("select_static should have options");
+        assert!(!options.is_empty(), "select_static should have options");
+        // Verify first option value is valid JSON with action/pending_id/working_dir
+        let first_opt_val = options[0]["value"]
+            .as_str()
+            .expect("option value should be a string");
+        let opt_parsed: Value =
+            serde_json::from_str(first_opt_val).expect("option value should be valid JSON");
+        assert_eq!(
+            opt_parsed["action"].as_str(),
+            Some("dir_select_pick"),
+            "select option should have action=dir_select_pick"
+        );
+        assert_eq!(
+            opt_parsed["pending_id"].as_str(),
+            Some("pending-1"),
+            "select option should have pending_id"
+        );
+        assert!(
+            opt_parsed["working_dir"].as_str().is_some(),
+            "select option should have working_dir"
+        );
+
         // Verify form container structure
         let form = elements
             .iter()
@@ -1233,8 +1384,9 @@ mod tests {
 
     #[test]
     fn test_build_dir_select_card_truncates_excess_options() {
-        // When there are more directories than MAX_SHOWN_DIRS (150),
-        // the directory buttons are capped.
+        // When there are more directories than MAX_BUTTON_DIRS (40),
+        // the directory buttons are capped at 40, while the select_static
+        // dropdown shows up to MAX_SELECT_DIRS (150).
         let many_dirs: Vec<String> = (0..200).map(|i| format!("project-{:03}", i)).collect();
         let card = build_dir_select_card(
             "pid", "/root", "test", &many_dirs, &many_dirs, None, None, None,
@@ -1252,15 +1404,27 @@ mod tests {
             })
             .count();
         assert_eq!(
-            pick_button_count, 150,
-            "directory buttons should be capped at MAX_SHOWN_DIRS"
+            pick_button_count, 40,
+            "directory buttons should be capped at MAX_BUTTON_DIRS"
+        );
+        // select_static should contain up to MAX_SELECT_DIRS options
+        let select_static = v["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["tag"].as_str() == Some("select_static"))
+            .expect("card should have select_static");
+        let option_count = select_static["options"].as_array().unwrap().len();
+        assert_eq!(
+            option_count, 150,
+            "select_static options should be capped at MAX_SELECT_DIRS"
         );
     }
 
     #[test]
     fn test_build_dir_select_card_filtered_truncation_shows_count_in_label() {
-        // When filtering produces more results than MAX_SHOWN_DIRS,
-        // the section label should indicate the total count and shown count.
+        // When filtering produces more results than MAX_BUTTON_DIRS (40),
+        // the section label should indicate the total count and button cap.
         let many_dirs: Vec<String> = (0..200).map(|i| format!("project-{:03}", i)).collect();
         let card = build_dir_select_card(
             "pid",
@@ -1272,11 +1436,20 @@ mod tests {
             Some("proj"),
             None,
         );
-        // Section label should mention total count and shown count
+        // Section label should mention total count and button cap
         assert!(card.contains("共 200"), "label should show total count");
         assert!(
+            card.contains("显示前 40"),
+            "label should show button truncation limit"
+        );
+        // select_static label should also mention the total
+        assert!(
+            card.contains("更多匹配"),
+            "should have select_static more-matches section"
+        );
+        assert!(
             card.contains("显示前 150"),
-            "label should show truncation limit"
+            "select_static label should show dropdown limit"
         );
         let v: Value = serde_json::from_str(&card).expect("valid card JSON");
         let result_row_count = v["elements"]
@@ -1286,14 +1459,28 @@ mod tests {
             .filter(|e| e["tag"].as_str() == Some("action"))
             .count();
         assert_eq!(
-            result_row_count, 150,
-            "result rows capped at MAX_SHOWN_DIRS"
+            result_row_count, 40,
+            "filtered result button rows capped at MAX_BUTTON_DIRS"
+        );
+        let select_opts = v["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["tag"].as_str() == Some("select_static"))
+            .expect("should have select_static")["options"]
+            .as_array()
+            .unwrap()
+            .len();
+        assert_eq!(
+            select_opts, 150,
+            "select_static options capped at MAX_SELECT_DIRS"
         );
     }
 
     #[test]
     fn test_build_dir_select_card_no_truncation_when_under_limit() {
-        // When there are fewer directories than MAX_SHOWN_DIRS, no truncation.
+        // When there are fewer directories than MAX_BUTTON_DIRS (40),
+        // all fit in buttons and no truncation label.
         let few_dirs: Vec<String> = (0..10).map(|i| format!("project-{:02}", i)).collect();
         let card = build_dir_select_card(
             "pid",
@@ -1305,10 +1492,10 @@ mod tests {
             Some("proj"),
             None,
         );
-        // No "显示前" message when under limit
+        // No "显示前" message when under limit (10 <= 40)
         assert!(
             !card.contains("显示前"),
-            "no truncation label when under limit"
+            "no truncation label when under button limit"
         );
         let v: Value = serde_json::from_str(&card).expect("valid card JSON");
         let result_row_count = v["elements"]
@@ -1318,6 +1505,15 @@ mod tests {
             .filter(|e| e["tag"].as_str() == Some("action"))
             .count();
         assert_eq!(result_row_count, 10, "all 10 result rows should be present");
+        // select_static should exist (showing all results as dropdown)
+        assert!(
+            v["elements"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["tag"].as_str() == Some("select_static")),
+            "select_static should be present even with few results"
+        );
     }
 
     #[test]
