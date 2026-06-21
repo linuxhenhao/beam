@@ -46,15 +46,15 @@ use axum::{
 use base64::Engine;
 use beam_core::{
     AdoptCandidate, AdoptTmuxSessionRequest, AdoptedFrom, ApiHealth, AttemptResumeRequest,
-    BackendType, BeamPaths, BotConfig, BotSummary, ChatMode,
-    CliUsageLimitState, ColdWorkflowRun, Config, CreateSessionRequest, DaemonOverview,
-    DaemonRuntimeState, DaemonToWorker, DisplayMode, EventDraft, EventLog, EventWindowOpts,
-    FinalOutputKind, FinalOutputRequest, InitConfig, PendingResponseCardState,
-    RestartSessionRequest, ResumeSessionRequest, RunChatBinding, RunStatus, ScreenStatus, Session,
-    SessionGroup, SessionInputRequest, SessionLocateInfo, SessionScope, SessionStatus,
-    SessionSummary, TalkEvaluation, TermActionKey, TuiPromptOption, WaitResolution, WorkerToDaemon,
-    WorkflowActor, WorkflowOutputRef, can_operate, evaluate_talk, grant_restricted, parse_workflow_definition,
-    read_event_window, read_run_events_pure, read_run_snapshot, scan_cold_workflow_runs,
+    BackendType, BeamPaths, BotConfig, BotSummary, ChatMode, CliUsageLimitState, ColdWorkflowRun,
+    Config, CreateSessionRequest, DaemonOverview, DaemonRuntimeState, DaemonToWorker, DisplayMode,
+    EventDraft, EventLog, EventWindowOpts, FinalOutputKind, FinalOutputRequest, InitConfig,
+    PendingResponseCardState, RestartSessionRequest, ResumeSessionRequest, RunChatBinding,
+    RunStatus, ScreenStatus, Session, SessionGroup, SessionInputRequest, SessionLocateInfo,
+    SessionScope, SessionStatus, SessionSummary, TalkEvaluation, TermActionKey, TuiPromptOption,
+    WaitResolution, WorkerToDaemon, WorkflowActor, WorkflowOutputRef, can_operate, evaluate_talk,
+    grant_restricted, parse_workflow_definition, read_event_window, read_run_events_pure,
+    read_run_snapshot, scan_cold_workflow_runs,
 };
 use chrono::Utc;
 use connector_store::{
@@ -568,7 +568,6 @@ enum LarkEventOutcome {
     CreateSession,
 }
 
-
 #[derive(Debug, Clone, serde::Deserialize)]
 struct WorkflowRunRequest {
     #[serde(default, rename = "rawParams")]
@@ -748,7 +747,6 @@ pub(crate) struct WorkflowFeishuReplyInput {
     #[serde(rename = "replyInThread", default)]
     _reply_in_thread: Option<bool>,
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedLarkInboundMessage {
@@ -2813,7 +2811,6 @@ pub(crate) fn is_retryable_feishu_resume_error(err: &anyhow::Error) -> bool {
         .any(|text| needles.iter().any(|needle| text.contains(needle)))
 }
 
-
 fn load_known_bot_open_ids_for_app(paths: &BeamPaths, lark_app_id: &str) -> HashSet<String> {
     let mut out = HashSet::new();
     let cross_ref_path = paths
@@ -4500,7 +4497,6 @@ fn classify_lark_text_action(text: &str, has_existing_session: bool) -> LarkText
     }
 }
 
-
 fn build_adopt_already_attached_reply(session: &Session) -> String {
     let adopted = match session.adopted_from.as_ref() {
         Some(adopted) => adopted,
@@ -4914,13 +4910,50 @@ fn parse_special_keys(value: &Value) -> Option<Vec<String>> {
         .filter(|keys| !keys.is_empty())
 }
 
-fn parse_lark_card_action(payload: &Value) -> Result<ParsedLarkCardAction, (StatusCode, String)> {
-    let action = payload
-        .pointer("/action/value/action")
+/// Try to parse a select_static option value as a JSON object containing
+/// action / pending_id / working_dir fields. Returns None if the option
+/// value is missing, not valid JSON, or doesn't contain an "action" field.
+fn try_parse_select_option(option_str: &str) -> Option<(String, Option<String>, Option<String>)> {
+    let v: Value = serde_json::from_str(option_str).ok()?;
+    let action = v.pointer("/action").and_then(Value::as_str)?;
+    let pending_id = v
+        .pointer("/pending_id")
         .and_then(Value::as_str)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing card action".to_string()))?;
+        .map(ToOwned::to_owned);
+    let working_dir = v
+        .pointer("/working_dir")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    Some((action.to_string(), pending_id, working_dir))
+}
+
+fn parse_lark_card_action(payload: &Value) -> Result<ParsedLarkCardAction, (StatusCode, String)> {
+    // Primary path: /action/value/action (for buttons, form_submit, etc.)
+    let action_from_value = payload
+        .pointer("/action/value/action")
+        .and_then(Value::as_str);
+
+    // Fallback: /action/option/ for select_static dropdown events.
+    // The option value is a JSON-encoded string containing {action, pending_id, working_dir}.
+    let option_parsed = if action_from_value.is_none() {
+        payload
+            .pointer("/action/option")
+            .and_then(Value::as_str)
+            .and_then(try_parse_select_option)
+    } else {
+        None
+    };
+
+    let (action_str, opt_pending_id, opt_working_dir) = match (action_from_value, option_parsed) {
+        (Some(action), _) => (action.to_string(), None, None),
+        (None, Some((action, pending_id, working_dir))) => (action, pending_id, working_dir),
+        (None, None) => {
+            return Err((StatusCode::BAD_REQUEST, "missing card action".to_string()));
+        }
+    };
+
     Ok(ParsedLarkCardAction {
-        action: action.to_string(),
+        action: action_str,
         session_id: payload
             .pointer("/action/value/session_id")
             .and_then(Value::as_str)
@@ -5040,10 +5073,12 @@ fn parse_lark_card_action(payload: &Value) -> Result<ParsedLarkCardAction, (Stat
         pending_id: payload
             .pointer("/action/value/pending_id")
             .and_then(Value::as_str)
+            .or_else(|| opt_pending_id.as_deref())
             .map(ToOwned::to_owned),
         working_dir: payload
             .pointer("/action/value/working_dir")
             .and_then(Value::as_str)
+            .or_else(|| opt_working_dir.as_deref())
             .map(ToOwned::to_owned),
         dir_search_keyword: payload
             .pointer("/action/form_value/dir_search_keyword")
@@ -6305,11 +6340,8 @@ async fn handle_lark_event_payload(
             let recent_store = dir_select::load_recent_dirs(&recent_path)
                 .await
                 .unwrap_or_default();
-            let recent_key = dir_select::build_recent_dir_key(
-                &app_id,
-                chat_id,
-                sender_open_id.as_deref(),
-            );
+            let recent_key =
+                dir_select::build_recent_dir_key(&app_id, chat_id, sender_open_id.as_deref());
             let recent_dirs =
                 dir_select::get_recent_dirs(&recent_store, &recent_key, &root_working_dir);
 
@@ -6384,15 +6416,55 @@ async fn handle_lark_event_payload(
             );
 
             let reply_in_thread = scope == SessionScope::Thread;
-            let card_message_id = lark_reply_card_with_opts(
-                &state,
-                &bot,
-                message_id,
-                &card,
+            info!(
+                app_id = %app_id,
+                chat_id = %chat_id,
+                chat_type = ?parsed.chat_type,
+                scope = ?scope,
+                message_id = %message_id,
+                pending_id = %pending_id,
                 reply_in_thread,
-            )
-            .await
-            .map_err(internal_error)?;
+                candidate_count = candidate_dirs.len(),
+                card_bytes = card.len(),
+                uses_select_static = card.contains("\"select_static\""),
+                "sending dir select card"
+            );
+            let card_message_id =
+                match lark_reply_card_with_opts(&state, &bot, message_id, &card, reply_in_thread)
+                    .await
+                {
+                    Ok(card_message_id) => {
+                        info!(
+                            app_id = %app_id,
+                            chat_id = %chat_id,
+                            chat_type = ?parsed.chat_type,
+                            scope = ?scope,
+                            message_id = %message_id,
+                            pending_id = %pending_id,
+                            card_message_id = %card_message_id,
+                            reply_in_thread,
+                            "sent dir select card"
+                        );
+                        card_message_id
+                    }
+                    Err(err) => {
+                        warn!(
+                            app_id = %app_id,
+                            chat_id = %chat_id,
+                            chat_type = ?parsed.chat_type,
+                            scope = ?scope,
+                            message_id = %message_id,
+                            pending_id = %pending_id,
+                            reply_in_thread,
+                            candidate_count = candidate_dirs.len(),
+                            card_bytes = card.len(),
+                            uses_select_static = card.contains("\"select_static\""),
+                            error = %err,
+                            "failed to send dir select card"
+                        );
+                        return Err(internal_error(err));
+                    }
+                };
 
             // Store pending entry with card message id (prune expired first)
             {
@@ -6459,10 +6531,25 @@ impl EventHandler for LarkWsCardActionEventHandler {
         let state = self.state.clone();
         let app_id = self.app_id.clone();
         Box::pin(async move {
-            let card_action: CardAction =
-                serde_json::from_value(event.event.unwrap_or_default())
-                    .map_err(|err| feishu_core::Error::InvalidEventFormat(err.to_string()))?;
-            let payload = normalize_lark_ws_card_action(card_action);
+            let raw = event.event.unwrap_or_default();
+            // Snapshot form_value from the raw event before CardAction deserialization
+            // silently drops it (feishu-sdk 0.1.2 CardActionValue has no form_value field).
+            let form_value_snapshot = raw.pointer("/action/form_value").cloned();
+
+            let card_action: CardAction = serde_json::from_value(raw)
+                .map_err(|err| feishu_core::Error::InvalidEventFormat(err.to_string()))?;
+            let mut payload = normalize_lark_ws_card_action(card_action);
+
+            // Restore form_value that was dropped during CardAction deserialization.
+            // This is needed for form_submit buttons (e.g. dir_select_filter, workflow comments).
+            if let Some(fv) = form_value_snapshot {
+                if let Some(action) = payload.pointer_mut("/action") {
+                    if let Some(obj) = action.as_object_mut() {
+                        obj.insert("form_value".to_string(), fv);
+                    }
+                }
+            }
+
             let Json(response) = handle_lark_card_action_payload(&state, &app_id, payload)
                 .await
                 .map_err(|(_status, err)| feishu_core::Error::InvalidEventFormat(err))?;
@@ -6612,7 +6699,10 @@ async fn handle_lark_card_action_payload(
                     )));
                 };
                 if pending.lark_app_id != app_id {
-                    return Ok(Json(build_lark_card_action_toast("error", "permission denied")));
+                    return Ok(Json(build_lark_card_action_toast(
+                        "error",
+                        "permission denied",
+                    )));
                 }
 
                 let working_dir_rel = action
@@ -6658,10 +6748,8 @@ async fn handle_lark_card_action_payload(
                     }
                 }
 
-                create_session_from_pending(
-                    state, bot, &pending, &working_dir, working_dir_rel,
-                )
-                .await
+                create_session_from_pending(state, bot, &pending, &working_dir, working_dir_rel)
+                    .await
             }
 
             "dir_select_filter" => {
@@ -6677,14 +6765,13 @@ async fn handle_lark_card_action_payload(
                     )));
                 };
                 if pending.lark_app_id != app_id {
-                    return Ok(Json(build_lark_card_action_toast("error", "permission denied")));
+                    return Ok(Json(build_lark_card_action_toast(
+                        "error",
+                        "permission denied",
+                    )));
                 }
 
-                let keyword = action
-                    .dir_search_keyword
-                    .as_deref()
-                    .unwrap_or("")
-                    .trim();
+                let keyword = action.dir_search_keyword.as_deref().unwrap_or("").trim();
 
                 let filtered = if keyword.is_empty() {
                     // Empty keyword → show all candidates (capped in card builder)
@@ -6696,7 +6783,10 @@ async fn handle_lark_card_action_payload(
 
                 let message = if let Some(ref f) = filtered {
                     if f.is_empty() {
-                        Some(format!("⚠️ 没有目录匹配关键词 \"{}\"，请尝试其他关键词。", keyword))
+                        Some(format!(
+                            "⚠️ 没有目录匹配关键词 \"{}\"，请尝试其他关键词。",
+                            keyword
+                        ))
                     } else if f.len() == 1 {
                         None
                     } else {
@@ -6713,20 +6803,34 @@ async fn handle_lark_card_action_payload(
                     &[],
                     &pending.candidate_dirs,
                     filtered.as_deref(),
-                    if keyword.is_empty() { None } else { Some(keyword) },
+                    if keyword.is_empty() {
+                        None
+                    } else {
+                        Some(keyword)
+                    },
                     message.as_deref(),
                 );
 
+                // PATCH the card message as a fallback (primary update is via response card field)
                 if let Some(card_msg_id) = &pending.card_message_id {
-                    let _ = lark_update_card(state, bot, card_msg_id, &card).await;
+                    if let Err(e) = lark_update_card(state, bot, card_msg_id, &card).await {
+                        warn!(
+                            "dir_select_filter: PATCH card for {} failed: {:?}",
+                            pending_id, e
+                        );
+                    }
                 }
 
+                let card_data = serde_json::from_str::<Value>(&card).unwrap_or(Value::Null);
                 let toast_msg = if keyword.is_empty() {
                     "已显示全部目录".to_string()
                 } else {
                     format!("已筛选 \"{}\"", keyword)
                 };
-                Ok(Json(build_lark_card_action_toast("success", &toast_msg)))
+                Ok(Json(serde_json::json!({
+                    "toast": { "type": "success", "content": toast_msg },
+                    "card": { "type": "raw", "data": card_data }
+                })))
             }
 
             "dir_select_best" => {
@@ -6742,14 +6846,13 @@ async fn handle_lark_card_action_payload(
                     )));
                 };
                 if pending.lark_app_id != app_id {
-                    return Ok(Json(build_lark_card_action_toast("error", "permission denied")));
+                    return Ok(Json(build_lark_card_action_toast(
+                        "error",
+                        "permission denied",
+                    )));
                 }
 
-                let keyword = action
-                    .dir_search_keyword
-                    .as_deref()
-                    .unwrap_or("")
-                    .trim();
+                let keyword = action.dir_search_keyword.as_deref().unwrap_or("").trim();
 
                 if keyword.is_empty() {
                     return Ok(Json(build_lark_card_action_toast(
@@ -6786,8 +6889,7 @@ async fn handle_lark_card_action_payload(
                             )));
                         };
 
-                        let working_dir =
-                            dir_select::resolve_dir(&pending.root_working_dir, &dir);
+                        let working_dir = dir_select::resolve_dir(&pending.root_working_dir, &dir);
 
                         // Consume quota if applicable
                         if let Some(quota_key) = pending.quota_key.as_deref() {
@@ -6829,14 +6931,21 @@ async fn handle_lark_card_action_payload(
                             message.as_deref(),
                         );
 
+                        // PATCH the card message as a fallback (primary update is via response card field)
                         if let Some(card_msg_id) = &pending.card_message_id {
-                            let _ = lark_update_card(state, bot, card_msg_id, &card).await;
+                            if let Err(e) = lark_update_card(state, bot, card_msg_id, &card).await {
+                                warn!(
+                                    "dir_select_best: PATCH card for {} failed: {:?}",
+                                    pending_id, e
+                                );
+                            }
                         }
 
-                        Ok(Json(build_lark_card_action_toast(
-                            "warning",
-                            "无法确定唯一最佳匹配，请从列表中选择",
-                        )))
+                        let card_data = serde_json::from_str::<Value>(&card).unwrap_or(Value::Null);
+                        Ok(Json(serde_json::json!({
+                            "toast": { "type": "warning", "content": "无法确定唯一最佳匹配，请从列表中选择" },
+                            "card": { "type": "raw", "data": card_data }
+                        })))
                     }
                 }
             }
@@ -6869,13 +6978,9 @@ async fn handle_lark_card_action_payload(
             serde_json::from_str(&pending.mentions_json).unwrap_or_default();
 
         let prompt = if pending.cli_id == "opencode" {
-            let (bot_name, bot_open_id) =
-                load_bot_identity(&state.paths, &pending.lark_app_id);
-            let observed_bots = load_observed_bots_for_chat(
-                &state.paths,
-                &pending.lark_app_id,
-                &pending.chat_id,
-            );
+            let (bot_name, bot_open_id) = load_bot_identity(&state.paths, &pending.lark_app_id);
+            let observed_bots =
+                load_observed_bots_for_chat(&state.paths, &pending.lark_app_id, &pending.chat_id);
             prompt::build_initial_prompt(&prompt::InitialPromptOptions {
                 user_message: &prompt_raw,
                 session_id: "pending",
@@ -8397,7 +8502,6 @@ async fn get_workflow_run_events(
     })))
 }
 
-
 async fn start_workflow_attempt_resume(
     State(state): State<AppState>,
     AxumPath((run_id, activity_id, attempt_id)): AxumPath<(String, String, String)>,
@@ -8823,8 +8927,6 @@ async fn cancel_workflow_run(
         ))
     }
 }
-
-
 
 async fn resume_workflow_run(
     State(state): State<AppState>,
@@ -11994,9 +12096,8 @@ mod tests {
     async fn list_workflow_runs_respects_terminal_filter_and_status_filters() {
         let paths = temp_paths("workflow-runs");
         maybe_remove_dir(&paths.root().to_path_buf());
-        let params: BTreeMap<String, Value> = BTreeMap::from([
-            (String::from("name"), Value::String("beam".to_string())),
-        ]);
+        let params: BTreeMap<String, Value> =
+            BTreeMap::from([(String::from("name"), Value::String("beam".to_string()))]);
         bootstrap_workflow_run(
             &paths,
             BootstrapWorkflowRunInput {
@@ -12557,9 +12658,7 @@ mod tests {
         }
 
         // ── double-quoted value with spaces ───────────────────────
-        match parse_workflow_text_command(
-            "/workflow run flow task=\"review and deploy PR #42\"",
-        ) {
+        match parse_workflow_text_command("/workflow run flow task=\"review and deploy PR #42\"") {
             Some(WorkflowTextCommand::Run {
                 workflow_id,
                 raw_params,
@@ -12574,9 +12673,7 @@ mod tests {
         }
 
         // ── single-quoted value with spaces ───────────────────────
-        match parse_workflow_text_command(
-            "/workflow run flow task='review and deploy PR #42'",
-        ) {
+        match parse_workflow_text_command("/workflow run flow task='review and deploy PR #42'") {
             Some(WorkflowTextCommand::Run {
                 workflow_id,
                 raw_params,
@@ -12591,9 +12688,7 @@ mod tests {
         }
 
         // ── escaped double-quote inside double-quoted value ───────
-        match parse_workflow_text_command(
-            "/workflow run flow task=\"say \\\"hello\\\"\"",
-        ) {
+        match parse_workflow_text_command("/workflow run flow task=\"say \\\"hello\\\"\"") {
             Some(WorkflowTextCommand::Run {
                 workflow_id,
                 raw_params,
@@ -12628,23 +12723,15 @@ mod tests {
                 raw_params,
             }) => {
                 assert_eq!(workflow_id, "flow");
-                assert_eq!(
-                    raw_params.get("task").map(String::as_str),
-                    Some("do stuff")
-                );
-                assert_eq!(
-                    raw_params.get("verbose").map(String::as_str),
-                    Some("true")
-                );
+                assert_eq!(raw_params.get("task").map(String::as_str), Some("do stuff"));
+                assert_eq!(raw_params.get("verbose").map(String::as_str), Some("true"));
                 assert_eq!(raw_params.get("count").map(String::as_str), Some("10"));
             }
             other => panic!("unexpected: {:?}", other),
         }
 
         // ── JSON payload in single-quoted value ───────────────────
-        match parse_workflow_text_command(
-            "/workflow run flow payload='{\"a\":1}'",
-        ) {
+        match parse_workflow_text_command("/workflow run flow payload='{\"a\":1}'") {
             Some(WorkflowTextCommand::Run {
                 workflow_id,
                 raw_params,
@@ -12721,9 +12808,7 @@ mod tests {
 
         // ── adjacent quoted/unquoted concatenation (shell-like) ──
         // In shell word parsing, `"done"extra` concatenates to `doneextra`.
-        match parse_workflow_text_command(
-            "/workflow run flow task=\"done\"extra",
-        ) {
+        match parse_workflow_text_command("/workflow run flow task=\"done\"extra") {
             Some(WorkflowTextCommand::Run {
                 workflow_id,
                 raw_params,
@@ -15186,6 +15271,109 @@ mod tests {
     }
 
     #[test]
+    fn parse_lark_card_action_extracts_dir_search_keyword_from_form_value() {
+        let payload = serde_json::json!({
+            "operator": { "open_id": "ou_user" },
+            "context": { "open_message_id": "om_card_clicked" },
+            "action": {
+                "value": {
+                    "action": "dir_select_filter",
+                    "pending_id": "pending-abc"
+                },
+                "form_value": { "dir_search_keyword": "src/crates" }
+            }
+        });
+        let parsed = parse_lark_card_action(&payload).expect("parsed");
+        assert_eq!(parsed.action, "dir_select_filter");
+        assert_eq!(parsed.pending_id.as_deref(), Some("pending-abc"));
+        assert_eq!(
+            parsed.dir_search_keyword.as_deref(),
+            Some("src/crates"),
+            "dir_search_keyword should be extracted from /action/form_value/dir_search_keyword"
+        );
+    }
+
+    #[test]
+    fn parse_lark_card_action_dir_search_keyword_none_when_no_form_value() {
+        let payload = serde_json::json!({
+            "operator": { "open_id": "ou_user" },
+            "action": {
+                "value": {
+                    "action": "dir_select_pick",
+                    "pending_id": "pending-abc",
+                    "working_dir": "src"
+                }
+            }
+        });
+        let parsed = parse_lark_card_action(&payload).expect("parsed");
+        assert_eq!(parsed.action, "dir_select_pick");
+        assert_eq!(parsed.dir_search_keyword.as_deref(), None);
+    }
+
+    #[test]
+    fn normalize_lark_ws_card_action_preserves_form_value_for_form_submit() {
+        // Simulates a form_submit button click event arriving via WebSocket.
+        // The raw JSON includes "form_value" which must survive the
+        // CardAction deserialization + normalization round-trip.
+        let raw = serde_json::json!({
+            "open_id": "ou_owner",
+            "open_message_id": "om_card",
+            "action": {
+                "value": {
+                    "action": "dir_select_filter",
+                    "pending_id": "pending-xyz"
+                },
+                "tag": "button",
+                "form_value": {
+                    "dir_search_keyword": "home/test"
+                }
+            }
+        });
+
+        // Simulate the handler's form_value preservation logic
+        let form_value_snapshot = raw.pointer("/action/form_value").cloned();
+        let card_action: CardAction = serde_json::from_value(raw).expect("deserialize CardAction");
+        let mut payload = normalize_lark_ws_card_action(card_action);
+        if let Some(fv) = form_value_snapshot {
+            if let Some(action) = payload.pointer_mut("/action") {
+                if let Some(obj) = action.as_object_mut() {
+                    obj.insert("form_value".to_string(), fv);
+                }
+            }
+        }
+
+        // Verify the normalized payload has both the value fields and form_value
+        assert_eq!(
+            payload.pointer("/operator/open_id").and_then(Value::as_str),
+            Some("ou_owner")
+        );
+        assert_eq!(
+            payload
+                .pointer("/action/value/action")
+                .and_then(Value::as_str),
+            Some("dir_select_filter")
+        );
+        assert_eq!(
+            payload
+                .pointer("/action/value/pending_id")
+                .and_then(Value::as_str),
+            Some("pending-xyz")
+        );
+        assert_eq!(
+            payload
+                .pointer("/action/form_value/dir_search_keyword")
+                .and_then(Value::as_str),
+            Some("home/test"),
+            "form_value must be preserved through the CardAction deserialization round-trip"
+        );
+
+        // Verify parse_lark_card_action can extract the keyword
+        let parsed = parse_lark_card_action(&payload).expect("parse normalized payload");
+        assert_eq!(parsed.action, "dir_select_filter");
+        assert_eq!(parsed.dir_search_keyword.as_deref(), Some("home/test"));
+    }
+
+    #[test]
     fn build_workflow_approval_resolved_card_includes_resolution_banner() {
         let card: Value = serde_json::from_str(&build_workflow_approval_resolved_card(
             "wf_reject",
@@ -15294,6 +15482,300 @@ mod tests {
         assert_eq!(
             toast.pointer("/toast/content").and_then(Value::as_str),
             Some("session resumed")
+        );
+    }
+
+    #[test]
+    fn dir_select_filter_response_includes_card_and_toast() {
+        // Verify that a filter action response returns both toast and card fields,
+        // so the Feishu client updates the card inline instead of just showing a toast.
+        let card_json = dir_select::build_dir_select_card(
+            "pending-1",
+            "/home/user/projects",
+            "test message",
+            &[".".to_string(), "project-a".to_string()],
+            &[
+                ".".to_string(),
+                "project-a".to_string(),
+                "project-b".to_string(),
+            ],
+            Some(&["project-a".to_string()]),
+            Some("project"),
+            None,
+        );
+        let card_data: Value = serde_json::from_str(&card_json).expect("card should be valid JSON");
+        let toast_msg = "已筛选 \"project\"";
+        let response = serde_json::json!({
+            "toast": { "type": "success", "content": toast_msg },
+            "card": { "type": "raw", "data": card_data }
+        });
+
+        // Response must contain both toast and card fields
+        assert!(
+            response.get("toast").is_some(),
+            "response must have toast field"
+        );
+        assert!(
+            response.get("card").is_some(),
+            "response must have card field"
+        );
+        assert_eq!(
+            response.pointer("/toast/content").and_then(Value::as_str),
+            Some(toast_msg)
+        );
+        assert_eq!(
+            response.pointer("/card/type").and_then(Value::as_str),
+            Some("raw")
+        );
+        // The card data should contain the filtered directory button
+        let card_str = response.pointer("/card/data").unwrap().to_string();
+        assert!(
+            card_str.contains("project-a"),
+            "filtered card must show project-a"
+        );
+        assert!(
+            card_str.contains("dir_select_pick"),
+            "filtered card must retain pickable buttons"
+        );
+    }
+
+    #[test]
+    fn dir_select_filter_response_card_contains_filtered_dirs_only() {
+        // When filtering with a keyword, the response card should show only matching dirs.
+        let all_dirs: Vec<String> = vec![
+            ".".to_string(),
+            "project-a".to_string(),
+            "project-b".to_string(),
+            "other".to_string(),
+        ];
+        let filtered: Vec<String> = vec!["project-a".to_string(), "project-b".to_string()];
+
+        let card_json = dir_select::build_dir_select_card(
+            "pending-2",
+            "/root",
+            "test",
+            &[],
+            &all_dirs,
+            Some(&filtered),
+            Some("project"),
+            None,
+        );
+        let card_data: Value = serde_json::from_str(&card_json).expect("card should be valid JSON");
+        let response = serde_json::json!({
+            "toast": { "type": "success", "content": "已筛选 \"project\"" },
+            "card": { "type": "raw", "data": card_data }
+        });
+
+        let card_str = response.pointer("/card/data").unwrap().to_string();
+        // Must contain the matching dirs
+        assert!(
+            card_str.contains("project-a"),
+            "card must contain project-a"
+        );
+        assert!(
+            card_str.contains("project-b"),
+            "card must contain project-b"
+        );
+        // Should NOT contain the non-matching dir "other"
+        assert!(
+            !card_str.contains("\"working_dir\":\"other\""),
+            "card must NOT contain non-matching dir 'other'"
+        );
+        // Must still have pickable buttons
+        assert!(
+            card_str.contains("dir_select_pick"),
+            "filtered card must retain dir_select_pick buttons"
+        );
+    }
+
+    #[test]
+    fn dir_select_filter_response_empty_keyword_shows_all_dirs() {
+        // Empty keyword should show all candidates (clear filter / show all).
+        let all_dirs: Vec<String> = vec![
+            ".".to_string(),
+            "project-a".to_string(),
+            "project-b".to_string(),
+        ];
+
+        let card_json = dir_select::build_dir_select_card(
+            "pending-3",
+            "/root",
+            "test",
+            &[],
+            &all_dirs,
+            Some(&all_dirs),
+            None,
+            None,
+        );
+        let card_data: Value = serde_json::from_str(&card_json).expect("card should be valid JSON");
+        let response = serde_json::json!({
+            "toast": { "type": "success", "content": "已显示全部目录" },
+            "card": { "type": "raw", "data": card_data }
+        });
+
+        // Response must have both fields
+        assert!(response.get("toast").is_some());
+        assert!(response.get("card").is_some());
+
+        let card_str = response.pointer("/card/data").unwrap().to_string();
+        // All dirs should be present as buttons
+        assert!(card_str.contains("dir_select_pick"));
+        // The search keyword field should be empty (cleared)
+        let v: Value = serde_json::from_str(&card_str).expect("valid card JSON");
+        let elements = v["elements"].as_array().unwrap();
+        let form = elements
+            .iter()
+            .find(|e| e["tag"].as_str() == Some("form"))
+            .unwrap();
+        let form_els = form["elements"].as_array().unwrap();
+        let input = form_els
+            .iter()
+            .find(|e| e["tag"].as_str() == Some("input"))
+            .unwrap();
+        assert_eq!(
+            input["default_value"].as_str(),
+            Some(""),
+            "empty keyword should clear the input field"
+        );
+    }
+
+    #[test]
+    fn dir_select_filter_response_empty_result_shows_warning() {
+        // When no directories match, the card should show a warning message.
+        let all_dirs: Vec<String> = vec![".".to_string(), "project-a".to_string()];
+        let filtered: Vec<String> = vec![];
+
+        let card_json = dir_select::build_dir_select_card(
+            "pending-4",
+            "/root",
+            "test",
+            &[],
+            &all_dirs,
+            Some(&filtered),
+            Some("nonexistent"),
+            Some("⚠️ 没有目录匹配关键词 \"nonexistent\"，请尝试其他关键词。"),
+        );
+        let card_data: Value = serde_json::from_str(&card_json).expect("card should be valid JSON");
+        let response = serde_json::json!({
+            "toast": { "type": "success", "content": "已筛选 \"nonexistent\"" },
+            "card": { "type": "raw", "data": card_data }
+        });
+
+        let card_str = response.pointer("/card/data").unwrap().to_string();
+        // Must show the warning message
+        assert!(
+            card_str.contains("没有目录匹配"),
+            "empty result card must show warning message"
+        );
+        assert!(
+            card_str.contains("请尝试其他关键词"),
+            "empty result card must suggest trying other keywords"
+        );
+        // Must still have the search form to allow retry
+        assert!(
+            card_str.contains("dir_search_keyword"),
+            "empty result card must retain search input"
+        );
+    }
+
+    #[test]
+    fn parse_lark_card_action_extracts_select_static_option() {
+        // Simulates a select_static dropdown selection event.
+        // The selected option value is a JSON-encoded string with
+        // action, pending_id, and working_dir.
+        let payload = serde_json::json!({
+            "operator": { "open_id": "ou_user" },
+            "context": { "open_message_id": "om_card" },
+            "action": {
+                "tag": "select_static",
+                "option": "{\"action\":\"dir_select_pick\",\"pending_id\":\"pid-1\",\"working_dir\":\"project-a\"}"
+            }
+        });
+        let parsed = parse_lark_card_action(&payload).expect("parsed select_static action");
+        assert_eq!(parsed.action, "dir_select_pick");
+        assert_eq!(parsed.pending_id.as_deref(), Some("pid-1"));
+        assert_eq!(parsed.working_dir.as_deref(), Some("project-a"));
+    }
+
+    #[test]
+    fn parse_lark_card_action_select_static_option_falls_back_to_value() {
+        // When both /action/value/action and /action/option/ exist,
+        // /action/value/action takes priority (button click with option field).
+        // This tests that select_static option parsing doesn't interfere.
+        let payload = serde_json::json!({
+            "operator": { "open_id": "ou_user" },
+            "action": {
+                "value": {
+                    "action": "dir_select_filter",
+                    "pending_id": "pid-v"
+                },
+                "tag": "button",
+                "option": "should-be-ignored"
+            }
+        });
+        let parsed = parse_lark_card_action(&payload).expect("parsed");
+        assert_eq!(parsed.action, "dir_select_filter");
+        assert_eq!(parsed.pending_id.as_deref(), Some("pid-v"));
+        // option is only used when /action/value/action is absent
+    }
+
+    #[test]
+    fn parse_lark_card_action_rejects_malformed_select_static_option() {
+        // If /action/option/ is not valid JSON, it should still fail
+        // with "missing card action" since no /action/value/action exists.
+        let payload = serde_json::json!({
+            "action": {
+                "option": "not-valid-json"
+            }
+        });
+        let err = parse_lark_card_action(&payload).expect_err("should fail");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert_eq!(err.1, "missing card action");
+    }
+
+    #[test]
+    fn dir_select_card_uses_action_buttons() {
+        // Verify that the card exposes directory choices as clickable buttons.
+        let all_dirs: Vec<String> = (0..10).map(|i| format!("project-{}", i)).collect();
+        let card_json = dir_select::build_dir_select_card(
+            "pid", "/root", "test", &all_dirs, &all_dirs, None, None, None,
+        );
+        let v: Value = serde_json::from_str(&card_json).expect("valid card JSON");
+        let elements = v["elements"].as_array().unwrap();
+
+        let action_elements: Vec<&Value> = elements
+            .iter()
+            .filter(|e| e["tag"].as_str() == Some("action"))
+            .collect();
+        assert!(
+            !action_elements.is_empty(),
+            "card must contain directory action groups"
+        );
+
+        let buttons: Vec<&Value> = action_elements
+            .iter()
+            .flat_map(|e| e["actions"].as_array().into_iter().flatten())
+            .collect();
+        assert_eq!(buttons.len(), 10, "should have one button per directory");
+        for (i, button) in buttons.iter().enumerate() {
+            assert_eq!(
+                button.pointer("/value/action").and_then(Value::as_str),
+                Some("dir_select_pick")
+            );
+            assert_eq!(
+                button.pointer("/value/pending_id").and_then(Value::as_str),
+                Some("pid")
+            );
+            assert_eq!(
+                button.pointer("/value/working_dir").and_then(Value::as_str),
+                Some(format!("project-{}", i).as_str())
+            );
+        }
+        assert!(
+            elements
+                .iter()
+                .all(|e| e["tag"].as_str() != Some("select_static")),
+            "card should not use select_static for directory picking"
         );
     }
 
@@ -17174,9 +17656,10 @@ mod tests {
         assert_eq!(reg.total_activities(), 1);
 
         // Cancel the run.
-        let outcome = crate::workflow_commands::cancel_run(&state, run_id, Some("test".to_string()))
-            .await
-            .expect("cancel");
+        let outcome =
+            crate::workflow_commands::cancel_run(&state, run_id, Some("test".to_string()))
+                .await
+                .expect("cancel");
 
         assert!(outcome.ok);
         assert_eq!(outcome.status, "cancelled");
@@ -17197,8 +17680,8 @@ mod tests {
     #[tokio::test]
     async fn cold_scan_discovers_non_terminal_and_skips_terminal_runs() {
         use beam_core::{
-            BootstrapWorkflowRunInput, EventDraft, EventLog, WorkflowActor,
-            bootstrap_workflow_run, scan_cold_workflow_runs,
+            BootstrapWorkflowRunInput, EventDraft, EventLog, WorkflowActor, bootstrap_workflow_run,
+            scan_cold_workflow_runs,
         };
 
         let paths = temp_paths("cold-scan-disc");
@@ -17252,10 +17735,16 @@ mod tests {
         }
 
         let (runs, stats) = scan_cold_workflow_runs(&paths, lark_app_id).await.unwrap();
-        assert_eq!(stats.discovered, 1, "only the non-terminal run should be discovered");
+        assert_eq!(
+            stats.discovered, 1,
+            "only the non-terminal run should be discovered"
+        );
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].run_id, "run-nonterm");
-        assert!(stats.skipped.is_empty(), "no runs should be skipped with errors");
+        assert!(
+            stats.skipped.is_empty(),
+            "no runs should be skipped with errors"
+        );
 
         maybe_remove_dir(&paths.root().to_path_buf());
     }
@@ -17297,10 +17786,16 @@ mod tests {
         crate::run_workflow_runtime_once(&state, run_id, def).await;
 
         // Verify we have an open wait (not terminal).
-        let sn = read_run_snapshot(&paths.workflow_run_dir(run_id)).await.unwrap().unwrap();
+        let sn = read_run_snapshot(&paths.workflow_run_dir(run_id))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(!sn.dangling.waits.is_empty(), "should have an open wait");
         assert!(
-            !matches!(sn.run.status, RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled),
+            !matches!(
+                sn.run.status,
+                RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled
+            ),
             "run should NOT be terminal"
         );
 
@@ -17311,13 +17806,19 @@ mod tests {
 
         // After cold attach, the wait should still be open and the run
         // should still be non-terminal.
-        let sn2 = read_run_snapshot(&paths.workflow_run_dir(run_id)).await.unwrap().unwrap();
+        let sn2 = read_run_snapshot(&paths.workflow_run_dir(run_id))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(
             !sn2.dangling.waits.is_empty(),
             "open wait should still be dangling after cold attach"
         );
         assert!(
-            !matches!(sn2.run.status, RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled),
+            !matches!(
+                sn2.run.status,
+                RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled
+            ),
             "run should NOT be terminal after cold attach with open wait"
         );
 
@@ -17330,8 +17831,7 @@ mod tests {
     #[tokio::test]
     async fn cold_attach_recovery_materializes_resolved_wait_terminal() {
         use beam_core::{
-            BootstrapWorkflowRunInput, EventDraft, EventLog, WorkflowActor,
-            bootstrap_workflow_run,
+            BootstrapWorkflowRunInput, EventDraft, EventLog, WorkflowActor, bootstrap_workflow_run,
         };
 
         let paths = temp_paths("cold-attach-rec");
@@ -17406,7 +17906,10 @@ mod tests {
 
         // Verify the snapshot now has a wait resolution but no terminal for
         // the activity — i.e. `dangling.wait_resolutions` is non-empty.
-        let sn_pre = beam_core::read_run_snapshot(&paths.workflow_run_dir(run_id)).await.unwrap().unwrap();
+        let sn_pre = beam_core::read_run_snapshot(&paths.workflow_run_dir(run_id))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(
             sn_pre.dangling.waits.is_empty(),
             "after resolution, waits should be cleared"
@@ -17423,23 +17926,29 @@ mod tests {
 
         // After recovery, the wait resolution should be cleared and the
         // activity should have been terminalized.
-        let sn_post = beam_core::read_run_snapshot(&paths.workflow_run_dir(run_id)).await.unwrap().unwrap();
+        let sn_post = beam_core::read_run_snapshot(&paths.workflow_run_dir(run_id))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(
             sn_post.dangling.wait_resolutions.is_empty(),
             "after recovery, dangling wait resolutions should be cleared"
         );
-        assert!(
-            sn_post.dangling.waits.is_empty(),
-            "no waits should remain"
-        );
+        assert!(sn_post.dangling.waits.is_empty(), "no waits should remain");
 
         // The workflow should have progressed — since this is a single-node
         // workflow and the node has now succeeded, the run should be terminal.
         let terminal = matches!(
             sn_post.run.status,
-            beam_core::RunStatus::Succeeded | beam_core::RunStatus::Failed | beam_core::RunStatus::Cancelled
+            beam_core::RunStatus::Succeeded
+                | beam_core::RunStatus::Failed
+                | beam_core::RunStatus::Cancelled
         );
-        assert!(terminal, "run should be terminal after recovery, got {:?}", sn_post.run.status);
+        assert!(
+            terminal,
+            "run should be terminal after recovery, got {:?}",
+            sn_post.run.status
+        );
 
         maybe_remove_dir(&paths.root().to_path_buf());
     }

@@ -20,16 +20,38 @@ const MAX_SCAN_DEPTH: usize = 3;
 const MAX_SCAN_CANDIDATES: usize = 500;
 const MAX_RECENT_DIRS: usize = 10;
 const MAX_RECOMMENDED_DIRS: usize = 8;
-const MAX_SHOWN_DIRS: usize = 50; // cap to avoid blowing up the card
+const MAX_SHOWN_DIRS: usize = 150; // cap for rendered directory choices
 /// TTL for pending create entries (30 minutes in milliseconds).
 /// Entries older than this are pruned and the user must send a new message.
 pub const PENDING_CREATE_TTL_MS: i64 = 30 * 60 * 1000;
 
 const SKIP_DIR_NAMES: &[&str] = &[
-    ".git", ".beam", "target", "node_modules", ".venv", "__pycache__",
-    ".DS_Store", "dist", "build", "vendor", "bin", "obj", ".svn", ".hg",
-    ".idea", ".vscode", ".cache", ".npm", ".yarn", ".next", ".nuxt",
-    "coverage", ".tox", ".eggs", ".mypy_cache", ".pytest_cache",
+    ".git",
+    ".beam",
+    "target",
+    "node_modules",
+    ".venv",
+    "__pycache__",
+    ".DS_Store",
+    "dist",
+    "build",
+    "vendor",
+    "bin",
+    "obj",
+    ".svn",
+    ".hg",
+    ".idea",
+    ".vscode",
+    ".cache",
+    ".npm",
+    ".yarn",
+    ".next",
+    ".nuxt",
+    "coverage",
+    ".tox",
+    ".eggs",
+    ".mypy_cache",
+    ".pytest_cache",
 ];
 
 // --- Data Structures ---
@@ -118,12 +140,7 @@ pub fn scan_candidate_dirs(root: &Path) -> Vec<String> {
     dirs
 }
 
-fn scan_dirs_recursive(
-    base: &Path,
-    current: &Path,
-    depth: usize,
-    dirs: &mut Vec<String>,
-) {
+fn scan_dirs_recursive(base: &Path, current: &Path, depth: usize, dirs: &mut Vec<String>) {
     if depth > MAX_SCAN_DEPTH || dirs.len() >= MAX_SCAN_CANDIDATES {
         return;
     }
@@ -229,7 +246,10 @@ pub fn is_dir_under_root(dir: &str, root: &str) -> bool {
     let dir_path = Path::new(dir);
 
     // Reject paths that attempt to escape via ".."
-    if dir_path.components().any(|c| c == std::path::Component::ParentDir) {
+    if dir_path
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
         return false;
     }
 
@@ -350,9 +370,7 @@ pub fn record_recent_dir(store: &mut RecentDirsStore, key: &str, dir: &str) {
 pub async fn load_recent_dirs(path: &Path) -> Result<RecentDirsStore> {
     match tokio::fs::read_to_string(path).await {
         Ok(content) => Ok(serde_json::from_str(&content).unwrap_or_default()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Ok(RecentDirsStore::default())
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(RecentDirsStore::default()),
         Err(e) => Err(e.into()),
     }
 }
@@ -413,7 +431,7 @@ pub fn build_dir_select_card(
         "tag": "div",
         "text": {
             "tag": "lark_md",
-            "content": format!("📁 **根目录：** `{}`", display_root)
+            "content": format!("📁 **根目录：** {}", display_root)
         }
     }));
 
@@ -449,7 +467,10 @@ pub fn build_dir_select_card(
     if !dirs_to_show.is_empty() {
         let section_label = if filter_result.is_some() {
             if total_count > MAX_SHOWN_DIRS {
-                format!("📋 **当前结果（共 {} 个，显示前 {} 个）：**", total_count, MAX_SHOWN_DIRS)
+                format!(
+                    "📋 **当前结果（共 {} 个，显示前 {} 个）：**",
+                    total_count, MAX_SHOWN_DIRS
+                )
             } else {
                 format!("📋 **当前结果（{} 个）：**", total_count)
             }
@@ -464,39 +485,100 @@ pub fn build_dir_select_card(
             }
         }));
 
-        // Directory buttons (split into groups of 4 to avoid too-wide action groups)
-        let max_per_row = 4;
-        for chunk in dirs_to_show.chunks(max_per_row) {
-            if chunk.is_empty() {
-                continue;
-            }
-            let actions: Vec<Value> = chunk
+        if filter_result.is_some() {
+            // Detect short-name conflicts within the filtered results.
+            // When multiple dirs share the same short display name, show the
+            // relative path instead so the user can distinguish them.
+            // The recommended-dir section (filter_result.is_none()) stays
+            // with short names regardless of conflicts.
+            let short_names: Vec<String> = dirs_to_show
                 .iter()
                 .map(|dir| {
-                    let display = if dir == "." {
-                        format!("📁 {}", root_dir_basename(root_dir))
+                    if dir == "." {
+                        root_dir_basename(root_dir)
                     } else {
-                        format!("📁 {}", dir_display_name(dir))
-                    };
-                    serde_json::json!({
-                        "tag": "button",
-                        "text": {
-                            "tag": "plain_text",
-                            "content": truncate_str(&display, 22)
-                        },
-                        "type": if dir == "." { "primary" } else { "default" },
-                        "value": {
-                            "action": "dir_select_pick",
-                            "pending_id": pending_id,
-                            "working_dir": dir
-                        }
-                    })
+                        dir_display_name(dir)
+                    }
                 })
                 .collect();
-            elements.push(serde_json::json!({
-                "tag": "action",
-                "actions": actions
-            }));
+            let mut name_count: HashMap<String, usize> = HashMap::new();
+            for sn in &short_names {
+                *name_count.entry(sn.clone()).or_insert(0) += 1;
+            }
+
+            for (i, dir) in dirs_to_show.iter().enumerate() {
+                let short = &short_names[i];
+                let conflict = name_count.get(short).copied().unwrap_or(1) > 1;
+
+                let display = if dir == "." {
+                    format!("📁 {}", root_dir_basename(root_dir))
+                } else if conflict {
+                    format!("📁 {}", dir)
+                } else {
+                    format!("📁 {}", short)
+                };
+
+                let truncated = if !conflict || dir == "." {
+                    truncate_str(&display, 22)
+                } else {
+                    truncate_str_tail(&display, 22)
+                };
+
+                let pick_value = serde_json::json!({
+                    "action": "dir_select_pick",
+                    "pending_id": pending_id,
+                    "working_dir": dir
+                });
+                elements.push(serde_json::json!({
+                    "tag": "action",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "text": {
+                                "tag": "plain_text",
+                                "content": truncated
+                            },
+                            "type": if dir == "." { "primary" } else { "default" },
+                            "value": pick_value
+                        }
+                    ]
+                }));
+            }
+        } else {
+            // Directory buttons (split into rows to avoid too-wide action groups).
+            let max_per_row = 4;
+            for chunk in dirs_to_show.chunks(max_per_row) {
+                if chunk.is_empty() {
+                    continue;
+                }
+                let actions: Vec<Value> = chunk
+                    .iter()
+                    .map(|dir| {
+                        let display = if dir == "." {
+                            format!("📁 {}", root_dir_basename(root_dir))
+                        } else {
+                            format!("📁 {}", dir_display_name(dir))
+                        };
+                        serde_json::json!({
+                            "tag": "button",
+                            "text": {
+                                "tag": "plain_text",
+                                "content": truncate_str(&display, 22)
+                            },
+                            "type": if dir == "." { "primary" } else { "default" },
+                            "value": {
+                                "action": "dir_select_pick",
+                                "pending_id": pending_id,
+                                "working_dir": dir
+                            }
+                        })
+                    })
+                    .collect();
+                elements.push(serde_json::json!({
+                    "tag": "action",
+                    "actions": actions
+                }));
+            }
         }
     } else {
         elements.push(serde_json::json!({
@@ -608,7 +690,7 @@ pub fn build_dir_session_starting_card(working_dir: &str, title: &str) -> String
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": format!("✅ 已选择工作目录：`{}`\n\n正在启动会话：_{}_\n\n等待终端就绪...", working_dir, title)
+                    "content": format!("✅ 已选择工作目录：{}\n\n正在启动会话：_{}_\n\n等待终端就绪...", working_dir, title)
                 }
             }
         ]
@@ -653,7 +735,10 @@ fn truncate_str_head(s: &str, max_chars: usize) -> String {
     if chars.len() <= max_chars {
         s.to_string()
     } else {
-        let truncated: String = chars.into_iter().take(max_chars.saturating_sub(1)).collect();
+        let truncated: String = chars
+            .into_iter()
+            .take(max_chars.saturating_sub(1))
+            .collect();
         format!("{}…", truncated)
     }
 }
@@ -734,10 +819,7 @@ mod tests {
 
     #[test]
     fn test_match_dirs_case_insensitive() {
-        let dirs = vec![
-            "MyProject".to_string(),
-            "myproject".to_string(),
-        ];
+        let dirs = vec!["MyProject".to_string(), "myproject".to_string()];
         let matched = match_dirs(&dirs, &["myproject"]);
         assert_eq!(matched.len(), 2);
     }
@@ -800,7 +882,10 @@ mod tests {
             "foo/bar/baz".to_string(),
         ];
         let best = find_best_match(&dirs, "foo");
-        assert_eq!(best, None, "2 matches (different lengths) should return None");
+        assert_eq!(
+            best, None,
+            "2 matches (different lengths) should return None"
+        );
     }
 
     #[test]
@@ -851,17 +936,27 @@ mod tests {
     #[test]
     fn test_is_dir_under_root_dot_root_rejects_escape() {
         assert!(!is_dir_under_root("../x", "."), ".. should be rejected");
-        assert!(!is_dir_under_root("crates/../../etc", "."), ".. should be rejected");
+        assert!(
+            !is_dir_under_root("crates/../../etc", "."),
+            ".. should be rejected"
+        );
     }
 
     #[test]
     fn test_is_dir_under_root_dot_root_rejects_absolute() {
-        assert!(!is_dir_under_root("/tmp/x", "."), "absolute path should be rejected when root is '.'");
+        assert!(
+            !is_dir_under_root("/tmp/x", "."),
+            "absolute path should be rejected when root is '.'"
+        );
     }
 
     #[test]
     fn test_is_valid_candidate_dot_root() {
-        let candidates = vec!["crates".to_string(), "crates/beam-daemon".to_string(), "src".to_string()];
+        let candidates = vec![
+            "crates".to_string(),
+            "crates/beam-daemon".to_string(),
+            "src".to_string(),
+        ];
         assert!(is_valid_candidate("crates", ".", &candidates));
         assert!(is_valid_candidate("src", ".", &candidates));
         assert!(!is_valid_candidate("nonexistent", ".", &candidates));
@@ -910,10 +1005,7 @@ mod tests {
             build_recent_dir_key("app1", "chat1", Some("user1")),
             "app1:chat1:user1"
         );
-        assert_eq!(
-            build_recent_dir_key("app1", "chat1", None),
-            "app1:chat1"
-        );
+        assert_eq!(build_recent_dir_key("app1", "chat1", None), "app1:chat1");
         assert_eq!(
             build_recent_dir_key("app1", "chat1", Some("")),
             "app1:chat1"
@@ -980,16 +1072,47 @@ mod tests {
         assert!(card.contains("dir_select_best"));
         assert!(card.contains("pending-1"));
         assert!(card.contains("dir_search_keyword"));
-        // Verify form container structure
+        // Verify directory button structure
         let v: Value = serde_json::from_str(&card).expect("card should be valid JSON");
-        let elements = v["elements"].as_array().expect("elements should be an array");
+        let elements = v["elements"]
+            .as_array()
+            .expect("elements should be an array");
+
+        let action_groups: Vec<&Value> = elements
+            .iter()
+            .filter(|e| e["tag"].as_str() == Some("action"))
+            .collect();
+        assert!(
+            !action_groups.is_empty(),
+            "card should contain directory action groups"
+        );
+        let first_button = action_groups[0]["actions"]
+            .as_array()
+            .and_then(|actions| actions.first())
+            .expect("action group should contain directory buttons");
+        assert_eq!(
+            first_button
+                .pointer("/value/action")
+                .and_then(Value::as_str),
+            Some("dir_select_pick")
+        );
+        assert_eq!(
+            first_button
+                .pointer("/value/pending_id")
+                .and_then(Value::as_str),
+            Some("pending-1")
+        );
+
+        // Verify form container structure
         let form = elements
             .iter()
             .find(|e| e["tag"].as_str() == Some("form"))
             .expect("card should contain a form element");
         assert_eq!(form["name"].as_str(), Some("dir_search_form"));
 
-        let form_els = form["elements"].as_array().expect("form should have elements");
+        let form_els = form["elements"]
+            .as_array()
+            .expect("form should have elements");
 
         // form elements must only contain input + buttons (no div)
         let tags: Vec<&str> = form_els
@@ -1024,7 +1147,10 @@ mod tests {
         );
 
         // all buttons must have action_type=form_submit
-        for btn in form_els.iter().filter(|e| e["tag"].as_str() == Some("button")) {
+        for btn in form_els
+            .iter()
+            .filter(|e| e["tag"].as_str() == Some("button"))
+        {
             assert_eq!(
                 btn["action_type"].as_str(),
                 Some("form_submit"),
@@ -1087,7 +1213,8 @@ mod tests {
         // Chinese title + long root path must not panic
         let recommended = vec![".".to_string()];
         let all = recommended.clone();
-        let long_root = "/home/user/这是一个很长的路径用来测试截断功能/包含中文字符/abc/def/ghi/jkl/mno";
+        let long_root =
+            "/home/user/这是一个很长的路径用来测试截断功能/包含中文字符/abc/def/ghi/jkl/mno";
         let chinese_title = "帮我修复这个生产环境的紧急bug非常着急请尽快处理谢谢";
         let card = build_dir_select_card(
             "p-utf8",
@@ -1102,6 +1229,341 @@ mod tests {
         // Should be valid JSON
         let _v: Value = serde_json::from_str(&card).expect("card should be valid JSON");
         assert!(card.contains("请选择工作目录"));
+    }
+
+    #[test]
+    fn test_build_dir_select_card_truncates_excess_options() {
+        // When there are more directories than MAX_SHOWN_DIRS (150),
+        // the directory buttons are capped.
+        let many_dirs: Vec<String> = (0..200).map(|i| format!("project-{:03}", i)).collect();
+        let card = build_dir_select_card(
+            "pid", "/root", "test", &many_dirs, &many_dirs, None, None, None,
+        );
+        let v: Value = serde_json::from_str(&card).expect("valid card JSON");
+
+        let pick_button_count: usize = v["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["tag"].as_str() == Some("action"))
+            .flat_map(|e| e["actions"].as_array().into_iter().flatten())
+            .filter(|button| {
+                button.pointer("/value/action").and_then(Value::as_str) == Some("dir_select_pick")
+            })
+            .count();
+        assert_eq!(
+            pick_button_count, 150,
+            "directory buttons should be capped at MAX_SHOWN_DIRS"
+        );
+    }
+
+    #[test]
+    fn test_build_dir_select_card_filtered_truncation_shows_count_in_label() {
+        // When filtering produces more results than MAX_SHOWN_DIRS,
+        // the section label should indicate the total count and shown count.
+        let many_dirs: Vec<String> = (0..200).map(|i| format!("project-{:03}", i)).collect();
+        let card = build_dir_select_card(
+            "pid",
+            "/root",
+            "test",
+            &[],
+            &many_dirs,
+            Some(&many_dirs),
+            Some("proj"),
+            None,
+        );
+        // Section label should mention total count and shown count
+        assert!(card.contains("共 200"), "label should show total count");
+        assert!(
+            card.contains("显示前 150"),
+            "label should show truncation limit"
+        );
+        let v: Value = serde_json::from_str(&card).expect("valid card JSON");
+        let result_row_count = v["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["tag"].as_str() == Some("action"))
+            .count();
+        assert_eq!(
+            result_row_count, 150,
+            "result rows capped at MAX_SHOWN_DIRS"
+        );
+    }
+
+    #[test]
+    fn test_build_dir_select_card_no_truncation_when_under_limit() {
+        // When there are fewer directories than MAX_SHOWN_DIRS, no truncation.
+        let few_dirs: Vec<String> = (0..10).map(|i| format!("project-{:02}", i)).collect();
+        let card = build_dir_select_card(
+            "pid",
+            "/root",
+            "test",
+            &few_dirs,
+            &few_dirs,
+            Some(&few_dirs),
+            Some("proj"),
+            None,
+        );
+        // No "显示前" message when under limit
+        assert!(
+            !card.contains("显示前"),
+            "no truncation label when under limit"
+        );
+        let v: Value = serde_json::from_str(&card).expect("valid card JSON");
+        let result_row_count = v["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["tag"].as_str() == Some("action"))
+            .count();
+        assert_eq!(result_row_count, 10, "all 10 result rows should be present");
+    }
+
+    #[test]
+    fn test_build_dir_select_card_filtered_unique_short_names_single_button() {
+        // Filtered results with unique short names should show a single button
+        // per directory displaying the short name.
+        let dirs = vec!["project-a".to_string(), "project-b".to_string()];
+        let card = build_dir_select_card(
+            "pid",
+            "/home/user/workspace",
+            "test",
+            &[],
+            &dirs,
+            Some(&dirs),
+            Some("proj"),
+            None,
+        );
+        let v: Value = serde_json::from_str(&card).expect("valid card JSON");
+        let actions: Vec<&Value> = v["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["tag"].as_str() == Some("action"))
+            .collect();
+        // Each dir → exactly 1 action row
+        assert_eq!(actions.len(), 2, "should have 2 action rows");
+
+        let mut working_dirs: Vec<String> = Vec::new();
+        for action in &actions {
+            let buttons = action["actions"]
+                .as_array()
+                .expect("action row should have buttons");
+            assert_eq!(
+                buttons.len(),
+                1,
+                "filtered row should have exactly 1 button (no extra full-path button)"
+            );
+            let content = buttons[0]
+                .pointer("/text/content")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            // Short name should be shown (not relative path like "project-a")
+            assert!(
+                content.contains("project-a") || content.contains("project-b"),
+                "button should display short name, got: {}",
+                content
+            );
+            // No full resolved path in button text
+            assert!(
+                !content.contains("/home/user/workspace"),
+                "button text should NOT contain full resolved path"
+            );
+            // Value must have correct action, pending_id, and working_dir
+            assert_eq!(
+                buttons[0].pointer("/value/action").and_then(Value::as_str),
+                Some("dir_select_pick"),
+                "button action should be dir_select_pick"
+            );
+            assert_eq!(
+                buttons[0]
+                    .pointer("/value/pending_id")
+                    .and_then(Value::as_str),
+                Some("pid"),
+                "button pending_id should be pid"
+            );
+            let wd = buttons[0]
+                .pointer("/value/working_dir")
+                .and_then(Value::as_str)
+                .expect("button should have working_dir");
+            working_dirs.push(wd.to_string());
+        }
+        working_dirs.sort();
+        let mut expected_dirs = dirs.clone();
+        expected_dirs.sort();
+        assert_eq!(
+            working_dirs, expected_dirs,
+            "collected working_dirs should match input dirs"
+        );
+    }
+
+    #[test]
+    fn test_build_dir_select_card_filtered_duplicate_short_names_shows_relative_path() {
+        // When filtered results contain dirs with the same short name
+        // (e.g. a/foo and b/foo both resolve to "foo"), conflicting entries
+        // should display the relative path to distinguish them.
+        let dirs = vec![
+            "group-a/project".to_string(),
+            "group-b/project".to_string(),
+            "group-a/unique".to_string(),
+        ];
+        let card = build_dir_select_card(
+            "pid",
+            "/root",
+            "test",
+            &[],
+            &dirs,
+            Some(&dirs),
+            Some("proj"),
+            None,
+        );
+        let v: Value = serde_json::from_str(&card).expect("valid card JSON");
+        let actions: Vec<&Value> = v["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["tag"].as_str() == Some("action"))
+            .collect();
+        assert_eq!(actions.len(), 3, "should have 3 action rows");
+
+        for action in &actions {
+            let buttons = action["actions"]
+                .as_array()
+                .expect("action row should have buttons");
+            assert_eq!(buttons.len(), 1, "each row must have exactly 1 button");
+
+            let working_dir = buttons[0]
+                .pointer("/value/working_dir")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let content = buttons[0]
+                .pointer("/text/content")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+
+            match working_dir {
+                "group-a/project" | "group-b/project" => {
+                    // Conflicting short name "project" → must show relative path
+                    assert!(
+                        content.contains("group"),
+                        "conflicting dir '{}' should show relative path, got: {}",
+                        working_dir,
+                        content
+                    );
+                    assert!(
+                        !content.ends_with("project") || content.contains("group"),
+                        "conflicting dir '{}' should NOT show bare short name, got: {}",
+                        working_dir,
+                        content
+                    );
+                }
+                "group-a/unique" => {
+                    // Unique short name "unique" → short name is fine
+                    assert!(
+                        content.contains("unique"),
+                        "unique dir should show short name, got: {}",
+                        content
+                    );
+                }
+                _ => panic!("unexpected working_dir: {}", working_dir),
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_dir_select_card_recommended_duplicate_short_names_stays_short() {
+        // Even when recommended dirs have duplicate short names, the
+        // recommended section should keep showing short names.
+        let dirs = vec!["group-a/project".to_string(), "group-b/project".to_string()];
+        let card = build_dir_select_card(
+            "pid", "/root", "test", &dirs, &dirs, None, // recommended section
+            None, None,
+        );
+        let v: Value = serde_json::from_str(&card).expect("valid card JSON");
+        let all_buttons: Vec<&Value> = v["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["tag"].as_str() == Some("action"))
+            .flat_map(|e| e["actions"].as_array().into_iter().flatten())
+            .collect();
+
+        // Both buttons should show "project" (short name), not the full rel path
+        for button in &all_buttons {
+            let content = button
+                .pointer("/text/content")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            assert!(
+                content.contains("project"),
+                "recommended section should show short name, got: {}",
+                content
+            );
+            assert!(
+                !content.contains("group"),
+                "recommended section should NOT show full relative path, got: {}",
+                content
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_dir_select_card_filtered_working_dir_value_correct() {
+        // The button value must always carry the real working_dir (relative path),
+        // regardless of what is displayed in the button text.
+        let dirs = vec![
+            "deep/nested/path/api".to_string(),
+            "another/deep/nested/path/api".to_string(),
+        ];
+        let card = build_dir_select_card(
+            "pid",
+            "/home/user/workspace",
+            "test",
+            &[],
+            &dirs,
+            Some(&dirs),
+            Some("api"),
+            None,
+        );
+        let v: Value = serde_json::from_str(&card).expect("valid card JSON");
+        let actions: Vec<&Value> = v["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["tag"].as_str() == Some("action"))
+            .collect();
+
+        let mut found_dirs: Vec<String> = Vec::new();
+        for action in &actions {
+            let buttons = action["actions"]
+                .as_array()
+                .expect("action row should have buttons");
+            assert_eq!(buttons.len(), 1, "each row must have exactly 1 button");
+            let wd = buttons[0]
+                .pointer("/value/working_dir")
+                .and_then(Value::as_str)
+                .unwrap()
+                .to_string();
+            let action_val = buttons[0]
+                .pointer("/value/action")
+                .and_then(Value::as_str)
+                .unwrap();
+            assert_eq!(action_val, "dir_select_pick");
+            let pending = buttons[0]
+                .pointer("/value/pending_id")
+                .and_then(Value::as_str)
+                .unwrap();
+            assert_eq!(pending, "pid");
+            found_dirs.push(wd);
+        }
+        found_dirs.sort();
+        let mut expected: Vec<String> = dirs.clone();
+        expected.sort();
+        assert_eq!(
+            found_dirs, expected,
+            "button values must contain the correct relative working_dir"
+        );
     }
 
     #[test]
@@ -1132,13 +1594,17 @@ mod tests {
         );
         // Symlink to external must NOT be present
         assert!(
-            !dirs.iter().any(|d| d == "symlink_out" || d.contains("symlink_out")),
+            !dirs
+                .iter()
+                .any(|d| d == "symlink_out" || d.contains("symlink_out")),
             "symlink to external must be excluded, got: {:?}",
             dirs
         );
         // Symlink to internal must NOT be present (all symlinks skipped)
         assert!(
-            !dirs.iter().any(|d| d == "symlink_in" || d.contains("symlink_in")),
+            !dirs
+                .iter()
+                .any(|d| d == "symlink_in" || d.contains("symlink_in")),
             "symlink to internal must be excluded, got: {:?}",
             dirs
         );
@@ -1183,7 +1649,10 @@ mod tests {
         let now: i64 = 1_700_000_000_000; // some fixed timestamp in ms
 
         // fresh: created 5 min ago
-        map.insert("fresh".to_string(), make_pending("fresh", now - 5 * 60 * 1000));
+        map.insert(
+            "fresh".to_string(),
+            make_pending("fresh", now - 5 * 60 * 1000),
+        );
         // borderline: created 29 min ago (within TTL)
         map.insert(
             "borderline".to_string(),
