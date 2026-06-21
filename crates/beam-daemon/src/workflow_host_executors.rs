@@ -460,6 +460,7 @@ mod tests {
             workflow_progress_cards: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             ask_pending: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             grant_pending: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_creates: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(tokio::sync::Mutex::new(None)),
             external_host: "localhost".to_string(),
         }

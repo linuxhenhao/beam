@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 mod ask;
 mod connector_store;
+mod dir_select;
 mod grant;
 mod prompt;
 mod terminal_proxy;
@@ -138,6 +139,7 @@ struct AppState {
     workflow_progress_cards: Arc<Mutex<HashMap<String, String>>>,
     ask_pending: Arc<Mutex<HashMap<String, ask::AskPendingEntry>>>,
     grant_pending: Arc<Mutex<HashMap<String, grant::GrantPendingEntry>>>,
+    pending_creates: Arc<Mutex<HashMap<String, dir_select::PendingCreateSession>>>,
     dashboard_token: Arc<Mutex<Option<DashboardAuthToken>>>,
     external_host: String,
 }
@@ -535,7 +537,7 @@ struct LarkMessageResponseData {
     message_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct LarkEventMention {
     key: String,
     name: String,
@@ -793,6 +795,9 @@ struct ParsedLarkCardAction {
     ask_question_index: Option<usize>,
     ask_key: Option<String>,
     ask_submit: bool,
+    pending_id: Option<String>,
+    working_dir: Option<String>,
+    dir_search_keyword: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -2122,6 +2127,9 @@ fn card_action_requires_operate(action: &str) -> bool {
             | "wf_approve"
             | "wf_reject"
             | "wf_cancel"
+            | "dir_select_pick"
+            | "dir_select_filter"
+            | "dir_select_best"
     )
 }
 
@@ -5029,6 +5037,18 @@ fn parse_lark_card_action(payload: &Value) -> Result<ParsedLarkCardAction, (Stat
             .and_then(Value::as_str)
             .map(|v| v == "ask_submit")
             .unwrap_or(false),
+        pending_id: payload
+            .pointer("/action/value/pending_id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        working_dir: payload
+            .pointer("/action/value/working_dir")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        dir_search_keyword: payload
+            .pointer("/action/form_value/dir_search_keyword")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
     })
 }
 
@@ -6266,82 +6286,131 @@ async fn handle_lark_event_payload(
                 return Ok(Json(serde_json::json!({ "ok": true, "reused": true })));
             }
         }
-        LarkEventOutcome::CreateSession => {}
-    }
+        LarkEventOutcome::CreateSession => {
+            // --- Directory selection card flow ---
+            // Instead of immediately creating a session, present a card for the
+            // user to select a working directory under the bot's root working dir.
 
-    let working_dir = expand_tilde(
-        &bot.working_dir
-            .clone()
-            .or_else(|| state.config.daemon.working_dirs.first().cloned())
-            .unwrap_or_else(|| ".".to_string()),
-    );
-    let title = text.chars().take(32).collect::<String>();
-    if let Some(quota_key) = talk.as_ref().and_then(|talk| talk.quota_key.as_deref()) {
-        let quota = consume_inbound_quota(&state, &app_id, quota_key).await?;
-        if !quota.allowed {
-            let _ = lark_reply_message(&state, &bot, message_id, "quota exceeded").await;
-            return Ok(Json(
-                serde_json::json!({ "ok": true, "quota": "exhausted" }),
-            ));
+            let root_working_dir = dir_select::determine_root_working_dir(
+                bot.working_dir.as_deref(),
+                &state.config.daemon.working_dirs,
+            );
+
+            // Scan candidate directories under root
+            let root_path = std::path::Path::new(&root_working_dir);
+            let candidate_dirs = dir_select::scan_candidate_dirs(root_path);
+
+            // Load recent dirs
+            let recent_path = state.paths.root().join("recent-dirs.json");
+            let recent_store = dir_select::load_recent_dirs(&recent_path)
+                .await
+                .unwrap_or_default();
+            let recent_key = dir_select::build_recent_dir_key(
+                &app_id,
+                chat_id,
+                sender_open_id.as_deref(),
+            );
+            let recent_dirs =
+                dir_select::get_recent_dirs(&recent_store, &recent_key, &root_working_dir);
+
+            // Build recommended dirs: root + recent dirs (matching candidates) + keyword-matched
+            let mut recommended: Vec<String> = Vec::new();
+            recommended.push(".".to_string());
+            for rd in &recent_dirs {
+                if candidate_dirs.contains(rd) && !recommended.contains(rd) {
+                    recommended.push(rd.clone());
+                }
+                if recommended.len() >= 8 {
+                    break;
+                }
+            }
+            // Add keyword-matched dirs if still have room
+            let kwds = dir_select::tokenize_keywords(&text);
+            if !kwds.is_empty() && recommended.len() < 8 {
+                let kw_refs: Vec<&str> = kwds.iter().map(|s| s.as_str()).collect();
+                let keyword_matched = dir_select::match_dirs(&candidate_dirs, &kw_refs);
+                for km in &keyword_matched {
+                    if !recommended.contains(km) {
+                        recommended.push(km.clone());
+                    }
+                    if recommended.len() >= 8 {
+                        break;
+                    }
+                }
+            }
+
+            // Build pending entry (quota is NOT consumed yet — done when dir is picked)
+            let pending_id = Uuid::new_v4().to_string();
+            let title = text.chars().take(32).collect::<String>();
+            let quota_key = talk
+                .as_ref()
+                .and_then(|t| t.quota_key.as_deref())
+                .map(|s| s.to_string());
+
+            let pending = dir_select::PendingCreateSession {
+                pending_id: pending_id.clone(),
+                lark_app_id: app_id.clone(),
+                chat_id: chat_id.to_string(),
+                chat_type: parsed.chat_type.clone(),
+                message_id: message_id.to_string(),
+                anchor: anchor.to_string(),
+                scope,
+                title: title.clone(),
+                text: text.clone(),
+                sender_open_id: sender_open_id.clone(),
+                sender_type: parsed.sender_type.clone(),
+                parent_id: parsed.parent_id.clone(),
+                mentions_json: serde_json::to_string(&parsed.mentions).unwrap_or_default(),
+                quota_key,
+                created_at: Utc::now().timestamp_millis(),
+                cli_id: bot.cli_id.clone(),
+                cli_bin: bot.cli_bin.clone().unwrap_or_else(|| bot.cli_id.clone()),
+                backend_type: bot.backend_type.clone().unwrap_or(BackendType::Tmux),
+                root_working_dir: root_working_dir.clone(),
+                candidate_dirs: candidate_dirs.clone(),
+                card_message_id: None,
+            };
+
+            // Build and send the directory selection card
+            let card = dir_select::build_dir_select_card(
+                &pending_id,
+                &root_working_dir,
+                &title,
+                &recommended,
+                &candidate_dirs,
+                None,
+                None,
+                None,
+            );
+
+            let reply_in_thread = scope == SessionScope::Thread;
+            let card_message_id = lark_reply_card_with_opts(
+                &state,
+                &bot,
+                message_id,
+                &card,
+                reply_in_thread,
+            )
+            .await
+            .map_err(internal_error)?;
+
+            // Store pending entry with card message id (prune expired first)
+            {
+                let mut pending_map = state.pending_creates.lock().await;
+                let now_ms = Utc::now().timestamp_millis();
+                dir_select::prune_expired_pending_creates(&mut pending_map, now_ms);
+                let mut entry = pending;
+                entry.card_message_id = Some(card_message_id);
+                pending_map.insert(pending_id, entry);
+            }
+
+            return Ok(Json(serde_json::json!({ "ok": true, "dir_select": true })));
         }
     }
-    let _ = create_session_internal(
-        &state,
-        SessionCreateSpec {
-            title,
-            chat_id: chat_id.to_string(),
-            chat_type: parsed.chat_type.clone(),
-            root_message_id: anchor.to_string(),
-            quote_target_id: Some(message_id.to_string()),
-            scope,
-            working_dir,
-            cli_id: bot.cli_id.clone(),
-            cli_bin: bot.cli_bin.clone().unwrap_or_else(|| bot.cli_id.clone()),
-            cli_args: Vec::new(),
-            backend_type: bot.backend_type.clone().unwrap_or(BackendType::Tmux),
-            prompt: {
-                let raw = prompt::build_quote_hint(
-                    parsed.parent_id.as_deref(),
-                    &parsed.message_id,
-                    scope,
-                    anchor,
-                ) + &text;
-                if bot.cli_id == "opencode" {
-                    let (bot_name, bot_open_id) = load_bot_identity(&state.paths, &app_id);
-                    let observed_bots = load_observed_bots_for_chat(&state.paths, &app_id, chat_id);
-                    prompt::build_initial_prompt(&prompt::InitialPromptOptions {
-                        user_message: &raw,
-                        session_id: "pending",
-                        sender_open_id: parsed.sender_open_id.as_deref(),
-                        sender_type: parsed.sender_type.as_deref(),
-                        mentions: &parsed.mentions,
-                        bot_name: bot_name.as_deref(),
-                        bot_open_id: bot_open_id.as_deref(),
-                        observed_bots: &observed_bots,
-                        follow_ups: &Vec::new(),
-                    })
-                } else {
-                    prompt::build_follow_up_content(
-                        &raw,
-                        &prompt::FollowUpContentOptions {
-                            session_id: "pending",
-                            sender_open_id: parsed.sender_open_id.as_deref(),
-                            sender_type: parsed.sender_type.as_deref(),
-                            mentions: &parsed.mentions,
-                            cli_id: bot.cli_id.as_str(),
-                        },
-                    )
-                }
-            },
-            lark_app_id: app_id.clone(),
-            owner_open_id: sender_open_id,
-            adopted_from: None,
-        },
-    )
-    .await
-    .map_err(internal_error)?;
 
-    Ok(Json(serde_json::json!({ "ok": true, "created": true })))
+    // Legacy fallback: should not be reached since all match arms return above.
+    // Keep a guard in case a future code path falls through.
+    return Ok(Json(serde_json::json!({ "ok": true })));
 }
 
 struct LarkWsEventHandler {
@@ -6510,6 +6579,378 @@ async fn handle_lark_card_action_payload(
         .get(app_id)
         .cloned()
         .ok_or_else(|| (StatusCode::NOT_FOUND, "bot config not found".to_string()))?;
+
+    async fn handle_dir_select_card_action(
+        state: &AppState,
+        bot: &BotConfig,
+        app_id: &str,
+        action: &ParsedLarkCardAction,
+    ) -> Result<Json<Value>, (StatusCode, String)> {
+        let pending_id = action
+            .pending_id
+            .as_deref()
+            .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing pending_id".to_string()))?;
+
+        // Prune expired pending entries before any access
+        {
+            let mut pending_map = state.pending_creates.lock().await;
+            let now_ms = Utc::now().timestamp_millis();
+            dir_select::prune_expired_pending_creates(&mut pending_map, now_ms);
+        }
+
+        match action.action.as_str() {
+            "dir_select_pick" => {
+                // Read pending first for validation
+                let pending = {
+                    let pending_map = state.pending_creates.lock().await;
+                    pending_map.get(pending_id).cloned()
+                };
+                let Some(pending) = pending else {
+                    return Ok(Json(build_lark_card_action_toast(
+                        "error",
+                        "session creation expired, please send a new message",
+                    )));
+                };
+                if pending.lark_app_id != app_id {
+                    return Ok(Json(build_lark_card_action_toast("error", "permission denied")));
+                }
+
+                let working_dir_rel = action
+                    .working_dir
+                    .as_deref()
+                    .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing working_dir".to_string()))?;
+
+                // Validate against the pending's root and candidates
+                if !dir_select::is_valid_candidate(
+                    working_dir_rel,
+                    &pending.root_working_dir,
+                    &pending.candidate_dirs,
+                ) {
+                    return Ok(Json(build_lark_card_action_toast(
+                        "error",
+                        &format!("directory '{}' is not a valid candidate", working_dir_rel),
+                    )));
+                }
+
+                // Atomically remove pending to prevent double-create
+                let pending = {
+                    let mut pending_map = state.pending_creates.lock().await;
+                    pending_map.remove(pending_id)
+                };
+                let Some(pending) = pending else {
+                    return Ok(Json(build_lark_card_action_toast(
+                        "error",
+                        "session already being created, please wait",
+                    )));
+                };
+
+                let working_dir =
+                    dir_select::resolve_dir(&pending.root_working_dir, working_dir_rel);
+
+                // Consume quota if applicable
+                if let Some(quota_key) = pending.quota_key.as_deref() {
+                    let quota = consume_inbound_quota(state, app_id, quota_key).await?;
+                    if !quota.allowed {
+                        return Ok(Json(build_lark_card_action_toast(
+                            "error",
+                            "quota exceeded",
+                        )));
+                    }
+                }
+
+                create_session_from_pending(
+                    state, bot, &pending, &working_dir, working_dir_rel,
+                )
+                .await
+            }
+
+            "dir_select_filter" => {
+                // Read-only: just get a clone, don't remove
+                let pending = {
+                    let pending_map = state.pending_creates.lock().await;
+                    pending_map.get(pending_id).cloned()
+                };
+                let Some(pending) = pending else {
+                    return Ok(Json(build_lark_card_action_toast(
+                        "error",
+                        "session creation expired, please send a new message",
+                    )));
+                };
+                if pending.lark_app_id != app_id {
+                    return Ok(Json(build_lark_card_action_toast("error", "permission denied")));
+                }
+
+                let keyword = action
+                    .dir_search_keyword
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim();
+
+                let filtered = if keyword.is_empty() {
+                    // Empty keyword → show all candidates (capped in card builder)
+                    Some(pending.candidate_dirs.clone())
+                } else {
+                    let f = dir_select::filter_dirs(&pending.candidate_dirs, keyword);
+                    Some(f)
+                };
+
+                let message = if let Some(ref f) = filtered {
+                    if f.is_empty() {
+                        Some(format!("⚠️ 没有目录匹配关键词 \"{}\"，请尝试其他关键词。", keyword))
+                    } else if f.len() == 1 {
+                        None
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                let card = dir_select::build_dir_select_card(
+                    pending_id,
+                    &pending.root_working_dir,
+                    &pending.title,
+                    &[],
+                    &pending.candidate_dirs,
+                    filtered.as_deref(),
+                    if keyword.is_empty() { None } else { Some(keyword) },
+                    message.as_deref(),
+                );
+
+                if let Some(card_msg_id) = &pending.card_message_id {
+                    let _ = lark_update_card(state, bot, card_msg_id, &card).await;
+                }
+
+                let toast_msg = if keyword.is_empty() {
+                    "已显示全部目录".to_string()
+                } else {
+                    format!("已筛选 \"{}\"", keyword)
+                };
+                Ok(Json(build_lark_card_action_toast("success", &toast_msg)))
+            }
+
+            "dir_select_best" => {
+                // Read pending first for validation & match
+                let pending = {
+                    let pending_map = state.pending_creates.lock().await;
+                    pending_map.get(pending_id).cloned()
+                };
+                let Some(pending) = pending else {
+                    return Ok(Json(build_lark_card_action_toast(
+                        "error",
+                        "session creation expired, please send a new message",
+                    )));
+                };
+                if pending.lark_app_id != app_id {
+                    return Ok(Json(build_lark_card_action_toast("error", "permission denied")));
+                }
+
+                let keyword = action
+                    .dir_search_keyword
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim();
+
+                if keyword.is_empty() {
+                    return Ok(Json(build_lark_card_action_toast(
+                        "warning",
+                        "请先输入关键词，再使用最优匹配",
+                    )));
+                }
+
+                let best = dir_select::find_best_match(&pending.candidate_dirs, keyword);
+
+                match best {
+                    Some(dir) => {
+                        // Validate against the pending's root and candidates
+                        if !dir_select::is_valid_candidate(
+                            &dir,
+                            &pending.root_working_dir,
+                            &pending.candidate_dirs,
+                        ) {
+                            return Ok(Json(build_lark_card_action_toast(
+                                "error",
+                                &format!("directory '{}' is not a valid candidate", dir),
+                            )));
+                        }
+
+                        // Atomically remove pending to prevent double-create
+                        let pending = {
+                            let mut pending_map = state.pending_creates.lock().await;
+                            pending_map.remove(pending_id)
+                        };
+                        let Some(pending) = pending else {
+                            return Ok(Json(build_lark_card_action_toast(
+                                "error",
+                                "session already being created, please wait",
+                            )));
+                        };
+
+                        let working_dir =
+                            dir_select::resolve_dir(&pending.root_working_dir, &dir);
+
+                        // Consume quota if applicable
+                        if let Some(quota_key) = pending.quota_key.as_deref() {
+                            let quota = consume_inbound_quota(state, app_id, quota_key).await?;
+                            if !quota.allowed {
+                                return Ok(Json(build_lark_card_action_toast(
+                                    "error",
+                                    "quota exceeded",
+                                )));
+                            }
+                        }
+
+                        create_session_from_pending(state, bot, &pending, &working_dir, &dir).await
+                    }
+                    None => {
+                        // No unique match: DON'T remove pending, just refresh card
+                        let filtered = dir_select::filter_dirs(&pending.candidate_dirs, keyword);
+                        let message = if filtered.is_empty() {
+                            Some(format!(
+                                "⚠️ 没有目录匹配 \"{}\"，请尝试其他关键词。",
+                                keyword
+                            ))
+                        } else {
+                            Some(format!(
+                                "⚠️ 多个目录匹配 \"{}\"（共 {} 个），请选择其中一个。",
+                                keyword,
+                                filtered.len()
+                            ))
+                        };
+
+                        let card = dir_select::build_dir_select_card(
+                            pending_id,
+                            &pending.root_working_dir,
+                            &pending.title,
+                            &[],
+                            &pending.candidate_dirs,
+                            Some(&filtered),
+                            Some(keyword),
+                            message.as_deref(),
+                        );
+
+                        if let Some(card_msg_id) = &pending.card_message_id {
+                            let _ = lark_update_card(state, bot, card_msg_id, &card).await;
+                        }
+
+                        Ok(Json(build_lark_card_action_toast(
+                            "warning",
+                            "无法确定唯一最佳匹配，请从列表中选择",
+                        )))
+                    }
+                }
+            }
+
+            _ => Ok(Json(build_lark_card_action_toast(
+                "error",
+                "unknown dir select action",
+            ))),
+        }
+    }
+
+    /// Shared helper: create a session from a pending entry (already removed from map),
+    /// record recent dir, update the card, and return success toast.
+    async fn create_session_from_pending(
+        state: &AppState,
+        bot: &BotConfig,
+        pending: &dir_select::PendingCreateSession,
+        working_dir: &str,
+        working_dir_rel: &str,
+    ) -> Result<Json<Value>, (StatusCode, String)> {
+        // Build the prompt from the pending context
+        let prompt_raw = prompt::build_quote_hint(
+            pending.parent_id.as_deref(),
+            &pending.message_id,
+            pending.scope,
+            &pending.anchor,
+        ) + &pending.text;
+
+        let mentions: Vec<LarkEventMention> =
+            serde_json::from_str(&pending.mentions_json).unwrap_or_default();
+
+        let prompt = if pending.cli_id == "opencode" {
+            let (bot_name, bot_open_id) =
+                load_bot_identity(&state.paths, &pending.lark_app_id);
+            let observed_bots = load_observed_bots_for_chat(
+                &state.paths,
+                &pending.lark_app_id,
+                &pending.chat_id,
+            );
+            prompt::build_initial_prompt(&prompt::InitialPromptOptions {
+                user_message: &prompt_raw,
+                session_id: "pending",
+                sender_open_id: pending.sender_open_id.as_deref(),
+                sender_type: pending.sender_type.as_deref(),
+                mentions: &mentions,
+                bot_name: bot_name.as_deref(),
+                bot_open_id: bot_open_id.as_deref(),
+                observed_bots: &observed_bots,
+                follow_ups: &Vec::new(),
+            })
+        } else {
+            prompt::build_follow_up_content(
+                &prompt_raw,
+                &prompt::FollowUpContentOptions {
+                    session_id: "pending",
+                    sender_open_id: pending.sender_open_id.as_deref(),
+                    sender_type: pending.sender_type.as_deref(),
+                    mentions: &mentions,
+                    cli_id: pending.cli_id.as_str(),
+                },
+            )
+        };
+
+        let session = create_session_internal(
+            state,
+            SessionCreateSpec {
+                title: pending.title.clone(),
+                chat_id: pending.chat_id.clone(),
+                chat_type: pending.chat_type.clone(),
+                root_message_id: pending.anchor.clone(),
+                quote_target_id: Some(pending.message_id.clone()),
+                scope: pending.scope,
+                working_dir: working_dir.to_string(),
+                cli_id: pending.cli_id.clone(),
+                cli_bin: pending.cli_bin.clone(),
+                cli_args: Vec::new(),
+                backend_type: pending.backend_type.clone(),
+                prompt,
+                lark_app_id: pending.lark_app_id.clone(),
+                owner_open_id: pending.sender_open_id.clone(),
+                adopted_from: None,
+            },
+        )
+        .await
+        .map_err(internal_error)?;
+
+        // Record recent directory
+        let recent_path = state.paths.root().join("recent-dirs.json");
+        let mut recent_store = dir_select::load_recent_dirs(&recent_path)
+            .await
+            .unwrap_or_default();
+        let recent_key = dir_select::build_recent_dir_key(
+            &pending.lark_app_id,
+            &pending.chat_id,
+            pending.sender_open_id.as_deref(),
+        );
+        dir_select::record_recent_dir(&mut recent_store, &recent_key, working_dir_rel);
+        let _ = dir_select::save_recent_dirs(&recent_path, &recent_store).await;
+
+        // Update the dir select card to show success
+        if let Some(card_msg_id) = &pending.card_message_id {
+            let success_card =
+                dir_select::build_dir_session_starting_card(working_dir, &pending.title);
+            let _ = lark_update_card(state, bot, card_msg_id, &success_card).await;
+        }
+
+        Ok(Json(build_lark_card_action_toast(
+            "success",
+            &format!(
+                "session started: {} (dir: {})",
+                session.session_id, working_dir_rel
+            ),
+        )))
+    }
 
     async fn handle_grant_card_action(
         state: &AppState,
@@ -6685,6 +7126,14 @@ async fn handle_lark_card_action_payload(
         "grant_chat" | "grant_global" | "grant_deny"
     ) {
         return handle_grant_card_action(state, app_id, &action).await;
+    }
+
+    // --- Directory selection card actions ---
+    if matches!(
+        action.action.as_str(),
+        "dir_select_pick" | "dir_select_filter" | "dir_select_best"
+    ) {
+        return handle_dir_select_card_action(state, &bot, app_id, &action).await;
     }
 
     let session_id = {
@@ -9243,6 +9692,7 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         workflow_progress_cards: Arc::new(Mutex::new(HashMap::new())),
         ask_pending: Arc::new(Mutex::new(HashMap::new())),
         grant_pending: Arc::new(Mutex::new(HashMap::new())),
+        pending_creates: Arc::new(Mutex::new(HashMap::new())),
         dashboard_token: Arc::new(Mutex::new(None)),
         external_host,
     };
@@ -11500,6 +11950,7 @@ mod tests {
             workflow_progress_cards: Arc::new(Mutex::new(HashMap::new())),
             ask_pending: Arc::new(Mutex::new(HashMap::new())),
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
             external_host: "localhost".to_string(),
         }
@@ -11863,6 +12314,9 @@ mod tests {
             ask_question_index: None,
             ask_key: None,
             ask_submit: false,
+            pending_id: None,
+            working_dir: None,
+            dir_search_keyword: None,
         };
         assert!(is_stale_stream_card_action(&stale_toggle, &session));
 
@@ -11932,6 +12386,9 @@ mod tests {
             ask_question_index: None,
             ask_key: None,
             ask_submit: false,
+            pending_id: None,
+            working_dir: None,
+            dir_search_keyword: None,
         };
         assert_eq!(
             resolve_card_render_target(&legacy_click, &session),
@@ -13914,6 +14371,7 @@ mod tests {
             workflow_progress_cards: Arc::new(Mutex::new(HashMap::new())),
             ask_pending: Arc::new(Mutex::new(HashMap::new())),
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
             external_host: "localhost".to_string(),
         };
@@ -13986,6 +14444,7 @@ mod tests {
             workflow_progress_cards: Arc::new(Mutex::new(HashMap::new())),
             ask_pending: Arc::new(Mutex::new(HashMap::new())),
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
             external_host: "localhost".to_string(),
         };
@@ -14122,6 +14581,7 @@ mod tests {
             workflow_progress_cards: Arc::new(Mutex::new(HashMap::new())),
             ask_pending: Arc::new(Mutex::new(HashMap::new())),
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
             external_host: "localhost".to_string(),
         };
@@ -14188,6 +14648,7 @@ mod tests {
             workflow_progress_cards: Arc::new(Mutex::new(HashMap::new())),
             ask_pending: Arc::new(Mutex::new(HashMap::new())),
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
             external_host: "localhost".to_string(),
         };
@@ -14311,6 +14772,7 @@ mod tests {
             workflow_progress_cards: Arc::new(Mutex::new(HashMap::new())),
             ask_pending: Arc::new(Mutex::new(HashMap::new())),
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
             external_host: "localhost".to_string(),
         };
@@ -14374,6 +14836,7 @@ mod tests {
             workflow_progress_cards: Arc::new(Mutex::new(HashMap::new())),
             ask_pending: Arc::new(Mutex::new(HashMap::new())),
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
             external_host: "localhost".to_string(),
         };
@@ -14606,6 +15069,9 @@ mod tests {
                 ask_question_index: None,
                 ask_key: None,
                 ask_submit: false,
+                pending_id: None,
+                working_dir: None,
+                dir_search_keyword: None,
             }
         );
     }
@@ -14778,6 +15244,9 @@ mod tests {
             ask_question_index: None,
             ask_key: None,
             ask_submit: false,
+            pending_id: None,
+            working_dir: None,
+            dir_search_keyword: None,
         };
         assert_eq!(
             workflow_approval_target_message_id(&action).as_deref(),
@@ -14985,6 +15454,9 @@ mod tests {
             ask_question_index: None,
             ask_key: None,
             ask_submit: false,
+            pending_id: None,
+            working_dir: None,
+            dir_search_keyword: None,
         };
         assert_eq!(
             resolve_lark_card_action_session_id(&sessions, "app-1", &direct).as_deref(),
@@ -15020,6 +15492,9 @@ mod tests {
             ask_question_index: None,
             ask_key: None,
             ask_submit: false,
+            pending_id: None,
+            working_dir: None,
+            dir_search_keyword: None,
         };
         assert_eq!(
             resolve_lark_card_action_session_id(&sessions, "app-1", &fallback).as_deref(),
@@ -15071,6 +15546,9 @@ mod tests {
             ask_question_index: None,
             ask_key: None,
             ask_submit: false,
+            pending_id: None,
+            working_dir: None,
+            dir_search_keyword: None,
         };
         assert_eq!(
             resolve_lark_card_action_session_id(&sessions, "app-1", &action),
@@ -16233,10 +16711,19 @@ mod tests {
                 handle_lark_event_payload(state.clone(), app_id.to_string(), payload, None).await;
             assert!(result.is_ok());
 
-            let sessions = state.sessions.lock().await;
+            // With directory selection, new sessions are NOT created immediately.
+            // Instead a dir-select card is sent. Verify the pending entry was stored
+            // with the correct Thread scope.
+            let pending_creates = state.pending_creates.lock().await;
             assert!(
-                sessions.values().any(|s| s.scope == SessionScope::Thread),
-                "session should be created with Thread scope when API detects topic group"
+                !pending_creates.is_empty(),
+                "pending create entry should be stored when no active session exists"
+            );
+            let pending = pending_creates.values().next().unwrap();
+            assert_eq!(
+                pending.scope,
+                SessionScope::Thread,
+                "pending create should have Thread scope when API detects topic group"
             );
 
             maybe_remove_dir(&paths.root().to_path_buf());
