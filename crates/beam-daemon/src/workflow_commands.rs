@@ -767,6 +767,9 @@ mod tests {
             grant_pending: std::sync::Arc::new(tokio::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            pending_creates: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             dashboard_token: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             external_host: "localhost".to_string(),
         }

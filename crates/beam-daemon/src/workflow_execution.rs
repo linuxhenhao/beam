@@ -421,6 +421,7 @@ async fn run_workflow_subagent_session(
             root_message_id: ctx.run_id.to_string(),
             quote_target_id: None,
             scope: SessionScope::Thread,
+            thread_id: None,
             working_dir: working_dir.clone(),
             cli_id: bot.cli_id.clone(),
             cli_bin: bot.cli_bin.clone().unwrap_or_else(|| bot.cli_id.clone()),

@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 mod ask;
 mod connector_store;
+mod dir_select;
 mod grant;
 mod prompt;
 mod terminal_proxy;
@@ -45,15 +46,15 @@ use axum::{
 use base64::Engine;
 use beam_core::{
     AdoptCandidate, AdoptTmuxSessionRequest, AdoptedFrom, ApiHealth, AttemptResumeRequest,
-    BackendType, BeamPaths, BotConfig, BotSummary, ChatMode,
-    CliUsageLimitState, ColdWorkflowRun, Config, CreateSessionRequest, DaemonOverview,
-    DaemonRuntimeState, DaemonToWorker, DisplayMode, EventDraft, EventLog, EventWindowOpts,
-    FinalOutputKind, FinalOutputRequest, InitConfig, PendingResponseCardState,
-    RestartSessionRequest, ResumeSessionRequest, RunChatBinding, RunStatus, ScreenStatus, Session,
-    SessionGroup, SessionInputRequest, SessionLocateInfo, SessionScope, SessionStatus,
-    SessionSummary, TalkEvaluation, TermActionKey, TuiPromptOption, WaitResolution, WorkerToDaemon,
-    WorkflowActor, WorkflowOutputRef, can_operate, evaluate_talk, grant_restricted, parse_workflow_definition,
-    read_event_window, read_run_events_pure, read_run_snapshot, scan_cold_workflow_runs,
+    BackendType, BeamPaths, BotConfig, BotSummary, ChatMode, CliUsageLimitState, ColdWorkflowRun,
+    Config, CreateSessionRequest, DaemonOverview, DaemonRuntimeState, DaemonToWorker, DisplayMode,
+    EventDraft, EventLog, EventWindowOpts, FinalOutputKind, FinalOutputRequest, InitConfig,
+    PendingResponseCardState, RestartSessionRequest, ResumeSessionRequest, RunChatBinding,
+    RunStatus, ScreenStatus, Session, SessionGroup, SessionInputRequest, SessionLocateInfo,
+    SessionScope, SessionStatus, SessionSummary, TalkEvaluation, TermActionKey, TuiPromptOption,
+    WaitResolution, WorkerToDaemon, WorkflowActor, WorkflowOutputRef, can_operate, evaluate_talk,
+    grant_restricted, parse_workflow_definition, read_event_window, read_run_events_pure,
+    read_run_snapshot, scan_cold_workflow_runs,
 };
 use chrono::Utc;
 use connector_store::{
@@ -78,7 +79,7 @@ use tokio::net::TcpListener;
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::Mutex;
 use tower_http::services::ServeDir;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use trigger_log::{
     TriggerLogStats, list_trigger_logs, new_trigger_id as new_trigger_log_id, prune_trigger_logs,
     summarize_trigger_logs,
@@ -138,6 +139,7 @@ struct AppState {
     workflow_progress_cards: Arc<Mutex<HashMap<String, String>>>,
     ask_pending: Arc<Mutex<HashMap<String, ask::AskPendingEntry>>>,
     grant_pending: Arc<Mutex<HashMap<String, grant::GrantPendingEntry>>>,
+    pending_creates: Arc<Mutex<HashMap<String, dir_select::PendingCreateSession>>>,
     dashboard_token: Arc<Mutex<Option<DashboardAuthToken>>>,
     external_host: String,
 }
@@ -535,7 +537,7 @@ struct LarkMessageResponseData {
     message_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct LarkEventMention {
     key: String,
     name: String,
@@ -565,7 +567,6 @@ enum LarkEventOutcome {
     ReuseSession,
     CreateSession,
 }
-
 
 #[derive(Debug, Clone, serde::Deserialize)]
 struct WorkflowRunRequest {
@@ -747,7 +748,6 @@ pub(crate) struct WorkflowFeishuReplyInput {
     _reply_in_thread: Option<bool>,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedLarkInboundMessage {
     event_id: String,
@@ -761,6 +761,8 @@ struct ParsedLarkInboundMessage {
     sender_open_id: Option<String>,
     mentions: Vec<LarkEventMention>,
     parent_id: Option<String>,
+    root_id: Option<String>,
+    thread_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -793,6 +795,9 @@ struct ParsedLarkCardAction {
     ask_question_index: Option<usize>,
     ask_key: Option<String>,
     ask_submit: bool,
+    pending_id: Option<String>,
+    working_dir: Option<String>,
+    dir_search_keyword: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -2122,6 +2127,9 @@ fn card_action_requires_operate(action: &str) -> bool {
             | "wf_approve"
             | "wf_reject"
             | "wf_cancel"
+            | "dir_select_pick"
+            | "dir_select_filter"
+            | "dir_select_best"
     )
 }
 
@@ -2805,7 +2813,6 @@ pub(crate) fn is_retryable_feishu_resume_error(err: &anyhow::Error) -> bool {
         .any(|text| needles.iter().any(|needle| text.contains(needle)))
 }
 
-
 fn load_known_bot_open_ids_for_app(paths: &BeamPaths, lark_app_id: &str) -> HashSet<String> {
     let mut out = HashSet::new();
     let cross_ref_path = paths
@@ -3094,15 +3101,22 @@ async fn get_lark_chat_mode(
         anyhow::bail!("lark chat info failed: {}", payload);
     }
     let value: Value = serde_json::from_str(&payload).unwrap_or(Value::Null);
-    let mode = parse_chat_info_mode(
-        value
-            .pointer("/data/chat_mode")
-            .and_then(Value::as_str)
-            .unwrap_or(""),
-        value
-            .pointer("/data/group_message_type")
-            .and_then(Value::as_str)
-            .unwrap_or(""),
+    let chat_mode_raw = value
+        .pointer("/data/chat_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let group_message_type = value
+        .pointer("/data/group_message_type")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let mode = parse_chat_info_mode(chat_mode_raw, group_message_type);
+    debug!(
+        app_id = %bot.lark_app_id,
+        chat_id = %chat_id,
+        chat_mode = %chat_mode_raw,
+        group_message_type = %group_message_type,
+        resolved_mode = ?mode,
+        "lark chat info parsed"
     );
     {
         let mut cache = state.chat_mode_cache.lock().await;
@@ -4370,7 +4384,7 @@ fn session_anchor_matches(
     session: &Session,
     lark_app_id: &str,
     chat_id: &str,
-    root_message_id: &str,
+    anchor: &str,
 ) -> bool {
     if session.status != SessionStatus::Active || session.lark_app_id != lark_app_id {
         return false;
@@ -4378,7 +4392,15 @@ fn session_anchor_matches(
     match session.scope {
         SessionScope::Chat => session.chat_id == chat_id,
         SessionScope::Thread => {
-            session.chat_id == chat_id && session.root_message_id == root_message_id
+            session.chat_id == chat_id
+                && (session.thread_id.as_deref() == Some(anchor)
+                    // For p2p, always allow root_message_id as a secondary
+                    // anchor.  p2p first messages create sessions with
+                    // thread_id=None; follow-ups route on root_id, which
+                    // must match root_message_id.  Even after thread_id is
+                    // backfilled, root_id-based follow-ups must still match.
+                    || (session.chat_type.as_deref() == Some("p2p")
+                        && session.root_message_id == anchor))
         }
     }
 }
@@ -4388,18 +4410,38 @@ fn decide_lark_routing<'a>(
     chat_id: &'a str,
     chat_type: Option<&str>,
     root_id: Option<&'a str>,
-    thread_id: Option<&str>,
+    thread_id: Option<&'a str>,
 ) -> (SessionScope, &'a str) {
-    if let (Some(root_id), Some(thread_id)) = (
-        root_id.filter(|value| !value.is_empty()),
-        thread_id.filter(|value| !value.is_empty()),
-    ) {
-        let _ = thread_id;
-        return (SessionScope::Thread, root_id);
+    if chat_type == Some("p2p") {
+        // p2p reply / thread follow-up: use root_id as anchor so subsequent
+        // messages in the same thread can find the first message's session
+        // (which stores message_id as root_message_id with thread_id=None).
+        if let Some(rid) = root_id.filter(|v| !v.is_empty()) {
+            return (SessionScope::Thread, rid);
+        }
+        // p2p message with thread_id but no root_id: use thread_id as the
+        // stable topic anchor.  This matches sessions that have already
+        // been backfilled with thread_id from an earlier follow-up.
+        if let Some(tid) = thread_id.filter(|v| !v.is_empty()) {
+            return (SessionScope::Thread, tid);
+        }
+        // p2p new message (no root_id / thread_id): fresh session.
+        return (SessionScope::Thread, message_id);
     }
 
+    // Non-p2p messages with a thread_id (omt_*) belong to a Feishu topic
+    // thread.  Use thread_id as the stable anchor so subsequent messages in
+    // the same thread can find the existing session.
+    if let Some(tid) = thread_id.filter(|v| !v.is_empty()) {
+        return (SessionScope::Thread, tid);
+    }
+
+    // For group chats without thread_id, root_id alone is just a
+    // quote/reply bubble, not a topic signal.  Stay Chat-scoped.
+    // chat_type == "topic" is NOT a real Feishu receive_v1 field;
+    // topic detection happens later via get_lark_chat_mode().
     match chat_type.unwrap_or("group") {
-        "p2p" | "topic" => (SessionScope::Thread, message_id),
+        "p2p" => (SessionScope::Thread, message_id),
         _ => (SessionScope::Chat, chat_id),
     }
 }
@@ -4491,7 +4533,6 @@ fn classify_lark_text_action(text: &str, has_existing_session: bool) -> LarkText
         LarkTextAction::CreateSession
     }
 }
-
 
 fn build_adopt_already_attached_reply(session: &Session) -> String {
     let adopted = match session.adopted_from.as_ref() {
@@ -4906,13 +4947,50 @@ fn parse_special_keys(value: &Value) -> Option<Vec<String>> {
         .filter(|keys| !keys.is_empty())
 }
 
-fn parse_lark_card_action(payload: &Value) -> Result<ParsedLarkCardAction, (StatusCode, String)> {
-    let action = payload
-        .pointer("/action/value/action")
+/// Try to parse a select_static option value as a JSON object containing
+/// action / pending_id / working_dir fields. Returns None if the option
+/// value is missing, not valid JSON, or doesn't contain an "action" field.
+fn try_parse_select_option(option_str: &str) -> Option<(String, Option<String>, Option<String>)> {
+    let v: Value = serde_json::from_str(option_str).ok()?;
+    let action = v.pointer("/action").and_then(Value::as_str)?;
+    let pending_id = v
+        .pointer("/pending_id")
         .and_then(Value::as_str)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing card action".to_string()))?;
+        .map(ToOwned::to_owned);
+    let working_dir = v
+        .pointer("/working_dir")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    Some((action.to_string(), pending_id, working_dir))
+}
+
+fn parse_lark_card_action(payload: &Value) -> Result<ParsedLarkCardAction, (StatusCode, String)> {
+    // Primary path: /action/value/action (for buttons, form_submit, etc.)
+    let action_from_value = payload
+        .pointer("/action/value/action")
+        .and_then(Value::as_str);
+
+    // Fallback: /action/option/ for select_static dropdown events.
+    // The option value is a JSON-encoded string containing {action, pending_id, working_dir}.
+    let option_parsed = if action_from_value.is_none() {
+        payload
+            .pointer("/action/option")
+            .and_then(Value::as_str)
+            .and_then(try_parse_select_option)
+    } else {
+        None
+    };
+
+    let (action_str, opt_pending_id, opt_working_dir) = match (action_from_value, option_parsed) {
+        (Some(action), _) => (action.to_string(), None, None),
+        (None, Some((action, pending_id, working_dir))) => (action, pending_id, working_dir),
+        (None, None) => {
+            return Err((StatusCode::BAD_REQUEST, "missing card action".to_string()));
+        }
+    };
+
     Ok(ParsedLarkCardAction {
-        action: action.to_string(),
+        action: action_str,
         session_id: payload
             .pointer("/action/value/session_id")
             .and_then(Value::as_str)
@@ -5029,6 +5107,20 @@ fn parse_lark_card_action(payload: &Value) -> Result<ParsedLarkCardAction, (Stat
             .and_then(Value::as_str)
             .map(|v| v == "ask_submit")
             .unwrap_or(false),
+        pending_id: payload
+            .pointer("/action/value/pending_id")
+            .and_then(Value::as_str)
+            .or_else(|| opt_pending_id.as_deref())
+            .map(ToOwned::to_owned),
+        working_dir: payload
+            .pointer("/action/value/working_dir")
+            .and_then(Value::as_str)
+            .or_else(|| opt_working_dir.as_deref())
+            .map(ToOwned::to_owned),
+        dir_search_keyword: payload
+            .pointer("/action/form_value/dir_search_keyword")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
     })
 }
 
@@ -5304,6 +5396,8 @@ fn parse_lark_inbound_message(
         .get("thread_id")
         .and_then(Value::as_str)
         .filter(|v| !v.is_empty());
+    let root_id_owned = root_id.map(ToOwned::to_owned);
+    let thread_id_owned = thread_id.map(ToOwned::to_owned);
     let parent_id = message
         .get("parent_id")
         .and_then(Value::as_str)
@@ -5339,6 +5433,8 @@ fn parse_lark_inbound_message(
         sender_open_id,
         mentions,
         parent_id,
+        root_id: root_id_owned,
+        thread_id: thread_id_owned,
     })
 }
 
@@ -5381,6 +5477,14 @@ fn session_for_lark_anchor(
 }
 
 fn active_anchor_owner(sessions: &HashMap<String, Session>, candidate: &Session) -> Option<String> {
+    let anchor = match candidate.scope {
+        SessionScope::Thread => {
+            // Only match on thread_id — no fallback to root_message_id.
+            // If thread_id is None, there is no stable anchor to conflict on.
+            candidate.thread_id.as_deref()?
+        }
+        SessionScope::Chat => &candidate.chat_id,
+    };
     sessions
         .values()
         .find(|session| {
@@ -5390,7 +5494,7 @@ fn active_anchor_owner(sessions: &HashMap<String, Session>, candidate: &Session)
                     session,
                     &candidate.lark_app_id,
                     &candidate.chat_id,
-                    &candidate.root_message_id,
+                    anchor,
                 )
         })
         .map(|session| session.session_id.clone())
@@ -5441,6 +5545,7 @@ struct SessionCreateSpec {
     root_message_id: String,
     quote_target_id: Option<String>,
     scope: SessionScope,
+    thread_id: Option<String>,
     working_dir: String,
     cli_id: String,
     cli_bin: String,
@@ -5466,6 +5571,7 @@ async fn create_session_internal(
         root_message_id: spec.root_message_id.clone(),
         quote_target_id: spec.quote_target_id.clone(),
         scope: spec.scope,
+        thread_id: spec.thread_id.clone(),
         status: SessionStatus::Active,
         created_at: Utc::now(),
         closed_at: None,
@@ -5700,7 +5806,16 @@ async fn handle_lark_event_payload(
         match get_lark_chat_mode(&state, &bot, &parsed.chat_id, force_refresh).await {
             Ok(ChatMode::Topic) => {
                 parsed.scope = SessionScope::Thread;
-                parsed.anchor = parsed.message_id.clone();
+                parsed.chat_type = Some("topic".to_string());
+                // Use thread_id as anchor when available (stable topic
+                // identifier).  Fall back to message_id for the first
+                // message in a topic that does not yet carry thread_id.
+                // Do NOT use root_id as anchor — root_id is a message
+                // ID for reply semantics, not a topic-matching key.
+                parsed.anchor = parsed
+                    .thread_id
+                    .clone()
+                    .unwrap_or_else(|| parsed.message_id.clone());
             }
             Err(err) => {
                 warn!(
@@ -6069,6 +6184,22 @@ async fn handle_lark_event_payload(
         let sessions = state.sessions.lock().await;
         decide_lark_dispatch(&sessions, &app_id, &parsed)
     };
+    info!(
+        app_id = %app_id,
+        chat_id = %parsed.chat_id,
+        chat_type = ?parsed.chat_type,
+        message_id = %parsed.message_id,
+        root_id = ?parsed.root_id,
+        parent_id = ?parsed.parent_id,
+        thread_id = ?parsed.thread_id,
+        scope = ?parsed.scope,
+        anchor = %parsed.anchor,
+        existing_session_id = ?existing.as_ref().map(|s| s.session_id.as_str()),
+        existing_thread_id = ?existing.as_ref().and_then(|s| s.thread_id.as_deref()),
+        existing_root_message_id = ?existing.as_ref().map(|s| s.root_message_id.as_str()),
+        outcome = ?outcome,
+        "lark message dispatch",
+    );
     match outcome {
         LarkEventOutcome::ReplyOnly { reply } => {
             let _ = lark_reply_message(&state, &bot, message_id, &reply).await;
@@ -6200,6 +6331,16 @@ async fn handle_lark_event_payload(
                     let mut sessions = state.sessions.lock().await;
                     if let Some(entry) = sessions.get_mut(&session.session_id) {
                         entry.quote_target_id = Some(message_id.to_string());
+                        // Backfill thread_id for p2p: the first p2p message
+                        // creates a session with thread_id=None.  When a
+                        // follow-up p2p message carries a thread_id, persist it
+                        // so future events that only have thread_id (no root_id)
+                        // can also match this session.
+                        if entry.thread_id.is_none() {
+                            if let Some(ref tid) = parsed.thread_id {
+                                entry.thread_id = Some(tid.clone());
+                            }
+                        }
                     }
                     sessions.clone()
                 };
@@ -6232,16 +6373,29 @@ async fn handle_lark_event_payload(
                     let mut sessions = state.sessions.lock().await;
                     if let Some(entry) = sessions.get_mut(&session.session_id) {
                         entry.quote_target_id = Some(message_id.to_string());
+                        // Backfill thread_id for p2p: the first p2p message
+                        // creates a session with thread_id=None.  When a
+                        // follow-up p2p message carries a thread_id, persist it
+                        // so future events that only have thread_id (no root_id)
+                        // can also match this session.
+                        if entry.thread_id.is_none() {
+                            if let Some(ref tid) = parsed.thread_id {
+                                entry.thread_id = Some(tid.clone());
+                            }
+                        }
                     }
                     sessions.clone()
                 };
                 let _ = persist_sessions(&state.paths, &snapshot).await;
                 let reuse_content = {
+                    // Use session's root_message_id for quote hint suppression,
+                    // not the dispatch anchor (which may be thread_id for topics).
+                    let session_root = &session.root_message_id;
                     let raw = prompt::build_quote_hint(
                         parsed.parent_id.as_deref(),
                         &parsed.message_id,
                         scope,
-                        anchor,
+                        session_root,
                     ) + &text;
                     prompt::build_follow_up_content(
                         &raw,
@@ -6266,82 +6420,174 @@ async fn handle_lark_event_payload(
                 return Ok(Json(serde_json::json!({ "ok": true, "reused": true })));
             }
         }
-        LarkEventOutcome::CreateSession => {}
-    }
+        LarkEventOutcome::CreateSession => {
+            // --- Directory selection card flow ---
+            // Instead of immediately creating a session, present a card for the
+            // user to select a working directory under the bot's root working dir.
 
-    let working_dir = expand_tilde(
-        &bot.working_dir
-            .clone()
-            .or_else(|| state.config.daemon.working_dirs.first().cloned())
-            .unwrap_or_else(|| ".".to_string()),
-    );
-    let title = text.chars().take(32).collect::<String>();
-    if let Some(quota_key) = talk.as_ref().and_then(|talk| talk.quota_key.as_deref()) {
-        let quota = consume_inbound_quota(&state, &app_id, quota_key).await?;
-        if !quota.allowed {
-            let _ = lark_reply_message(&state, &bot, message_id, "quota exceeded").await;
-            return Ok(Json(
-                serde_json::json!({ "ok": true, "quota": "exhausted" }),
-            ));
+            let root_working_dir = dir_select::determine_root_working_dir(
+                bot.working_dir.as_deref(),
+                &state.config.daemon.working_dirs,
+            );
+
+            // Scan candidate directories under root
+            let root_path = std::path::Path::new(&root_working_dir);
+            let candidate_dirs = dir_select::scan_candidate_dirs(root_path);
+
+            // Load recent dirs
+            let recent_path = state.paths.root().join("recent-dirs.json");
+            let recent_store = dir_select::load_recent_dirs(&recent_path)
+                .await
+                .unwrap_or_default();
+            let recent_key =
+                dir_select::build_recent_dir_key(&app_id, chat_id, sender_open_id.as_deref());
+            let recent_dirs =
+                dir_select::get_recent_dirs(&recent_store, &recent_key, &root_working_dir);
+
+            // Build recommended dirs: root + recent dirs (matching candidates) + keyword-matched
+            let mut recommended: Vec<String> = Vec::new();
+            recommended.push(".".to_string());
+            for rd in &recent_dirs {
+                if candidate_dirs.contains(rd) && !recommended.contains(rd) {
+                    recommended.push(rd.clone());
+                }
+                if recommended.len() >= 8 {
+                    break;
+                }
+            }
+            // Add keyword-matched dirs if still have room
+            let kwds = dir_select::tokenize_keywords(&text);
+            if !kwds.is_empty() && recommended.len() < 8 {
+                let kw_refs: Vec<&str> = kwds.iter().map(|s| s.as_str()).collect();
+                let keyword_matched = dir_select::match_dirs(&candidate_dirs, &kw_refs);
+                for km in &keyword_matched {
+                    if !recommended.contains(km) {
+                        recommended.push(km.clone());
+                    }
+                    if recommended.len() >= 8 {
+                        break;
+                    }
+                }
+            }
+
+            // Build pending entry (quota is NOT consumed yet — done when dir is picked)
+            let pending_id = Uuid::new_v4().to_string();
+            let title = text.chars().take(32).collect::<String>();
+            let quota_key = talk
+                .as_ref()
+                .and_then(|t| t.quota_key.as_deref())
+                .map(|s| s.to_string());
+
+            let pending = dir_select::PendingCreateSession {
+                pending_id: pending_id.clone(),
+                lark_app_id: app_id.clone(),
+                chat_id: chat_id.to_string(),
+                chat_type: parsed.chat_type.clone(),
+                message_id: message_id.to_string(),
+                anchor: anchor.to_string(),
+                scope,
+                thread_id: parsed.thread_id.clone(),
+                root_id: parsed.root_id.clone(),
+                title: title.clone(),
+                text: text.clone(),
+                sender_open_id: sender_open_id.clone(),
+                sender_type: parsed.sender_type.clone(),
+                parent_id: parsed.parent_id.clone(),
+                mentions_json: serde_json::to_string(&parsed.mentions).unwrap_or_default(),
+                quota_key,
+                created_at: Utc::now().timestamp_millis(),
+                cli_id: bot.cli_id.clone(),
+                cli_bin: bot.cli_bin.clone().unwrap_or_else(|| bot.cli_id.clone()),
+                backend_type: bot.backend_type.clone().unwrap_or(BackendType::Tmux),
+                root_working_dir: root_working_dir.clone(),
+                candidate_dirs: candidate_dirs.clone(),
+                card_message_id: None,
+            };
+
+            // Build and send the directory selection card
+            let card = dir_select::build_dir_select_card(
+                &pending_id,
+                &root_working_dir,
+                &title,
+                &recommended,
+                &candidate_dirs,
+                None,
+                None,
+                None,
+            );
+
+            let reply_in_thread = scope == SessionScope::Thread;
+            info!(
+                app_id = %app_id,
+                chat_id = %chat_id,
+                chat_type = ?parsed.chat_type,
+                scope = ?scope,
+                message_id = %message_id,
+                pending_id = %pending_id,
+                reason = "CreateSession",
+                anchor = %anchor,
+                thread_id = ?parsed.thread_id,
+                root_id = ?parsed.root_id,
+                reply_in_thread,
+                candidate_count = candidate_dirs.len(),
+                card_bytes = card.len(),
+                uses_select_static = card.contains("\"select_static\""),
+                "sending dir select card"
+            );
+            let card_message_id =
+                match lark_reply_card_with_opts(&state, &bot, message_id, &card, reply_in_thread)
+                    .await
+                {
+                    Ok(card_message_id) => {
+                        info!(
+                            app_id = %app_id,
+                            chat_id = %chat_id,
+                            chat_type = ?parsed.chat_type,
+                            scope = ?scope,
+                            message_id = %message_id,
+                            pending_id = %pending_id,
+                            card_message_id = %card_message_id,
+                            reply_in_thread,
+                            "sent dir select card"
+                        );
+                        card_message_id
+                    }
+                    Err(err) => {
+                        warn!(
+                            app_id = %app_id,
+                            chat_id = %chat_id,
+                            chat_type = ?parsed.chat_type,
+                            scope = ?scope,
+                            message_id = %message_id,
+                            pending_id = %pending_id,
+                            reply_in_thread,
+                            candidate_count = candidate_dirs.len(),
+                            card_bytes = card.len(),
+                            uses_select_static = card.contains("\"select_static\""),
+                            error = %err,
+                            "failed to send dir select card"
+                        );
+                        return Err(internal_error(err));
+                    }
+                };
+
+            // Store pending entry with card message id (prune expired first)
+            {
+                let mut pending_map = state.pending_creates.lock().await;
+                let now_ms = Utc::now().timestamp_millis();
+                dir_select::prune_expired_pending_creates(&mut pending_map, now_ms);
+                let mut entry = pending;
+                entry.card_message_id = Some(card_message_id);
+                pending_map.insert(pending_id, entry);
+            }
+
+            return Ok(Json(serde_json::json!({ "ok": true, "dir_select": true })));
         }
     }
-    let _ = create_session_internal(
-        &state,
-        SessionCreateSpec {
-            title,
-            chat_id: chat_id.to_string(),
-            chat_type: parsed.chat_type.clone(),
-            root_message_id: anchor.to_string(),
-            quote_target_id: Some(message_id.to_string()),
-            scope,
-            working_dir,
-            cli_id: bot.cli_id.clone(),
-            cli_bin: bot.cli_bin.clone().unwrap_or_else(|| bot.cli_id.clone()),
-            cli_args: Vec::new(),
-            backend_type: bot.backend_type.clone().unwrap_or(BackendType::Tmux),
-            prompt: {
-                let raw = prompt::build_quote_hint(
-                    parsed.parent_id.as_deref(),
-                    &parsed.message_id,
-                    scope,
-                    anchor,
-                ) + &text;
-                if bot.cli_id == "opencode" {
-                    let (bot_name, bot_open_id) = load_bot_identity(&state.paths, &app_id);
-                    let observed_bots = load_observed_bots_for_chat(&state.paths, &app_id, chat_id);
-                    prompt::build_initial_prompt(&prompt::InitialPromptOptions {
-                        user_message: &raw,
-                        session_id: "pending",
-                        sender_open_id: parsed.sender_open_id.as_deref(),
-                        sender_type: parsed.sender_type.as_deref(),
-                        mentions: &parsed.mentions,
-                        bot_name: bot_name.as_deref(),
-                        bot_open_id: bot_open_id.as_deref(),
-                        observed_bots: &observed_bots,
-                        follow_ups: &Vec::new(),
-                    })
-                } else {
-                    prompt::build_follow_up_content(
-                        &raw,
-                        &prompt::FollowUpContentOptions {
-                            session_id: "pending",
-                            sender_open_id: parsed.sender_open_id.as_deref(),
-                            sender_type: parsed.sender_type.as_deref(),
-                            mentions: &parsed.mentions,
-                            cli_id: bot.cli_id.as_str(),
-                        },
-                    )
-                }
-            },
-            lark_app_id: app_id.clone(),
-            owner_open_id: sender_open_id,
-            adopted_from: None,
-        },
-    )
-    .await
-    .map_err(internal_error)?;
 
-    Ok(Json(serde_json::json!({ "ok": true, "created": true })))
+    // Legacy fallback: should not be reached since all match arms return above.
+    // Keep a guard in case a future code path falls through.
+    return Ok(Json(serde_json::json!({ "ok": true })));
 }
 
 struct LarkWsEventHandler {
@@ -6390,10 +6636,44 @@ impl EventHandler for LarkWsCardActionEventHandler {
         let state = self.state.clone();
         let app_id = self.app_id.clone();
         Box::pin(async move {
-            let card_action: CardAction =
-                serde_json::from_value(event.event.unwrap_or_default())
-                    .map_err(|err| feishu_core::Error::InvalidEventFormat(err.to_string()))?;
-            let payload = normalize_lark_ws_card_action(card_action);
+            let raw = event.event.unwrap_or_default();
+            // Snapshot fields that feishu-sdk 0.1.2 CardAction deserialization drops:
+            // - form_value: CardActionValue has no form_value field
+            // - operator / context: CardAction has no operator / context fields
+            let form_value_snapshot = raw.pointer("/action/form_value").cloned();
+            let operator_snapshot = raw.pointer("/operator").cloned();
+            let context_snapshot = raw.pointer("/context").cloned();
+
+            let card_action: CardAction = serde_json::from_value(raw)
+                .map_err(|err| feishu_core::Error::InvalidEventFormat(err.to_string()))?;
+            let mut payload = normalize_lark_ws_card_action(card_action);
+
+            // Restore form_value that was dropped during CardAction deserialization.
+            // This is needed for form_submit buttons (e.g. dir_select_filter, workflow comments).
+            if let Some(fv) = form_value_snapshot {
+                if let Some(action) = payload.pointer_mut("/action") {
+                    if let Some(obj) = action.as_object_mut() {
+                        obj.insert("form_value".to_string(), fv);
+                    }
+                }
+            }
+
+            // Restore operator that was dropped during CardAction deserialization.
+            // The WS event carries operator identity under /operator; CardAction only
+            // exposes top-level open_id which may be absent in WS card.action.trigger.
+            if let Some(op) = operator_snapshot {
+                if let Some(obj) = payload.as_object_mut() {
+                    obj.insert("operator".to_string(), op);
+                }
+            }
+
+            // Restore context that was dropped during CardAction deserialization.
+            if let Some(ctx) = context_snapshot {
+                if let Some(obj) = payload.as_object_mut() {
+                    obj.insert("context".to_string(), ctx);
+                }
+            }
+
             let Json(response) = handle_lark_card_action_payload(&state, &app_id, payload)
                 .await
                 .map_err(|(_status, err)| feishu_core::Error::InvalidEventFormat(err))?;
@@ -6510,6 +6790,403 @@ async fn handle_lark_card_action_payload(
         .get(app_id)
         .cloned()
         .ok_or_else(|| (StatusCode::NOT_FOUND, "bot config not found".to_string()))?;
+
+    async fn handle_dir_select_card_action(
+        state: &AppState,
+        bot: &BotConfig,
+        app_id: &str,
+        action: &ParsedLarkCardAction,
+    ) -> Result<Json<Value>, (StatusCode, String)> {
+        let pending_id = action
+            .pending_id
+            .as_deref()
+            .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing pending_id".to_string()))?;
+
+        // Prune expired pending entries before any access
+        {
+            let mut pending_map = state.pending_creates.lock().await;
+            let now_ms = Utc::now().timestamp_millis();
+            dir_select::prune_expired_pending_creates(&mut pending_map, now_ms);
+        }
+
+        match action.action.as_str() {
+            "dir_select_pick" => {
+                // Read pending first for validation
+                let pending = {
+                    let pending_map = state.pending_creates.lock().await;
+                    pending_map.get(pending_id).cloned()
+                };
+                let Some(pending) = pending else {
+                    return Ok(Json(build_lark_card_action_toast(
+                        "error",
+                        "session creation expired, please send a new message",
+                    )));
+                };
+                if pending.lark_app_id != app_id {
+                    return Ok(Json(build_lark_card_action_toast(
+                        "error",
+                        "permission denied",
+                    )));
+                }
+
+                let working_dir_rel = action
+                    .working_dir
+                    .as_deref()
+                    .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing working_dir".to_string()))?;
+
+                // Validate against the pending's root and candidates
+                if !dir_select::is_valid_candidate(
+                    working_dir_rel,
+                    &pending.root_working_dir,
+                    &pending.candidate_dirs,
+                ) {
+                    return Ok(Json(build_lark_card_action_toast(
+                        "error",
+                        &format!("directory '{}' is not a valid candidate", working_dir_rel),
+                    )));
+                }
+
+                // Atomically remove pending to prevent double-create
+                let pending = {
+                    let mut pending_map = state.pending_creates.lock().await;
+                    pending_map.remove(pending_id)
+                };
+                let Some(pending) = pending else {
+                    return Ok(Json(build_lark_card_action_toast(
+                        "error",
+                        "session already being created, please wait",
+                    )));
+                };
+
+                let working_dir =
+                    dir_select::resolve_dir(&pending.root_working_dir, working_dir_rel);
+
+                // Consume quota if applicable
+                if let Some(quota_key) = pending.quota_key.as_deref() {
+                    let quota = consume_inbound_quota(state, app_id, quota_key).await?;
+                    if !quota.allowed {
+                        return Ok(Json(build_lark_card_action_toast(
+                            "error",
+                            "quota exceeded",
+                        )));
+                    }
+                }
+
+                create_session_from_pending(state, bot, &pending, &working_dir, working_dir_rel)
+                    .await
+            }
+
+            "dir_select_filter" => {
+                // Read-only: just get a clone, don't remove
+                let pending = {
+                    let pending_map = state.pending_creates.lock().await;
+                    pending_map.get(pending_id).cloned()
+                };
+                let Some(pending) = pending else {
+                    return Ok(Json(build_lark_card_action_toast(
+                        "error",
+                        "session creation expired, please send a new message",
+                    )));
+                };
+                if pending.lark_app_id != app_id {
+                    return Ok(Json(build_lark_card_action_toast(
+                        "error",
+                        "permission denied",
+                    )));
+                }
+
+                let keyword = action.dir_search_keyword.as_deref().unwrap_or("").trim();
+
+                let filtered = if keyword.is_empty() {
+                    // Empty keyword → show all candidates (capped in card builder)
+                    Some(pending.candidate_dirs.clone())
+                } else {
+                    let f = dir_select::filter_dirs(&pending.candidate_dirs, keyword);
+                    Some(f)
+                };
+
+                let message = if let Some(ref f) = filtered {
+                    if f.is_empty() {
+                        Some(format!(
+                            "⚠️ 没有目录匹配关键词 \"{}\"，请尝试其他关键词。",
+                            keyword
+                        ))
+                    } else if f.len() == 1 {
+                        None
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                let card = dir_select::build_dir_select_card(
+                    pending_id,
+                    &pending.root_working_dir,
+                    &pending.title,
+                    &[],
+                    &pending.candidate_dirs,
+                    filtered.as_deref(),
+                    if keyword.is_empty() {
+                        None
+                    } else {
+                        Some(keyword)
+                    },
+                    message.as_deref(),
+                );
+
+                // PATCH the card message as a fallback (primary update is via response card field)
+                if let Some(card_msg_id) = &pending.card_message_id {
+                    if let Err(e) = lark_update_card(state, bot, card_msg_id, &card).await {
+                        warn!(
+                            "dir_select_filter: PATCH card for {} failed: {:?}",
+                            pending_id, e
+                        );
+                    }
+                }
+
+                let card_data = serde_json::from_str::<Value>(&card).unwrap_or(Value::Null);
+                let toast_msg = if keyword.is_empty() {
+                    "已显示全部目录".to_string()
+                } else {
+                    format!("已筛选 \"{}\"", keyword)
+                };
+                Ok(Json(serde_json::json!({
+                    "toast": { "type": "success", "content": toast_msg },
+                    "card": { "type": "raw", "data": card_data }
+                })))
+            }
+
+            "dir_select_best" => {
+                // Read pending first for validation & match
+                let pending = {
+                    let pending_map = state.pending_creates.lock().await;
+                    pending_map.get(pending_id).cloned()
+                };
+                let Some(pending) = pending else {
+                    return Ok(Json(build_lark_card_action_toast(
+                        "error",
+                        "session creation expired, please send a new message",
+                    )));
+                };
+                if pending.lark_app_id != app_id {
+                    return Ok(Json(build_lark_card_action_toast(
+                        "error",
+                        "permission denied",
+                    )));
+                }
+
+                let keyword = action.dir_search_keyword.as_deref().unwrap_or("").trim();
+
+                if keyword.is_empty() {
+                    return Ok(Json(build_lark_card_action_toast(
+                        "warning",
+                        "请先输入关键词，再使用最优匹配",
+                    )));
+                }
+
+                let best = dir_select::find_best_match(&pending.candidate_dirs, keyword);
+
+                match best {
+                    Some(dir) => {
+                        // Validate against the pending's root and candidates
+                        if !dir_select::is_valid_candidate(
+                            &dir,
+                            &pending.root_working_dir,
+                            &pending.candidate_dirs,
+                        ) {
+                            return Ok(Json(build_lark_card_action_toast(
+                                "error",
+                                &format!("directory '{}' is not a valid candidate", dir),
+                            )));
+                        }
+
+                        // Atomically remove pending to prevent double-create
+                        let pending = {
+                            let mut pending_map = state.pending_creates.lock().await;
+                            pending_map.remove(pending_id)
+                        };
+                        let Some(pending) = pending else {
+                            return Ok(Json(build_lark_card_action_toast(
+                                "error",
+                                "session already being created, please wait",
+                            )));
+                        };
+
+                        let working_dir = dir_select::resolve_dir(&pending.root_working_dir, &dir);
+
+                        // Consume quota if applicable
+                        if let Some(quota_key) = pending.quota_key.as_deref() {
+                            let quota = consume_inbound_quota(state, app_id, quota_key).await?;
+                            if !quota.allowed {
+                                return Ok(Json(build_lark_card_action_toast(
+                                    "error",
+                                    "quota exceeded",
+                                )));
+                            }
+                        }
+
+                        create_session_from_pending(state, bot, &pending, &working_dir, &dir).await
+                    }
+                    None => {
+                        // No unique match: DON'T remove pending, just refresh card
+                        let filtered = dir_select::filter_dirs(&pending.candidate_dirs, keyword);
+                        let message = if filtered.is_empty() {
+                            Some(format!(
+                                "⚠️ 没有目录匹配 \"{}\"，请尝试其他关键词。",
+                                keyword
+                            ))
+                        } else {
+                            Some(format!(
+                                "⚠️ 多个目录匹配 \"{}\"（共 {} 个），请选择其中一个。",
+                                keyword,
+                                filtered.len()
+                            ))
+                        };
+
+                        let card = dir_select::build_dir_select_card(
+                            pending_id,
+                            &pending.root_working_dir,
+                            &pending.title,
+                            &[],
+                            &pending.candidate_dirs,
+                            Some(&filtered),
+                            Some(keyword),
+                            message.as_deref(),
+                        );
+
+                        // PATCH the card message as a fallback (primary update is via response card field)
+                        if let Some(card_msg_id) = &pending.card_message_id {
+                            if let Err(e) = lark_update_card(state, bot, card_msg_id, &card).await {
+                                warn!(
+                                    "dir_select_best: PATCH card for {} failed: {:?}",
+                                    pending_id, e
+                                );
+                            }
+                        }
+
+                        let card_data = serde_json::from_str::<Value>(&card).unwrap_or(Value::Null);
+                        Ok(Json(serde_json::json!({
+                            "toast": { "type": "warning", "content": "无法确定唯一最佳匹配，请从列表中选择" },
+                            "card": { "type": "raw", "data": card_data }
+                        })))
+                    }
+                }
+            }
+
+            _ => Ok(Json(build_lark_card_action_toast(
+                "error",
+                "unknown dir select action",
+            ))),
+        }
+    }
+
+    /// Shared helper: create a session from a pending entry (already removed from map),
+    /// record recent dir, update the card, and return success toast.
+    async fn create_session_from_pending(
+        state: &AppState,
+        bot: &BotConfig,
+        pending: &dir_select::PendingCreateSession,
+        working_dir: &str,
+        working_dir_rel: &str,
+    ) -> Result<Json<Value>, (StatusCode, String)> {
+        // Build the prompt from the pending context.
+        // Use root_message_id (root_id or message_id) for quote hint suppression,
+        // NOT the session matching anchor (thread_id for topics).
+        let root_message_id = pending
+            .root_id
+            .clone()
+            .unwrap_or_else(|| pending.message_id.clone());
+        let prompt_raw = prompt::build_quote_hint(
+            pending.parent_id.as_deref(),
+            &pending.message_id,
+            pending.scope,
+            &root_message_id,
+        ) + &pending.text;
+
+        let mentions: Vec<LarkEventMention> =
+            serde_json::from_str(&pending.mentions_json).unwrap_or_default();
+
+        let prompt = if pending.cli_id == "opencode" {
+            let (bot_name, bot_open_id) = load_bot_identity(&state.paths, &pending.lark_app_id);
+            let observed_bots =
+                load_observed_bots_for_chat(&state.paths, &pending.lark_app_id, &pending.chat_id);
+            prompt::build_initial_prompt(&prompt::InitialPromptOptions {
+                user_message: &prompt_raw,
+                session_id: "pending",
+                sender_open_id: pending.sender_open_id.as_deref(),
+                sender_type: pending.sender_type.as_deref(),
+                mentions: &mentions,
+                bot_name: bot_name.as_deref(),
+                bot_open_id: bot_open_id.as_deref(),
+                observed_bots: &observed_bots,
+                follow_ups: &Vec::new(),
+            })
+        } else {
+            prompt::build_follow_up_content(
+                &prompt_raw,
+                &prompt::FollowUpContentOptions {
+                    session_id: "pending",
+                    sender_open_id: pending.sender_open_id.as_deref(),
+                    sender_type: pending.sender_type.as_deref(),
+                    mentions: &mentions,
+                    cli_id: pending.cli_id.as_str(),
+                },
+            )
+        };
+
+        let session = create_session_internal(
+            state,
+            SessionCreateSpec {
+                title: pending.title.clone(),
+                chat_id: pending.chat_id.clone(),
+                chat_type: pending.chat_type.clone(),
+                root_message_id,
+                quote_target_id: Some(pending.message_id.clone()),
+                scope: pending.scope,
+                thread_id: pending.thread_id.clone(),
+                working_dir: working_dir.to_string(),
+                cli_id: pending.cli_id.clone(),
+                cli_bin: pending.cli_bin.clone(),
+                cli_args: Vec::new(),
+                backend_type: pending.backend_type.clone(),
+                prompt,
+                lark_app_id: pending.lark_app_id.clone(),
+                owner_open_id: pending.sender_open_id.clone(),
+                adopted_from: None,
+            },
+        )
+        .await
+        .map_err(internal_error)?;
+
+        // Record recent directory
+        let recent_path = state.paths.root().join("recent-dirs.json");
+        let mut recent_store = dir_select::load_recent_dirs(&recent_path)
+            .await
+            .unwrap_or_default();
+        let recent_key = dir_select::build_recent_dir_key(
+            &pending.lark_app_id,
+            &pending.chat_id,
+            pending.sender_open_id.as_deref(),
+        );
+        dir_select::record_recent_dir(&mut recent_store, &recent_key, working_dir_rel);
+        let _ = dir_select::save_recent_dirs(&recent_path, &recent_store).await;
+
+        // Update the dir select card to show success
+        if let Some(card_msg_id) = &pending.card_message_id {
+            let success_card =
+                dir_select::build_dir_session_starting_card(working_dir, &pending.title);
+            let _ = lark_update_card(state, bot, card_msg_id, &success_card).await;
+        }
+
+        Ok(Json(build_lark_card_action_toast(
+            "success",
+            &format!(
+                "session started: {} (dir: {})",
+                session.session_id, working_dir_rel
+            ),
+        )))
+    }
 
     async fn handle_grant_card_action(
         state: &AppState,
@@ -6685,6 +7362,14 @@ async fn handle_lark_card_action_payload(
         "grant_chat" | "grant_global" | "grant_deny"
     ) {
         return handle_grant_card_action(state, app_id, &action).await;
+    }
+
+    // --- Directory selection card actions ---
+    if matches!(
+        action.action.as_str(),
+        "dir_select_pick" | "dir_select_filter" | "dir_select_best"
+    ) {
+        return handle_dir_select_card_action(state, &bot, app_id, &action).await;
     }
 
     let session_id = {
@@ -7714,6 +8399,7 @@ async fn create_session(
         model: None,
         locale: None,
         resume_session_id: None,
+        thread_id: None,
     };
     {
         let snapshot = {
@@ -7948,7 +8634,6 @@ async fn get_workflow_run_events(
     })))
 }
 
-
 async fn start_workflow_attempt_resume(
     State(state): State<AppState>,
     AxumPath((run_id, activity_id, attempt_id)): AxumPath<(String, String, String)>,
@@ -8133,6 +8818,7 @@ async fn start_workflow_attempt_resume(
         model: None,
         locale: None,
         resume_session_id: None,
+        thread_id: None,
     };
     {
         let snapshot = {
@@ -8374,8 +9060,6 @@ async fn cancel_workflow_run(
         ))
     }
 }
-
-
 
 async fn resume_workflow_run(
     State(state): State<AppState>,
@@ -8964,6 +9648,7 @@ async fn adopt_tmux_session(
         model: None,
         locale: None,
         resume_session_id: None,
+        thread_id: None,
     };
     {
         let snapshot = {
@@ -9095,6 +9780,7 @@ async fn adopt_zellij_session(
         model: None,
         locale: None,
         resume_session_id: None,
+        thread_id: None,
     };
     {
         let snapshot = {
@@ -9243,6 +9929,7 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         workflow_progress_cards: Arc::new(Mutex::new(HashMap::new())),
         ask_pending: Arc::new(Mutex::new(HashMap::new())),
         grant_pending: Arc::new(Mutex::new(HashMap::new())),
+        pending_creates: Arc::new(Mutex::new(HashMap::new())),
         dashboard_token: Arc::new(Mutex::new(None)),
         external_host,
     };
@@ -10267,6 +10954,7 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
                 root_message_id: chat_id.clone(),
                 quote_target_id: None,
                 scope: SessionScope::Chat,
+                thread_id: None,
                 working_dir: working_dir.clone(),
                 cli_id: bot.cli_id.clone(),
                 cli_bin: bot.cli_bin.clone().unwrap_or_else(|| bot.cli_id.clone()),
@@ -11475,6 +12163,7 @@ mod tests {
             model: None,
             locale: None,
             resume_session_id: None,
+            thread_id: None,
         }
     }
 
@@ -11500,6 +12189,7 @@ mod tests {
             workflow_progress_cards: Arc::new(Mutex::new(HashMap::new())),
             ask_pending: Arc::new(Mutex::new(HashMap::new())),
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
             external_host: "localhost".to_string(),
         }
@@ -11543,9 +12233,8 @@ mod tests {
     async fn list_workflow_runs_respects_terminal_filter_and_status_filters() {
         let paths = temp_paths("workflow-runs");
         maybe_remove_dir(&paths.root().to_path_buf());
-        let params: BTreeMap<String, Value> = BTreeMap::from([
-            (String::from("name"), Value::String("beam".to_string())),
-        ]);
+        let params: BTreeMap<String, Value> =
+            BTreeMap::from([(String::from("name"), Value::String("beam".to_string()))]);
         bootstrap_workflow_run(
             &paths,
             BootstrapWorkflowRunInput {
@@ -11863,6 +12552,9 @@ mod tests {
             ask_question_index: None,
             ask_key: None,
             ask_submit: false,
+            pending_id: None,
+            working_dir: None,
+            dir_search_keyword: None,
         };
         assert!(is_stale_stream_card_action(&stale_toggle, &session));
 
@@ -11932,6 +12624,9 @@ mod tests {
             ask_question_index: None,
             ask_key: None,
             ask_submit: false,
+            pending_id: None,
+            working_dir: None,
+            dir_search_keyword: None,
         };
         assert_eq!(
             resolve_card_render_target(&legacy_click, &session),
@@ -12001,10 +12696,12 @@ mod tests {
 
     #[test]
     fn validate_resume_target_rejects_anchor_conflict() {
-        let candidate = make_session("closed-1");
+        let mut candidate = make_session("closed-1");
+        candidate.thread_id = Some("thread-1".to_string());
         let mut owner = make_session("active-1");
         owner.status = SessionStatus::Active;
         owner.closed_at = None;
+        owner.thread_id = Some("thread-1".to_string());
 
         let sessions = HashMap::from([
             (candidate.session_id.clone(), candidate),
@@ -12037,19 +12734,21 @@ mod tests {
     }
 
     #[test]
-    fn session_for_lark_anchor_matches_thread_scope_by_root_message() {
+    fn session_for_lark_anchor_matches_thread_scope_by_thread_id() {
+        // Thread-scoped sessions now match on thread_id, not root_message_id.
         let mut thread = make_session("thread-1");
         thread.status = SessionStatus::Active;
         thread.closed_at = None;
         thread.scope = SessionScope::Thread;
         thread.chat_id = "chat-a".to_string();
         thread.root_message_id = "root-a".to_string();
+        thread.thread_id = Some("anchor-a".to_string());
 
         let sessions = HashMap::from([(thread.session_id.clone(), thread.clone())]);
-        let found = session_for_lark_anchor(&sessions, "app-1", "chat-a", "root-a")
-            .expect("thread session should match");
+        let found = session_for_lark_anchor(&sessions, "app-1", "chat-a", "anchor-a")
+            .expect("thread session should match on thread_id");
         assert_eq!(found.session_id, thread.session_id);
-        assert!(session_for_lark_anchor(&sessions, "app-1", "chat-a", "root-b").is_none());
+        assert!(session_for_lark_anchor(&sessions, "app-1", "chat-a", "anchor-b").is_none());
     }
 
     #[test]
@@ -12100,9 +12799,7 @@ mod tests {
         }
 
         // ── double-quoted value with spaces ───────────────────────
-        match parse_workflow_text_command(
-            "/workflow run flow task=\"review and deploy PR #42\"",
-        ) {
+        match parse_workflow_text_command("/workflow run flow task=\"review and deploy PR #42\"") {
             Some(WorkflowTextCommand::Run {
                 workflow_id,
                 raw_params,
@@ -12117,9 +12814,7 @@ mod tests {
         }
 
         // ── single-quoted value with spaces ───────────────────────
-        match parse_workflow_text_command(
-            "/workflow run flow task='review and deploy PR #42'",
-        ) {
+        match parse_workflow_text_command("/workflow run flow task='review and deploy PR #42'") {
             Some(WorkflowTextCommand::Run {
                 workflow_id,
                 raw_params,
@@ -12134,9 +12829,7 @@ mod tests {
         }
 
         // ── escaped double-quote inside double-quoted value ───────
-        match parse_workflow_text_command(
-            "/workflow run flow task=\"say \\\"hello\\\"\"",
-        ) {
+        match parse_workflow_text_command("/workflow run flow task=\"say \\\"hello\\\"\"") {
             Some(WorkflowTextCommand::Run {
                 workflow_id,
                 raw_params,
@@ -12171,23 +12864,15 @@ mod tests {
                 raw_params,
             }) => {
                 assert_eq!(workflow_id, "flow");
-                assert_eq!(
-                    raw_params.get("task").map(String::as_str),
-                    Some("do stuff")
-                );
-                assert_eq!(
-                    raw_params.get("verbose").map(String::as_str),
-                    Some("true")
-                );
+                assert_eq!(raw_params.get("task").map(String::as_str), Some("do stuff"));
+                assert_eq!(raw_params.get("verbose").map(String::as_str), Some("true"));
                 assert_eq!(raw_params.get("count").map(String::as_str), Some("10"));
             }
             other => panic!("unexpected: {:?}", other),
         }
 
         // ── JSON payload in single-quoted value ───────────────────
-        match parse_workflow_text_command(
-            "/workflow run flow payload='{\"a\":1}'",
-        ) {
+        match parse_workflow_text_command("/workflow run flow payload='{\"a\":1}'") {
             Some(WorkflowTextCommand::Run {
                 workflow_id,
                 raw_params,
@@ -12264,9 +12949,7 @@ mod tests {
 
         // ── adjacent quoted/unquoted concatenation (shell-like) ──
         // In shell word parsing, `"done"extra` concatenates to `doneextra`.
-        match parse_workflow_text_command(
-            "/workflow run flow task=\"done\"extra",
-        ) {
+        match parse_workflow_text_command("/workflow run flow task=\"done\"extra") {
             Some(WorkflowTextCommand::Run {
                 workflow_id,
                 raw_params,
@@ -13914,6 +14597,7 @@ mod tests {
             workflow_progress_cards: Arc::new(Mutex::new(HashMap::new())),
             ask_pending: Arc::new(Mutex::new(HashMap::new())),
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
             external_host: "localhost".to_string(),
         };
@@ -13986,6 +14670,7 @@ mod tests {
             workflow_progress_cards: Arc::new(Mutex::new(HashMap::new())),
             ask_pending: Arc::new(Mutex::new(HashMap::new())),
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
             external_host: "localhost".to_string(),
         };
@@ -14122,6 +14807,7 @@ mod tests {
             workflow_progress_cards: Arc::new(Mutex::new(HashMap::new())),
             ask_pending: Arc::new(Mutex::new(HashMap::new())),
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
             external_host: "localhost".to_string(),
         };
@@ -14188,6 +14874,7 @@ mod tests {
             workflow_progress_cards: Arc::new(Mutex::new(HashMap::new())),
             ask_pending: Arc::new(Mutex::new(HashMap::new())),
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
             external_host: "localhost".to_string(),
         };
@@ -14311,6 +14998,7 @@ mod tests {
             workflow_progress_cards: Arc::new(Mutex::new(HashMap::new())),
             ask_pending: Arc::new(Mutex::new(HashMap::new())),
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
             external_host: "localhost".to_string(),
         };
@@ -14374,6 +15062,7 @@ mod tests {
             workflow_progress_cards: Arc::new(Mutex::new(HashMap::new())),
             ask_pending: Arc::new(Mutex::new(HashMap::new())),
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
             external_host: "localhost".to_string(),
         };
@@ -14606,6 +15295,9 @@ mod tests {
                 ask_question_index: None,
                 ask_key: None,
                 ask_submit: false,
+                pending_id: None,
+                working_dir: None,
+                dir_search_keyword: None,
             }
         );
     }
@@ -14720,6 +15412,323 @@ mod tests {
     }
 
     #[test]
+    fn parse_lark_card_action_extracts_dir_search_keyword_from_form_value() {
+        let payload = serde_json::json!({
+            "operator": { "open_id": "ou_user" },
+            "context": { "open_message_id": "om_card_clicked" },
+            "action": {
+                "value": {
+                    "action": "dir_select_filter",
+                    "pending_id": "pending-abc"
+                },
+                "form_value": { "dir_search_keyword": "src/crates" }
+            }
+        });
+        let parsed = parse_lark_card_action(&payload).expect("parsed");
+        assert_eq!(parsed.action, "dir_select_filter");
+        assert_eq!(parsed.pending_id.as_deref(), Some("pending-abc"));
+        assert_eq!(
+            parsed.dir_search_keyword.as_deref(),
+            Some("src/crates"),
+            "dir_search_keyword should be extracted from /action/form_value/dir_search_keyword"
+        );
+    }
+
+    #[test]
+    fn parse_lark_card_action_dir_search_keyword_none_when_no_form_value() {
+        let payload = serde_json::json!({
+            "operator": { "open_id": "ou_user" },
+            "action": {
+                "value": {
+                    "action": "dir_select_pick",
+                    "pending_id": "pending-abc",
+                    "working_dir": "src"
+                }
+            }
+        });
+        let parsed = parse_lark_card_action(&payload).expect("parsed");
+        assert_eq!(parsed.action, "dir_select_pick");
+        assert_eq!(parsed.dir_search_keyword.as_deref(), None);
+    }
+
+    #[test]
+    fn normalize_lark_ws_card_action_preserves_form_value_for_form_submit() {
+        // Simulates a form_submit button click event arriving via WebSocket.
+        // The raw JSON includes "form_value" which must survive the
+        // CardAction deserialization + normalization round-trip.
+        let raw = serde_json::json!({
+            "open_id": "ou_owner",
+            "open_message_id": "om_card",
+            "action": {
+                "value": {
+                    "action": "dir_select_filter",
+                    "pending_id": "pending-xyz"
+                },
+                "tag": "button",
+                "form_value": {
+                    "dir_search_keyword": "home/test"
+                }
+            }
+        });
+
+        // Simulate the handler's form_value preservation logic
+        let form_value_snapshot = raw.pointer("/action/form_value").cloned();
+        let card_action: CardAction = serde_json::from_value(raw).expect("deserialize CardAction");
+        let mut payload = normalize_lark_ws_card_action(card_action);
+        if let Some(fv) = form_value_snapshot {
+            if let Some(action) = payload.pointer_mut("/action") {
+                if let Some(obj) = action.as_object_mut() {
+                    obj.insert("form_value".to_string(), fv);
+                }
+            }
+        }
+
+        // Verify the normalized payload has both the value fields and form_value
+        assert_eq!(
+            payload.pointer("/operator/open_id").and_then(Value::as_str),
+            Some("ou_owner")
+        );
+        assert_eq!(
+            payload
+                .pointer("/action/value/action")
+                .and_then(Value::as_str),
+            Some("dir_select_filter")
+        );
+        assert_eq!(
+            payload
+                .pointer("/action/value/pending_id")
+                .and_then(Value::as_str),
+            Some("pending-xyz")
+        );
+        assert_eq!(
+            payload
+                .pointer("/action/form_value/dir_search_keyword")
+                .and_then(Value::as_str),
+            Some("home/test"),
+            "form_value must be preserved through the CardAction deserialization round-trip"
+        );
+
+        // Verify parse_lark_card_action can extract the keyword
+        let parsed = parse_lark_card_action(&payload).expect("parse normalized payload");
+        assert_eq!(parsed.action, "dir_select_filter");
+        assert_eq!(parsed.dir_search_keyword.as_deref(), Some("home/test"));
+    }
+
+    #[test]
+    fn normalize_lark_ws_card_action_restores_operator_context_from_raw() {
+        // Reproduction of production bug: WS card.action.trigger raw event
+        // carries operator identity under /operator/open_id and message context
+        // under /context/open_message_id, but feishu-sdk 0.1.2 CardAction has
+        // no operator/context fields — they are silently dropped during
+        // deserialization. The handler must snapshot them from raw and restore
+        // them into the normalized payload so parse_lark_card_action can
+        // extract operator_open_id and clicked_message_id.
+        let raw = serde_json::json!({
+            "operator": {
+                "open_id": "ou_ac4d3f69f6c8b13349ba3f51c7b7c2cc",
+                "tenant_key": "t_xxx"
+            },
+            "context": {
+                "open_message_id": "om_abc123"
+            },
+            "action": {
+                "value": {
+                    "action": "get_write_link",
+                    "session_id": "sess-1"
+                },
+                "tag": "button"
+            },
+            "token": "x-token"
+        });
+
+        // Simulate handler logic: snapshot → deserialize → normalize → restore
+        let operator_snapshot = raw.pointer("/operator").cloned();
+        let context_snapshot = raw.pointer("/context").cloned();
+        let form_value_snapshot = raw.pointer("/action/form_value").cloned();
+
+        let card_action: CardAction = serde_json::from_value(raw)
+            .expect("deserialize CardAction");
+
+        // Confirm that CardAction lost operator/context
+        assert!(
+            card_action.open_id.is_none(),
+            "top-level open_id should be absent — operator is only under /operator"
+        );
+        assert!(
+            card_action.open_message_id.is_none(),
+            "top-level open_message_id should be absent — context is only under /context"
+        );
+
+        let mut payload = normalize_lark_ws_card_action(card_action);
+
+        // Restore snapshots (mirrors handler logic)
+        if let Some(fv) = form_value_snapshot {
+            if let Some(action) = payload.pointer_mut("/action") {
+                if let Some(obj) = action.as_object_mut() {
+                    obj.insert("form_value".to_string(), fv);
+                }
+            }
+        }
+        if let Some(op) = operator_snapshot {
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("operator".to_string(), op);
+            }
+        }
+        if let Some(ctx) = context_snapshot {
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("context".to_string(), ctx);
+            }
+        }
+
+        // Verify normalized payload has operator and context
+        assert_eq!(
+            payload.pointer("/operator/open_id").and_then(Value::as_str),
+            Some("ou_ac4d3f69f6c8b13349ba3f51c7b7c2cc")
+        );
+        assert_eq!(
+            payload.pointer("/context/open_message_id").and_then(Value::as_str),
+            Some("om_abc123")
+        );
+        assert_eq!(
+            payload.pointer("/action/value/action").and_then(Value::as_str),
+            Some("get_write_link")
+        );
+
+        // Verify parse_lark_card_action can extract operator and context
+        let parsed = parse_lark_card_action(&payload).expect("parse normalized payload");
+        assert_eq!(parsed.action, "get_write_link");
+        assert_eq!(
+            parsed.operator_open_id.as_deref(),
+            Some("ou_ac4d3f69f6c8b13349ba3f51c7b7c2cc"),
+            "operator_open_id must be extracted from restored /operator/open_id"
+        );
+        assert_eq!(
+            parsed.clicked_message_id.as_deref(),
+            Some("om_abc123"),
+            "clicked_message_id must be extracted from restored /context/open_message_id"
+        );
+    }
+
+    #[test]
+    fn normalize_lark_ws_card_action_restores_operator_context_with_operator_id_fallback() {
+        // When the raw event uses /operator_id instead of /operator
+        // (HTTP callback path uses operator_id), still restore it.
+        let raw = serde_json::json!({
+            "operator_id": {
+                "open_id": "ou_from_operator_id"
+            },
+            "context": {
+                "open_message_id": "om_from_context"
+            },
+            "action": {
+                "value": {
+                    "action": "close",
+                    "session_id": "sess-1"
+                }
+            }
+        });
+
+        let operator_id_snapshot = raw.pointer("/operator_id").cloned();
+        let context_snapshot = raw.pointer("/context").cloned();
+
+        // For the WS path, the raw event uses /operator not /operator_id,
+        // but we snapshot /operator_id too in case it appears.
+        // The primary path is /operator (WS) with fallback to /operator_id (HTTP).
+        // This test confirms /operator_id also works through snapshot restore.
+        let card_action: CardAction = serde_json::from_value(raw).expect("deserialize");
+
+        // CardAction.open_id won't be set because top-level open_id is absent
+        assert!(card_action.open_id.is_none());
+
+        let mut payload = normalize_lark_ws_card_action(card_action);
+
+        // Restore operator_id as operator (parse_lark_card_action reads /operator/open_id
+        // with fallback to /operator_id/open_id)
+        if let Some(op) = operator_id_snapshot {
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("operator_id".to_string(), op);
+            }
+        }
+        if let Some(ctx) = context_snapshot {
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("context".to_string(), ctx);
+            }
+        }
+
+        let parsed = parse_lark_card_action(&payload).expect("parse");
+        assert_eq!(
+            parsed.operator_open_id.as_deref(),
+            Some("ou_from_operator_id"),
+            "operator_open_id should fall back to /operator_id/open_id"
+        );
+        assert_eq!(
+            parsed.clicked_message_id.as_deref(),
+            Some("om_from_context")
+        );
+    }
+
+    #[test]
+    fn normalize_lark_ws_card_action_raw_operator_overrides_cardaction_open_id() {
+        // When CardAction has top-level open_id AND raw has /operator,
+        // the raw /operator should take precedence (it's the canonical source).
+        let raw = serde_json::json!({
+            "open_id": "ou_from_top_level",
+            "open_message_id": "om_from_top_level",
+            "operator": {
+                "open_id": "ou_from_operator",
+                "tenant_key": "t_xxx"
+            },
+            "context": {
+                "open_message_id": "om_from_context"
+            },
+            "action": {
+                "value": {
+                    "action": "restart",
+                    "session_id": "sess-1"
+                },
+                "tag": "button"
+            }
+        });
+
+        let operator_snapshot = raw.pointer("/operator").cloned();
+        let context_snapshot = raw.pointer("/context").cloned();
+
+        let card_action: CardAction = serde_json::from_value(raw).expect("deserialize");
+
+        // CardAction sees the top-level open_id
+        assert_eq!(card_action.open_id.as_deref(), Some("ou_from_top_level"));
+
+        let mut payload = normalize_lark_ws_card_action(card_action);
+
+        // Restore operator/context from raw (overrides what normalize set)
+        if let Some(op) = operator_snapshot {
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("operator".to_string(), op);
+            }
+        }
+        if let Some(ctx) = context_snapshot {
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("context".to_string(), ctx);
+            }
+        }
+
+        let parsed = parse_lark_card_action(&payload).expect("parse");
+        assert_eq!(parsed.action, "restart");
+        // Raw /operator/open_id wins over CardAction.open_id
+        assert_eq!(
+            parsed.operator_open_id.as_deref(),
+            Some("ou_from_operator"),
+            "raw /operator/open_id should take precedence"
+        );
+        // Raw /context/open_message_id wins over CardAction.open_message_id
+        assert_eq!(
+            parsed.clicked_message_id.as_deref(),
+            Some("om_from_context"),
+            "raw /context/open_message_id should take precedence"
+        );
+    }
+
+    #[test]
     fn build_workflow_approval_resolved_card_includes_resolution_banner() {
         let card: Value = serde_json::from_str(&build_workflow_approval_resolved_card(
             "wf_reject",
@@ -14778,6 +15787,9 @@ mod tests {
             ask_question_index: None,
             ask_key: None,
             ask_submit: false,
+            pending_id: None,
+            working_dir: None,
+            dir_search_keyword: None,
         };
         assert_eq!(
             workflow_approval_target_message_id(&action).as_deref(),
@@ -14826,6 +15838,313 @@ mod tests {
             toast.pointer("/toast/content").and_then(Value::as_str),
             Some("session resumed")
         );
+    }
+
+    #[test]
+    fn dir_select_filter_response_includes_card_and_toast() {
+        // Verify that a filter action response returns both toast and card fields,
+        // so the Feishu client updates the card inline instead of just showing a toast.
+        let card_json = dir_select::build_dir_select_card(
+            "pending-1",
+            "/home/user/projects",
+            "test message",
+            &[".".to_string(), "project-a".to_string()],
+            &[
+                ".".to_string(),
+                "project-a".to_string(),
+                "project-b".to_string(),
+            ],
+            Some(&["project-a".to_string()]),
+            Some("project"),
+            None,
+        );
+        let card_data: Value = serde_json::from_str(&card_json).expect("card should be valid JSON");
+        let toast_msg = "已筛选 \"project\"";
+        let response = serde_json::json!({
+            "toast": { "type": "success", "content": toast_msg },
+            "card": { "type": "raw", "data": card_data }
+        });
+
+        // Response must contain both toast and card fields
+        assert!(
+            response.get("toast").is_some(),
+            "response must have toast field"
+        );
+        assert!(
+            response.get("card").is_some(),
+            "response must have card field"
+        );
+        assert_eq!(
+            response.pointer("/toast/content").and_then(Value::as_str),
+            Some(toast_msg)
+        );
+        assert_eq!(
+            response.pointer("/card/type").and_then(Value::as_str),
+            Some("raw")
+        );
+        // The card data should contain the filtered directory button
+        let card_str = response.pointer("/card/data").unwrap().to_string();
+        assert!(
+            card_str.contains("project-a"),
+            "filtered card must show project-a"
+        );
+        assert!(
+            card_str.contains("dir_select_pick"),
+            "filtered card must retain pickable buttons"
+        );
+    }
+
+    #[test]
+    fn dir_select_filter_response_card_contains_filtered_dirs_only() {
+        // When filtering with a keyword, the response card should show only matching dirs.
+        let all_dirs: Vec<String> = vec![
+            ".".to_string(),
+            "project-a".to_string(),
+            "project-b".to_string(),
+            "other".to_string(),
+        ];
+        let filtered: Vec<String> = vec!["project-a".to_string(), "project-b".to_string()];
+
+        let card_json = dir_select::build_dir_select_card(
+            "pending-2",
+            "/root",
+            "test",
+            &[],
+            &all_dirs,
+            Some(&filtered),
+            Some("project"),
+            None,
+        );
+        let card_data: Value = serde_json::from_str(&card_json).expect("card should be valid JSON");
+        let response = serde_json::json!({
+            "toast": { "type": "success", "content": "已筛选 \"project\"" },
+            "card": { "type": "raw", "data": card_data }
+        });
+
+        let card_str = response.pointer("/card/data").unwrap().to_string();
+        // Must contain the matching dirs
+        assert!(
+            card_str.contains("project-a"),
+            "card must contain project-a"
+        );
+        assert!(
+            card_str.contains("project-b"),
+            "card must contain project-b"
+        );
+        // Should NOT contain the non-matching dir "other"
+        assert!(
+            !card_str.contains("\"working_dir\":\"other\""),
+            "card must NOT contain non-matching dir 'other'"
+        );
+        // Must still have pickable buttons
+        assert!(
+            card_str.contains("dir_select_pick"),
+            "filtered card must retain dir_select_pick buttons"
+        );
+    }
+
+    #[test]
+    fn dir_select_filter_response_empty_keyword_shows_all_dirs() {
+        // Empty keyword should show all candidates (clear filter / show all).
+        let all_dirs: Vec<String> = vec![
+            ".".to_string(),
+            "project-a".to_string(),
+            "project-b".to_string(),
+        ];
+
+        let card_json = dir_select::build_dir_select_card(
+            "pending-3",
+            "/root",
+            "test",
+            &[],
+            &all_dirs,
+            Some(&all_dirs),
+            None,
+            None,
+        );
+        let card_data: Value = serde_json::from_str(&card_json).expect("card should be valid JSON");
+        let response = serde_json::json!({
+            "toast": { "type": "success", "content": "已显示全部目录" },
+            "card": { "type": "raw", "data": card_data }
+        });
+
+        // Response must have both fields
+        assert!(response.get("toast").is_some());
+        assert!(response.get("card").is_some());
+
+        let card_str = response.pointer("/card/data").unwrap().to_string();
+        // All dirs should be present as buttons
+        assert!(card_str.contains("dir_select_pick"));
+        // The search keyword field should be empty (cleared)
+        let v: Value = serde_json::from_str(&card_str).expect("valid card JSON");
+        let elements = v["elements"].as_array().unwrap();
+        let form = elements
+            .iter()
+            .find(|e| e["tag"].as_str() == Some("form"))
+            .unwrap();
+        let form_els = form["elements"].as_array().unwrap();
+        let input = form_els
+            .iter()
+            .find(|e| e["tag"].as_str() == Some("input"))
+            .unwrap();
+        assert_eq!(
+            input["default_value"].as_str(),
+            Some(""),
+            "empty keyword should clear the input field"
+        );
+    }
+
+    #[test]
+    fn dir_select_filter_response_empty_result_shows_warning() {
+        // When no directories match, the card should show a warning message.
+        let all_dirs: Vec<String> = vec![".".to_string(), "project-a".to_string()];
+        let filtered: Vec<String> = vec![];
+
+        let card_json = dir_select::build_dir_select_card(
+            "pending-4",
+            "/root",
+            "test",
+            &[],
+            &all_dirs,
+            Some(&filtered),
+            Some("nonexistent"),
+            Some("⚠️ 没有目录匹配关键词 \"nonexistent\"，请尝试其他关键词。"),
+        );
+        let card_data: Value = serde_json::from_str(&card_json).expect("card should be valid JSON");
+        let response = serde_json::json!({
+            "toast": { "type": "success", "content": "已筛选 \"nonexistent\"" },
+            "card": { "type": "raw", "data": card_data }
+        });
+
+        let card_str = response.pointer("/card/data").unwrap().to_string();
+        // Must show the warning message
+        assert!(
+            card_str.contains("没有目录匹配"),
+            "empty result card must show warning message"
+        );
+        assert!(
+            card_str.contains("请尝试其他关键词"),
+            "empty result card must suggest trying other keywords"
+        );
+        // Must still have the search form to allow retry
+        assert!(
+            card_str.contains("dir_search_keyword"),
+            "empty result card must retain search input"
+        );
+    }
+
+    #[test]
+    fn parse_lark_card_action_extracts_select_static_option() {
+        // Simulates a select_static dropdown selection event.
+        // The selected option value is a JSON-encoded string with
+        // action, pending_id, and working_dir.
+        let payload = serde_json::json!({
+            "operator": { "open_id": "ou_user" },
+            "context": { "open_message_id": "om_card" },
+            "action": {
+                "tag": "select_static",
+                "option": "{\"action\":\"dir_select_pick\",\"pending_id\":\"pid-1\",\"working_dir\":\"project-a\"}"
+            }
+        });
+        let parsed = parse_lark_card_action(&payload).expect("parsed select_static action");
+        assert_eq!(parsed.action, "dir_select_pick");
+        assert_eq!(parsed.pending_id.as_deref(), Some("pid-1"));
+        assert_eq!(parsed.working_dir.as_deref(), Some("project-a"));
+    }
+
+    #[test]
+    fn parse_lark_card_action_select_static_option_falls_back_to_value() {
+        // When both /action/value/action and /action/option/ exist,
+        // /action/value/action takes priority (button click with option field).
+        // This tests that select_static option parsing doesn't interfere.
+        let payload = serde_json::json!({
+            "operator": { "open_id": "ou_user" },
+            "action": {
+                "value": {
+                    "action": "dir_select_filter",
+                    "pending_id": "pid-v"
+                },
+                "tag": "button",
+                "option": "should-be-ignored"
+            }
+        });
+        let parsed = parse_lark_card_action(&payload).expect("parsed");
+        assert_eq!(parsed.action, "dir_select_filter");
+        assert_eq!(parsed.pending_id.as_deref(), Some("pid-v"));
+        // option is only used when /action/value/action is absent
+    }
+
+    #[test]
+    fn parse_lark_card_action_rejects_malformed_select_static_option() {
+        // If /action/option/ is not valid JSON, it should still fail
+        // with "missing card action" since no /action/value/action exists.
+        let payload = serde_json::json!({
+            "action": {
+                "option": "not-valid-json"
+            }
+        });
+        let err = parse_lark_card_action(&payload).expect_err("should fail");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert_eq!(err.1, "missing card action");
+    }
+
+    #[test]
+    fn dir_select_card_uses_action_buttons() {
+        // Verify that the card exposes directory choices as clickable buttons
+        // AND a select_static dropdown as an alternative entry point.
+        let all_dirs: Vec<String> = (0..10).map(|i| format!("project-{}", i)).collect();
+        let card_json = dir_select::build_dir_select_card(
+            "pid", "/root", "test", &all_dirs, &all_dirs, None, None, None,
+        );
+        let v: Value = serde_json::from_str(&card_json).expect("valid card JSON");
+        let elements = v["elements"].as_array().unwrap();
+
+        let action_elements: Vec<&Value> = elements
+            .iter()
+            .filter(|e| e["tag"].as_str() == Some("action"))
+            .collect();
+        assert!(
+            !action_elements.is_empty(),
+            "card must contain directory action groups"
+        );
+
+        let buttons: Vec<&Value> = action_elements
+            .iter()
+            .flat_map(|e| e["actions"].as_array().into_iter().flatten())
+            .collect();
+        // 10 dirs ≤ MAX_BUTTON_DIRS(40), so all show as buttons
+        assert_eq!(buttons.len(), 10, "should have one button per directory");
+        for (i, button) in buttons.iter().enumerate() {
+            assert_eq!(
+                button.pointer("/value/action").and_then(Value::as_str),
+                Some("dir_select_pick")
+            );
+            assert_eq!(
+                button.pointer("/value/pending_id").and_then(Value::as_str),
+                Some("pid")
+            );
+            assert_eq!(
+                button.pointer("/value/working_dir").and_then(Value::as_str),
+                Some(format!("project-{}", i).as_str())
+            );
+        }
+        // Card now includes select_static as alternative entry point
+        let select_static = elements
+            .iter()
+            .find(|e| e["tag"].as_str() == Some("select_static"))
+            .expect("card should contain select_static dropdown");
+        let options = select_static["options"].as_array().unwrap();
+        assert_eq!(
+            options.len(),
+            10,
+            "select_static should have all 10 options"
+        );
+        // Verify first option value is valid JSON with correct fields
+        let first_opt_val = options[0]["value"].as_str().unwrap();
+        let opt_parsed: Value = serde_json::from_str(first_opt_val).unwrap();
+        assert_eq!(opt_parsed["action"].as_str(), Some("dir_select_pick"));
+        assert_eq!(opt_parsed["pending_id"].as_str(), Some("pid"));
+        assert!(opt_parsed["working_dir"].as_str().is_some());
     }
 
     #[test]
@@ -14985,6 +16304,9 @@ mod tests {
             ask_question_index: None,
             ask_key: None,
             ask_submit: false,
+            pending_id: None,
+            working_dir: None,
+            dir_search_keyword: None,
         };
         assert_eq!(
             resolve_lark_card_action_session_id(&sessions, "app-1", &direct).as_deref(),
@@ -15020,6 +16342,9 @@ mod tests {
             ask_question_index: None,
             ask_key: None,
             ask_submit: false,
+            pending_id: None,
+            working_dir: None,
+            dir_search_keyword: None,
         };
         assert_eq!(
             resolve_lark_card_action_session_id(&sessions, "app-1", &fallback).as_deref(),
@@ -15071,6 +16396,9 @@ mod tests {
             ask_question_index: None,
             ask_key: None,
             ask_submit: false,
+            pending_id: None,
+            working_dir: None,
+            dir_search_keyword: None,
         };
         assert_eq!(
             resolve_lark_card_action_session_id(&sessions, "app-1", &action),
@@ -15102,7 +16430,7 @@ mod tests {
         assert_eq!(parsed.message_id, "msg-1");
         assert_eq!(parsed.chat_id, "chat-1");
         assert_eq!(parsed.scope, SessionScope::Thread);
-        assert_eq!(parsed.anchor, "root-1");
+        assert_eq!(parsed.anchor, "omt-1");
         assert_eq!(parsed.text, "/close");
         assert_eq!(parsed.sender_open_id.as_deref(), Some("ou_user"));
         assert_eq!(parsed.sender_type.as_deref(), Some("user"));
@@ -15383,6 +16711,8 @@ mod tests {
             sender_open_id: Some("ou_user".to_string()),
             mentions: Vec::new(),
             parent_id: None,
+            root_id: None,
+            thread_id: None,
         };
 
         let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
@@ -15415,10 +16745,247 @@ mod tests {
             sender_open_id: Some("ou_user".to_string()),
             mentions: Vec::new(),
             parent_id: None,
+            root_id: None,
+            thread_id: None,
         };
 
         let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
         assert!(existing.is_none());
+        assert_eq!(outcome, LarkEventOutcome::CreateSession);
+    }
+
+    #[test]
+    fn decide_lark_dispatch_reuses_topic_session_by_chat_id_without_thread_metadata() {
+        // Without thread_id, Thread-scoped sessions no longer match
+        // via chat_id fallback (the fallback was removed).  A new
+        // session must be created.
+        let mut topic_session = make_session("topic-session");
+        topic_session.status = SessionStatus::Active;
+        topic_session.closed_at = None;
+        topic_session.scope = SessionScope::Thread;
+        topic_session.chat_id = "topic-chat-1".to_string();
+        topic_session.chat_type = Some("topic".to_string());
+        topic_session.root_message_id = "first-topic-message".to_string();
+
+        let sessions = HashMap::from([(topic_session.session_id.clone(), topic_session)]);
+        let parsed = ParsedLarkInboundMessage {
+            event_id: "evt-topic-2".to_string(),
+            message_id: "second-topic-message".to_string(),
+            chat_id: "topic-chat-1".to_string(),
+            chat_type: Some("topic".to_string()),
+            sender_type: Some("user".to_string()),
+            scope: SessionScope::Thread,
+            anchor: "second-topic-message".to_string(),
+            text: "same topic follow-up".to_string(),
+            sender_open_id: Some("ou_user".to_string()),
+            mentions: Vec::new(),
+            parent_id: None,
+            root_id: None,
+            thread_id: None,
+        };
+
+        let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
+        assert!(
+            existing.is_none(),
+            "without thread_id on either side, no match is expected"
+        );
+        assert_eq!(outcome, LarkEventOutcome::CreateSession);
+    }
+
+    #[test]
+    fn decide_lark_dispatch_does_not_reuse_group_forced_topic_by_chat_id() {
+        let mut topic_session = make_session("topic-session");
+        topic_session.status = SessionStatus::Active;
+        topic_session.closed_at = None;
+        topic_session.scope = SessionScope::Thread;
+        topic_session.chat_id = "group-chat-1".to_string();
+        topic_session.root_message_id = "first-forced-topic".to_string();
+
+        let sessions = HashMap::from([(topic_session.session_id.clone(), topic_session)]);
+        let parsed = ParsedLarkInboundMessage {
+            event_id: "evt-topic-2".to_string(),
+            message_id: "second-forced-topic".to_string(),
+            chat_id: "group-chat-1".to_string(),
+            chat_type: Some("group".to_string()),
+            sender_type: Some("user".to_string()),
+            scope: SessionScope::Thread,
+            anchor: "second-forced-topic".to_string(),
+            text: "new forced topic".to_string(),
+            sender_open_id: Some("ou_user".to_string()),
+            mentions: Vec::new(),
+            parent_id: None,
+            root_id: None,
+            thread_id: None,
+        };
+
+        let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
+        assert!(existing.is_none());
+        assert_eq!(outcome, LarkEventOutcome::CreateSession);
+    }
+
+    #[test]
+    fn decide_lark_dispatch_creates_new_session_when_thread_id_missing() {
+        // When a topic session exists but has no thread_id, and a new
+        // message arrives with root_id but no thread_id, the session
+        // does NOT match (thread_id on session is None, anchor is a
+        // message_id).  A new session is created.
+        let mut topic_session = make_session("topic-session-id");
+        topic_session.status = SessionStatus::Active;
+        topic_session.closed_at = None;
+        topic_session.scope = SessionScope::Thread;
+        topic_session.chat_id = "topic-chat-reuse".to_string();
+        topic_session.chat_type = Some("topic".to_string());
+        topic_session.root_message_id = "first-topic-msg".to_string();
+
+        let sessions =
+            HashMap::from([(topic_session.session_id.clone(), topic_session.clone())]);
+
+        let parsed = ParsedLarkInboundMessage {
+            event_id: "evt-topic-2".to_string(),
+            message_id: "second-topic-msg".to_string(),
+            chat_id: "topic-chat-reuse".to_string(),
+            chat_type: Some("topic".to_string()),
+            sender_type: Some("user".to_string()),
+            scope: SessionScope::Thread,
+            anchor: "first-topic-msg".to_string(),
+            text: "follow-up in same topic".to_string(),
+            sender_open_id: Some("ou_user".to_string()),
+            mentions: Vec::new(),
+            parent_id: None,
+            root_id: Some("first-topic-msg".to_string()),
+            thread_id: None,
+        };
+
+        let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
+        assert!(existing.is_none());
+        assert_eq!(outcome, LarkEventOutcome::CreateSession);
+    }
+
+    #[test]
+    fn decide_lark_dispatch_reuses_topic_session_with_root_id_and_thread_id() {
+        // Thread-scoped session with thread_id="omt_thread".  A new
+        // message with the same thread_id should match.
+        let mut topic_session = make_session("topic-session-full");
+        topic_session.status = SessionStatus::Active;
+        topic_session.closed_at = None;
+        topic_session.scope = SessionScope::Thread;
+        topic_session.chat_id = "topic-full-chat".to_string();
+        topic_session.chat_type = Some("topic".to_string());
+        topic_session.root_message_id = "topic-root-msg".to_string();
+        topic_session.thread_id = Some("omt_thread".to_string());
+
+        let sessions =
+            HashMap::from([(topic_session.session_id.clone(), topic_session.clone())]);
+
+        let parsed = ParsedLarkInboundMessage {
+            event_id: "evt-full".to_string(),
+            message_id: "later-msg".to_string(),
+            chat_id: "topic-full-chat".to_string(),
+            chat_type: Some("topic".to_string()),
+            sender_type: Some("user".to_string()),
+            scope: SessionScope::Thread,
+            anchor: "omt_thread".to_string(),
+            text: "later message".to_string(),
+            sender_open_id: Some("ou_user".to_string()),
+            mentions: Vec::new(),
+            parent_id: None,
+            root_id: Some("topic-root-msg".to_string()),
+            thread_id: Some("omt_thread".to_string()),
+        };
+
+        let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
+        assert_eq!(
+            existing.map(|session| session.session_id),
+            Some("topic-session-full".to_string())
+        );
+        assert_eq!(outcome, LarkEventOutcome::ReuseSession);
+    }
+
+    #[test]
+    fn decide_lark_dispatch_no_fallback_creates_session_when_anchor_mismatches() {
+        // The chat_type-based fallback was removed.  Without thread_id
+        // on the session, a new message cannot match even if it's in
+        // the same chat.  A new session is created.
+        let mut topic_session = make_session("topic-fb-session");
+        topic_session.status = SessionStatus::Active;
+        topic_session.closed_at = None;
+        topic_session.scope = SessionScope::Thread;
+        topic_session.chat_id = "topic-fb-chat".to_string();
+        topic_session.chat_type = Some("topic".to_string());
+        topic_session.root_message_id = "first-msg".to_string();
+
+        let sessions =
+            HashMap::from([(topic_session.session_id.clone(), topic_session.clone())]);
+
+        let parsed = ParsedLarkInboundMessage {
+            event_id: "evt-fb".to_string(),
+            message_id: "second-msg".to_string(),
+            chat_id: "topic-fb-chat".to_string(),
+            chat_type: Some("topic".to_string()),
+            sender_type: Some("user".to_string()),
+            scope: SessionScope::Thread,
+            anchor: "second-msg".to_string(),
+            text: "another message".to_string(),
+            sender_open_id: Some("ou_user".to_string()),
+            mentions: Vec::new(),
+            parent_id: None,
+            root_id: None,
+            thread_id: None,
+        };
+
+        let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
+        assert!(
+            existing.is_none(),
+            "no fallback: without thread_id, new session is created"
+        );
+        assert_eq!(outcome, LarkEventOutcome::CreateSession);
+    }
+
+    #[test]
+    fn decide_lark_dispatch_creates_new_session_for_different_root_id_in_topic_chat() {
+        // When a topic session exists with root_message_id "topic-a-root"
+        // and a new message arrives in the SAME topic-mode chat but with
+        // a DIFFERENT root_id ("topic-b-root"), the exact anchor match
+        // fails.  Because root_id IS present (not None), the fallback by
+        // chat_id should NOT trigger.  A new session should be created
+        // so the different topic gets its own independent session and
+        // directory selection.
+        let mut topic_session = make_session("topic-existing");
+        topic_session.status = SessionStatus::Active;
+        topic_session.closed_at = None;
+        topic_session.scope = SessionScope::Thread;
+        topic_session.chat_id = "topic-multi".to_string();
+        topic_session.chat_type = Some("topic".to_string());
+        topic_session.root_message_id = "topic-a-root".to_string();
+
+        let sessions =
+            HashMap::from([(topic_session.session_id.clone(), topic_session.clone())]);
+
+        // Message with different root_id — should NOT match the existing session.
+        let parsed = ParsedLarkInboundMessage {
+            event_id: "evt-diff-topic".to_string(),
+            message_id: "topic-b-msg".to_string(),
+            chat_id: "topic-multi".to_string(),
+            chat_type: Some("topic".to_string()),
+            sender_type: Some("user".to_string()),
+            // anchor = root_id = "topic-b-root" (set by decide_lark_routing fix)
+            scope: SessionScope::Thread,
+            anchor: "topic-b-root".to_string(),
+            text: "different topic message".to_string(),
+            sender_open_id: Some("ou_user".to_string()),
+            mentions: Vec::new(),
+            parent_id: None,
+            root_id: Some("topic-b-root".to_string()),
+            thread_id: None,
+        };
+
+        let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
+        // Exact match fails (root_message_id mismatch); root_id is Some
+        // so fallback does NOT trigger.  Must create a new session.
+        assert!(
+            existing.is_none(),
+            "different root_id should NOT reuse existing topic session"
+        );
         assert_eq!(outcome, LarkEventOutcome::CreateSession);
     }
 
@@ -15468,6 +17035,8 @@ mod tests {
 
     #[test]
     fn decide_lark_routing_uses_thread_id_as_authoritative_topic_signal() {
+        // Non-p2p messages with thread_id use thread_id as anchor (stable
+        // topic identifier), NOT root_id (which is for reply semantics).
         assert_eq!(
             decide_lark_routing(
                 "msg-1",
@@ -15476,8 +17045,10 @@ mod tests {
                 Some("real-topic-root"),
                 Some("omt_topic")
             ),
-            (SessionScope::Thread, "real-topic-root")
+            (SessionScope::Thread, "omt_topic")
         );
+        // Group without thread_id stays Chat-scoped, even with root_id
+        // (root_id alone is a quote reply, not a topic signal).
         assert_eq!(
             decide_lark_routing(
                 "msg-1",
@@ -15492,13 +17063,17 @@ mod tests {
 
     #[test]
     fn decide_lark_routing_keeps_p2p_and_topic_chats_thread_scoped() {
+        // p2p always Thread-scoped with message_id anchor
         assert_eq!(
             decide_lark_routing("msg-dm", "chat-dm", Some("p2p"), None, None),
             (SessionScope::Thread, "msg-dm")
         );
+        // chat_type="topic" is NOT a real Feishu receive_v1 field.
+        // Without thread_id, it stays Chat-scoped (topic detection
+        // happens later via get_lark_chat_mode()).
         assert_eq!(
             decide_lark_routing("msg-topic", "chat-topic", Some("topic"), None, None),
-            (SessionScope::Thread, "msg-topic")
+            (SessionScope::Chat, "chat-topic")
         );
     }
 
@@ -15734,19 +17309,74 @@ mod tests {
         session.scope = SessionScope::Thread;
         session.chat_id = "chat-1".to_string();
         session.root_message_id = "root-1".to_string();
+        session.thread_id = Some("thread-1".to_string());
+        // Thread scope matches on thread_id
         assert!(session_anchor_matches(
-            &session, "app-1", "chat-1", "root-1"
+            &session, "app-1", "chat-1", "thread-1"
         ));
         assert!(!session_anchor_matches(
-            &session, "app-1", "chat-1", "root-9"
+            &session, "app-1", "chat-1", "thread-9"
         ));
 
         session.scope = SessionScope::Chat;
+        // Chat scope matches on chat_id only
         assert!(session_anchor_matches(
-            &session, "app-1", "chat-1", "root-1"
+            &session, "app-1", "chat-1", "any-anchor"
         ));
         assert!(!session_anchor_matches(
-            &session, "app-1", "chat-9", "root-1"
+            &session, "app-1", "chat-9", "any-anchor"
+        ));
+    }
+
+    #[test]
+    fn session_anchor_matches_p2p_falls_back_to_root_message_id() {
+        // p2p first message session: Thread scope, thread_id=None,
+        // root_message_id=message_id.  A follow-up p2p message with
+        // root_id=message_id should match via the root_message_id fallback.
+        let mut session = make_session("p2p-sess");
+        session.lark_app_id = "app-1".to_string();
+        session.status = SessionStatus::Active;
+        session.scope = SessionScope::Thread;
+        session.chat_id = "dm-chat".to_string();
+        session.chat_type = Some("p2p".to_string());
+        session.root_message_id = "first-msg".to_string();
+        session.thread_id = None;
+
+        // Follow-up with root_id=first-msg matches via root_message_id fallback.
+        assert!(session_anchor_matches(
+            &session, "app-1", "dm-chat", "first-msg"
+        ));
+        // Different root_id does NOT match.
+        assert!(!session_anchor_matches(
+            &session, "app-1", "dm-chat", "other-msg"
+        ));
+        // Different chat_id does NOT match.
+        assert!(!session_anchor_matches(
+            &session, "app-1", "other-chat", "first-msg"
+        ));
+
+        // After thread_id is backfilled, root_message_id fallback STILL works.
+        // This is critical: p2p routing prefers root_id over thread_id, so
+        // follow-ups that carry both root_id + thread_id will have anchor=root_id,
+        // which must match root_message_id even though thread_id is now Some.
+        session.thread_id = Some("omt_thread".to_string());
+        assert!(session_anchor_matches(
+            &session, "app-1", "dm-chat", "first-msg"
+        ));
+        // thread_id matching also works.
+        assert!(session_anchor_matches(
+            &session, "app-1", "dm-chat", "omt_thread"
+        ));
+        // A bogus anchor matches neither.
+        assert!(!session_anchor_matches(
+            &session, "app-1", "dm-chat", "bogus"
+        ));
+
+        // Non-p2p session with thread_id=None should NOT fall back to
+        // root_message_id (only p2p sessions get the fallback).
+        session.chat_type = Some("group".to_string());
+        assert!(!session_anchor_matches(
+            &session, "app-1", "dm-chat", "first-msg"
         ));
     }
 
@@ -16053,6 +17683,7 @@ mod tests {
 
     #[test]
     fn decide_lark_routing_with_thread_id_overrides_chat_type() {
+        // Non-p2p with thread_id → Thread scope, anchor = thread_id
         assert_eq!(
             decide_lark_routing(
                 "msg-1",
@@ -16061,7 +17692,293 @@ mod tests {
                 Some("root-1"),
                 Some("thread-1")
             ),
-            (SessionScope::Thread, "root-1")
+            (SessionScope::Thread, "thread-1")
+        );
+    }
+
+    #[test]
+    fn decide_lark_routing_p2p_uses_root_id_as_anchor_for_follow_ups() {
+        // p2p with root_id && thread_id: root_id takes priority so the
+        // follow-up can match the first message's session via root_message_id.
+        // When root_id == message_id (self-root), the result is the same
+        // as using message_id.
+        assert_eq!(
+            decide_lark_routing(
+                "msg-1",
+                "chat-dm",
+                Some("p2p"),
+                Some("msg-1"),
+                Some("omt_thread")
+            ),
+            (SessionScope::Thread, "msg-1")
+        );
+        // When root_id != message_id (true reply/thread follow-up), use
+        // root_id so it can match the first message's root_message_id.
+        assert_eq!(
+            decide_lark_routing(
+                "msg-2",
+                "chat-dm",
+                Some("p2p"),
+                Some("first-msg"),
+                Some("omt_thread")
+            ),
+            (SessionScope::Thread, "first-msg")
+        );
+        // p2p with root_id but no thread_id: still use root_id as anchor.
+        assert_eq!(
+            decide_lark_routing(
+                "msg-3",
+                "chat-dm",
+                Some("p2p"),
+                Some("first-msg"),
+                None
+            ),
+            (SessionScope::Thread, "first-msg")
+        );
+    }
+
+    #[test]
+    fn decide_lark_routing_p2p_with_thread_id_no_root_id_uses_thread_id() {
+        // p2p message with thread_id but no root_id: use thread_id so events
+        // after thread_id backfill can still match.
+        assert_eq!(
+            decide_lark_routing(
+                "msg-4",
+                "chat-dm",
+                Some("p2p"),
+                None,
+                Some("omt_thread")
+            ),
+            (SessionScope::Thread, "omt_thread")
+        );
+    }
+
+    #[test]
+    fn decide_lark_routing_group_with_thread_id_uses_thread_id_as_anchor() {
+        // Non-p2p with thread_id uses thread_id as anchor, not root_id.
+        // The thread_id (omt_*) is the stable topic identifier.
+        assert_eq!(
+            decide_lark_routing(
+                "msg-2",
+                "chat-a",
+                Some("group"),
+                Some("topic-root"),
+                Some("omt_topic")
+            ),
+            (SessionScope::Thread, "omt_topic")
+        );
+    }
+
+    #[test]
+    fn decide_lark_routing_topic_chat_type_without_thread_id_stays_chat_scoped() {
+        // chat_type="topic" is NOT a real Feishu receive_v1 field.
+        // Without thread_id, root_id alone is not a topic signal.
+        // Topic detection happens later via get_lark_chat_mode().
+        // The initial routing stays Chat-scoped.
+        assert_eq!(
+            decide_lark_routing(
+                "msg-2",
+                "topic-chat-1",
+                Some("topic"),
+                Some("first-topic-msg"),
+                None
+            ),
+            (SessionScope::Chat, "topic-chat-1")
+        );
+    }
+
+    #[test]
+    fn decide_lark_routing_topic_chat_type_without_metadata_stays_chat_scoped() {
+        // chat_type="topic" is NOT a real Feishu receive_v1 field.
+        // Without thread_id or root_id, stays Chat-scoped.
+        // Topic detection happens later via get_lark_chat_mode().
+        assert_eq!(
+            decide_lark_routing("msg-1", "topic-chat-2", Some("topic"), None, None),
+            (SessionScope::Chat, "topic-chat-2")
+        );
+    }
+
+    #[test]
+    fn decide_lark_dispatch_creates_new_session_for_different_thread_id() {
+        // Two messages in the same chat but with different thread_ids
+        // must create separate sessions.
+        let mut session_a = make_session("topic-a");
+        session_a.status = SessionStatus::Active;
+        session_a.closed_at = None;
+        session_a.scope = SessionScope::Thread;
+        session_a.chat_id = "multi-topic-chat".to_string();
+        session_a.thread_id = Some("omt_topic_a".to_string());
+
+        let sessions = HashMap::from([(session_a.session_id.clone(), session_a)]);
+
+        // Message for a DIFFERENT topic thread in the same chat
+        let parsed = ParsedLarkInboundMessage {
+            event_id: "evt-diff-thread".to_string(),
+            message_id: "msg-topic-b".to_string(),
+            chat_id: "multi-topic-chat".to_string(),
+            chat_type: Some("topic".to_string()),
+            sender_type: Some("user".to_string()),
+            scope: SessionScope::Thread,
+            anchor: "omt_topic_b".to_string(),
+            text: "different topic".to_string(),
+            sender_open_id: Some("ou_user".to_string()),
+            mentions: Vec::new(),
+            parent_id: None,
+            root_id: Some("topic-b-root".to_string()),
+            thread_id: Some("omt_topic_b".to_string()),
+        };
+
+        let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
+        assert!(
+            existing.is_none(),
+            "different thread_id must create a new session"
+        );
+        assert_eq!(outcome, LarkEventOutcome::CreateSession);
+    }
+
+    #[test]
+    fn decide_lark_dispatch_p2p_follow_up_reuses_session_by_root_id() {
+        // First p2p message: creates a session with root_message_id="msg-p2p-1",
+        // thread_id=None, chat_type="p2p".
+        let mut p2p_session = make_session("p2p-first");
+        p2p_session.status = SessionStatus::Active;
+        p2p_session.closed_at = None;
+        p2p_session.scope = SessionScope::Thread;
+        p2p_session.chat_id = "dm-chat".to_string();
+        p2p_session.chat_type = Some("p2p".to_string());
+        p2p_session.root_message_id = "msg-p2p-1".to_string();
+        p2p_session.thread_id = None;
+
+        let sessions = HashMap::from([(p2p_session.session_id.clone(), p2p_session)]);
+
+        // Follow-up p2p message in the same thread: carries root_id pointing to
+        // the first message.  Routing uses root_id as anchor, and
+        // session_anchor_matches falls back to root_message_id because
+        // thread_id is None.
+        let parsed = ParsedLarkInboundMessage {
+            event_id: "evt-p2p-2".to_string(),
+            message_id: "msg-p2p-2".to_string(),
+            chat_id: "dm-chat".to_string(),
+            chat_type: Some("p2p".to_string()),
+            sender_type: Some("user".to_string()),
+            scope: SessionScope::Thread,
+            anchor: "msg-p2p-1".to_string(), // root_id from routing
+            text: "follow-up message".to_string(),
+            sender_open_id: Some("ou_user".to_string()),
+            mentions: Vec::new(),
+            parent_id: Some("msg-p2p-1".to_string()),
+            root_id: Some("msg-p2p-1".to_string()),
+            thread_id: None,
+        };
+
+        let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
+        assert_eq!(
+            existing.as_ref().map(|s| s.session_id.as_str()),
+            Some("p2p-first"),
+            "p2p follow-up with root_id should reuse the existing session"
+        );
+        assert_eq!(outcome, LarkEventOutcome::ReuseSession);
+    }
+
+    #[test]
+    fn decide_lark_dispatch_p2p_after_thread_id_backfill_still_reuses_by_root_id() {
+        // After thread_id has been backfilled, a follow-up with root_id
+        // (which routes to anchor=root_id) must still match via the
+        // root_message_id fallback, NOT get blocked by thread_id mismatch.
+        let mut p2p_session = make_session("p2p-backfilled");
+        p2p_session.status = SessionStatus::Active;
+        p2p_session.closed_at = None;
+        p2p_session.scope = SessionScope::Thread;
+        p2p_session.chat_id = "dm-chat".to_string();
+        p2p_session.chat_type = Some("p2p".to_string());
+        p2p_session.root_message_id = "first-msg".to_string();
+        // thread_id was backfilled from a previous follow-up
+        p2p_session.thread_id = Some("omt_thread".to_string());
+
+        let sessions = HashMap::from([(p2p_session.session_id.clone(), p2p_session)]);
+
+        // Another follow-up in the same thread: carries both root_id and
+        // thread_id.  Routing prefers root_id → anchor="first-msg".
+        // Must match via root_message_id fallback even though thread_id is
+        // already Some (the old thread_id.is_none() guard would block this).
+        let parsed = ParsedLarkInboundMessage {
+            event_id: "evt-p2p-3".to_string(),
+            message_id: "msg-p2p-3".to_string(),
+            chat_id: "dm-chat".to_string(),
+            chat_type: Some("p2p".to_string()),
+            sender_type: Some("user".to_string()),
+            scope: SessionScope::Thread,
+            anchor: "first-msg".to_string(), // root_id from routing
+            text: "another follow-up".to_string(),
+            sender_open_id: Some("ou_user".to_string()),
+            mentions: Vec::new(),
+            parent_id: Some("msg-p2p-2".to_string()),
+            root_id: Some("first-msg".to_string()),
+            thread_id: Some("omt_thread".to_string()),
+        };
+
+        let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
+        assert_eq!(
+            existing.as_ref().map(|s| s.session_id.as_str()),
+            Some("p2p-backfilled"),
+            "p2p follow-up with root_id must reuse session even after thread_id backfill"
+        );
+        assert_eq!(outcome, LarkEventOutcome::ReuseSession);
+    }
+
+    #[test]
+    fn decide_lark_dispatch_p2p_new_message_does_not_reuse_session() {
+        // A fresh p2p message (no root_id/thread_id) must not reuse an
+        // existing p2p session, even if it's in the same p2p chat.
+        let mut p2p_session = make_session("p2p-existing");
+        p2p_session.status = SessionStatus::Active;
+        p2p_session.closed_at = None;
+        p2p_session.scope = SessionScope::Thread;
+        p2p_session.chat_id = "dm-chat".to_string();
+        p2p_session.chat_type = Some("p2p".to_string());
+        p2p_session.root_message_id = "old-msg".to_string();
+        p2p_session.thread_id = None;
+
+        let sessions = HashMap::from([(p2p_session.session_id.clone(), p2p_session)]);
+
+        let parsed = ParsedLarkInboundMessage {
+            event_id: "evt-p2p-new".to_string(),
+            message_id: "new-msg".to_string(),
+            chat_id: "dm-chat".to_string(),
+            chat_type: Some("p2p".to_string()),
+            sender_type: Some("user".to_string()),
+            scope: SessionScope::Thread,
+            anchor: "new-msg".to_string(), // message_id as anchor (no root_id)
+            text: "brand new message".to_string(),
+            sender_open_id: Some("ou_user".to_string()),
+            mentions: Vec::new(),
+            parent_id: None,
+            root_id: None,
+            thread_id: None,
+        };
+
+        let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
+        assert!(
+            existing.is_none(),
+            "p2p new message without root_id/thread_id must not reuse old session"
+        );
+        assert_eq!(outcome, LarkEventOutcome::CreateSession);
+    }
+
+    #[test]
+    fn decide_lark_routing_group_with_root_id_but_no_thread_id_stays_chat_scoped() {
+        // For group chats, root_id without thread_id is a quote-bubble
+        // reply, not a topic message.  Must stay Chat-scoped so the
+        // topic routing is not accidentally applied.
+        assert_eq!(
+            decide_lark_routing(
+                "msg-1",
+                "group-chat-1",
+                Some("group"),
+                Some("some-root"),
+                None
+            ),
+            (SessionScope::Chat, "group-chat-1")
         );
     }
 
@@ -16233,10 +18150,19 @@ mod tests {
                 handle_lark_event_payload(state.clone(), app_id.to_string(), payload, None).await;
             assert!(result.is_ok());
 
-            let sessions = state.sessions.lock().await;
+            // With directory selection, new sessions are NOT created immediately.
+            // Instead a dir-select card is sent. Verify the pending entry was stored
+            // with the correct Thread scope.
+            let pending_creates = state.pending_creates.lock().await;
             assert!(
-                sessions.values().any(|s| s.scope == SessionScope::Thread),
-                "session should be created with Thread scope when API detects topic group"
+                !pending_creates.is_empty(),
+                "pending create entry should be stored when no active session exists"
+            );
+            let pending = pending_creates.values().next().unwrap();
+            assert_eq!(
+                pending.scope,
+                SessionScope::Thread,
+                "pending create should have Thread scope when API detects topic group"
             );
 
             maybe_remove_dir(&paths.root().to_path_buf());
@@ -16687,9 +18613,10 @@ mod tests {
         assert_eq!(reg.total_activities(), 1);
 
         // Cancel the run.
-        let outcome = crate::workflow_commands::cancel_run(&state, run_id, Some("test".to_string()))
-            .await
-            .expect("cancel");
+        let outcome =
+            crate::workflow_commands::cancel_run(&state, run_id, Some("test".to_string()))
+                .await
+                .expect("cancel");
 
         assert!(outcome.ok);
         assert_eq!(outcome.status, "cancelled");
@@ -16710,8 +18637,8 @@ mod tests {
     #[tokio::test]
     async fn cold_scan_discovers_non_terminal_and_skips_terminal_runs() {
         use beam_core::{
-            BootstrapWorkflowRunInput, EventDraft, EventLog, WorkflowActor,
-            bootstrap_workflow_run, scan_cold_workflow_runs,
+            BootstrapWorkflowRunInput, EventDraft, EventLog, WorkflowActor, bootstrap_workflow_run,
+            scan_cold_workflow_runs,
         };
 
         let paths = temp_paths("cold-scan-disc");
@@ -16765,10 +18692,16 @@ mod tests {
         }
 
         let (runs, stats) = scan_cold_workflow_runs(&paths, lark_app_id).await.unwrap();
-        assert_eq!(stats.discovered, 1, "only the non-terminal run should be discovered");
+        assert_eq!(
+            stats.discovered, 1,
+            "only the non-terminal run should be discovered"
+        );
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].run_id, "run-nonterm");
-        assert!(stats.skipped.is_empty(), "no runs should be skipped with errors");
+        assert!(
+            stats.skipped.is_empty(),
+            "no runs should be skipped with errors"
+        );
 
         maybe_remove_dir(&paths.root().to_path_buf());
     }
@@ -16810,10 +18743,16 @@ mod tests {
         crate::run_workflow_runtime_once(&state, run_id, def).await;
 
         // Verify we have an open wait (not terminal).
-        let sn = read_run_snapshot(&paths.workflow_run_dir(run_id)).await.unwrap().unwrap();
+        let sn = read_run_snapshot(&paths.workflow_run_dir(run_id))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(!sn.dangling.waits.is_empty(), "should have an open wait");
         assert!(
-            !matches!(sn.run.status, RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled),
+            !matches!(
+                sn.run.status,
+                RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled
+            ),
             "run should NOT be terminal"
         );
 
@@ -16824,13 +18763,19 @@ mod tests {
 
         // After cold attach, the wait should still be open and the run
         // should still be non-terminal.
-        let sn2 = read_run_snapshot(&paths.workflow_run_dir(run_id)).await.unwrap().unwrap();
+        let sn2 = read_run_snapshot(&paths.workflow_run_dir(run_id))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(
             !sn2.dangling.waits.is_empty(),
             "open wait should still be dangling after cold attach"
         );
         assert!(
-            !matches!(sn2.run.status, RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled),
+            !matches!(
+                sn2.run.status,
+                RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled
+            ),
             "run should NOT be terminal after cold attach with open wait"
         );
 
@@ -16843,8 +18788,7 @@ mod tests {
     #[tokio::test]
     async fn cold_attach_recovery_materializes_resolved_wait_terminal() {
         use beam_core::{
-            BootstrapWorkflowRunInput, EventDraft, EventLog, WorkflowActor,
-            bootstrap_workflow_run,
+            BootstrapWorkflowRunInput, EventDraft, EventLog, WorkflowActor, bootstrap_workflow_run,
         };
 
         let paths = temp_paths("cold-attach-rec");
@@ -16919,7 +18863,10 @@ mod tests {
 
         // Verify the snapshot now has a wait resolution but no terminal for
         // the activity — i.e. `dangling.wait_resolutions` is non-empty.
-        let sn_pre = beam_core::read_run_snapshot(&paths.workflow_run_dir(run_id)).await.unwrap().unwrap();
+        let sn_pre = beam_core::read_run_snapshot(&paths.workflow_run_dir(run_id))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(
             sn_pre.dangling.waits.is_empty(),
             "after resolution, waits should be cleared"
@@ -16936,23 +18883,29 @@ mod tests {
 
         // After recovery, the wait resolution should be cleared and the
         // activity should have been terminalized.
-        let sn_post = beam_core::read_run_snapshot(&paths.workflow_run_dir(run_id)).await.unwrap().unwrap();
+        let sn_post = beam_core::read_run_snapshot(&paths.workflow_run_dir(run_id))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(
             sn_post.dangling.wait_resolutions.is_empty(),
             "after recovery, dangling wait resolutions should be cleared"
         );
-        assert!(
-            sn_post.dangling.waits.is_empty(),
-            "no waits should remain"
-        );
+        assert!(sn_post.dangling.waits.is_empty(), "no waits should remain");
 
         // The workflow should have progressed — since this is a single-node
         // workflow and the node has now succeeded, the run should be terminal.
         let terminal = matches!(
             sn_post.run.status,
-            beam_core::RunStatus::Succeeded | beam_core::RunStatus::Failed | beam_core::RunStatus::Cancelled
+            beam_core::RunStatus::Succeeded
+                | beam_core::RunStatus::Failed
+                | beam_core::RunStatus::Cancelled
         );
-        assert!(terminal, "run should be terminal after recovery, got {:?}", sn_post.run.status);
+        assert!(
+            terminal,
+            "run should be terminal after recovery, got {:?}",
+            sn_post.run.status
+        );
 
         maybe_remove_dir(&paths.root().to_path_buf());
     }
