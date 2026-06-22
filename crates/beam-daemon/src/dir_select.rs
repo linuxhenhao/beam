@@ -70,6 +70,13 @@ pub struct PendingCreateSession {
     pub message_id: String,
     pub anchor: String,
     pub scope: SessionScope,
+    /// Feishu thread_id (omt_*), stable topic identifier for session matching.
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    /// Root message ID (from Feishu root_id field) used for reply and quote hint.
+    /// Falls back to message_id when not available.
+    #[serde(default)]
+    pub root_id: Option<String>,
     pub title: String,
     pub text: String,
     pub sender_open_id: Option<String>,
@@ -1825,6 +1832,8 @@ mod tests {
                 message_id: "msg".to_string(),
                 anchor: "anchor".to_string(),
                 scope: SessionScope::Chat,
+                thread_id: None,
+                root_id: None,
                 title: "t".to_string(),
                 text: "".to_string(),
                 sender_open_id: None,

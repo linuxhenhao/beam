@@ -165,4 +165,12 @@ pub struct Session {
     pub disable_cli_bypass: bool,
     #[serde(default)]
     pub initial_prompt: Option<String>,
+    /// Feishu thread_id (omt_*), stable topic identifier.
+    /// Present for topic-group messages and p2p thread follow-ups that carry
+    /// thread metadata.  Used as the session-matching anchor for Thread-scoped
+    /// sessions.  For p2p, thread_id may be backfilled from a follow-up message
+    /// after the initial session is created (first p2p session starts with
+    /// thread_id=None and matches follow-ups via root_message_id).
+    #[serde(default)]
+    pub thread_id: Option<String>,
 }
