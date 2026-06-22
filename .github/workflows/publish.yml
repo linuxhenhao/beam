@@ -1,9 +1,13 @@
 # Stage 3: crates.io publish (gated)
 #
-# Triggered by ANY v* tag push or manual workflow_dispatch.
-# A validate-tag job checks that the tag is a stable semver (vX.Y.Z).
-# Prerelease tags (vX.Y.Z-beta.1, etc.) are skipped without triggering
-# the production environment approval.
+# Triggered by beam-cli-v* tag pushes or manual workflow_dispatch.
+# release-plz defaults to <package>-v<version> tags in multi-crate
+# workspaces. Use beam-cli as the workspace release sentinel so publish
+# runs once per release, not once per crate tag.
+#
+# A validate-tag job checks that the tag is a stable beam-cli semver
+# (beam-cli-vX.Y.Z). Prerelease tags (beam-cli-vX.Y.Z-beta.1, etc.) are
+# skipped without triggering the production environment approval.
 #
 # Publishing is gated behind the "production" GitHub Environment,
 # which can be configured with required reviewers in repo settings.
@@ -21,13 +25,14 @@ name: Publish to crates.io
 on:
   push:
     tags:
-      # Match all v* tags. Validation (stable vs prerelease) happens in the
-      # validate-tag job so prereleases don't trigger a production approval.
-      - 'v*'
+      # Match beam-cli release-plz tags. Validation (stable vs prerelease)
+      # happens in the validate-tag job so prereleases don't trigger a
+      # production approval.
+      - 'beam-cli-v*'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to publish from (e.g. v0.3.0 or refs/tags/v0.3.0)'
+        description: 'Tag to publish from (e.g. beam-cli-v0.3.0 or refs/tags/beam-cli-v0.3.0)'
         required: true
         type: string
 
@@ -47,7 +52,7 @@ jobs:
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             TAG_INPUT="${{ inputs.tag }}"
             # Strip optional refs/tags/ prefix so users can paste
-            # either "v0.3.0" or "refs/tags/v0.3.0".
+            # either "beam-cli-v0.3.0" or "refs/tags/beam-cli-v0.3.0".
             TAG="${TAG_INPUT#refs/tags/}"
           else
             TAG="${GITHUB_REF_NAME}"
@@ -55,7 +60,7 @@ jobs:
 
           echo "Resolved tag: ${TAG}"
 
-          if [[ "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if [[ "${TAG}" =~ ^beam-cli-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "✅ Stable semver tag — publish will proceed"
             echo "stable=true" >> "$GITHUB_OUTPUT"
             echo "ref=refs/tags/${TAG}" >> "$GITHUB_OUTPUT"
