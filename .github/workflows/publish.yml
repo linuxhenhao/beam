@@ -12,8 +12,10 @@
 # Publishing is gated behind the "production" GitHub Environment,
 # which can be configured with required reviewers in repo settings.
 #
-# Publish order (topological): beam-core → beam-daemon → beam-worker → beam-cli
+# Publish order (topological): beam-core -> beam-daemon -> beam-worker -> beam-cli
 # Each crate is dry-run first (with retry), then published (with retry).
+# Already-published crate versions are skipped so a failed publish can be
+# safely re-run from the same tag.
 # A 30 s sleep between crates accommodates crates.io index update delay.
 #
 # Required secrets / settings (see AGENTS.md):
@@ -36,8 +38,12 @@ on:
         required: true
         type: string
 
+concurrency:
+  group: publish-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
-  # ── pre-flight: determine the tag and check it is stable semver ──
+  # Pre-flight: determine the tag and check it is stable semver.
   # This job uses NO environment so prerelease tags never trigger
   # a production-environment approval.
   validate-tag:
@@ -61,15 +67,15 @@ jobs:
           echo "Resolved tag: ${TAG}"
 
           if [[ "${TAG}" =~ ^beam-cli-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "✅ Stable semver tag — publish will proceed"
+            echo "Stable semver tag - publish will proceed"
             echo "stable=true" >> "$GITHUB_OUTPUT"
             echo "ref=refs/tags/${TAG}" >> "$GITHUB_OUTPUT"
           else
-            echo "⏭️  Not a stable semver tag (prerelease or invalid). Skipping crates.io publish."
+            echo "Not a stable semver tag (prerelease or invalid). Skipping crates.io publish."
             echo "stable=false" >> "$GITHUB_OUTPUT"
           fi
 
-  # ── publish crates (only for stable semver tags) ──
+  # Publish crates (only for stable semver tags).
   publish:
     needs: validate-tag
     if: needs.validate-tag.outputs.stable == 'true'
@@ -83,17 +89,56 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
 
+      - name: Run tests before publishing
+        run: cargo test --workspace --no-fail-fast
+
       - name: Publish crates in topological order
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
         run: |
           set -euo pipefail
 
+          crate_version() {
+            local crate="$1"
+            cargo metadata --no-deps --format-version 1 \
+              | python3 -c 'import json, sys; crate = sys.argv[1]; metadata = json.load(sys.stdin); versions = [p["version"] for p in metadata["packages"] if p["name"] == crate]; assert versions, f"crate not found in workspace metadata: {crate}"; print(versions[0])' "${crate}"
+          }
+
+          crate_version_exists() {
+            local crate="$1"
+            local version="$2"
+            local status
+
+            status="$(curl -sS -H 'User-Agent: linuxhenhao/beam publish workflow' -o /dev/null -w '%{http_code}' \
+              "https://crates.io/api/v1/crates/${crate}/${version}")"
+
+            case "${status}" in
+              200)
+                return 0
+                ;;
+              404)
+                return 1
+                ;;
+              *)
+                echo "::error::Failed to check crates.io for ${crate}@${version}; HTTP ${status}"
+                return 2
+                ;;
+            esac
+          }
+
           publish_crate() {
             local crate="$1"
+            local version
             local max_retries=6
 
-            # ── dry-run with retry (handles crates.io index delay) ──
+            version="$(crate_version "${crate}")"
+
+            if crate_version_exists "${crate}" "${version}"; then
+              echo "${crate}@${version} is already published; skipping."
+              return 0
+            fi
+
+            # Dry-run with retry (handles crates.io index delay).
             echo "::group::Dry-run: cargo publish --dry-run -p ${crate}"
             local ok=false
             for i in $(seq 1 ${max_retries}); do
@@ -113,11 +158,16 @@ jobs:
               return 1
             fi
 
-            # ── publish with retry (handles crates.io index delay) ──
+            # Publish with retry (handles crates.io index delay).
             echo "::group::Publishing ${crate}"
             for i in $(seq 1 ${max_retries}); do
               if cargo publish -p "${crate}"; then
-                echo "✓ ${crate} published successfully (attempt ${i})"
+                echo "${crate} published successfully (attempt ${i})"
+                echo "::endgroup::"
+                return 0
+              fi
+              if crate_version_exists "${crate}" "${version}"; then
+                echo "${crate}@${version} is now visible on crates.io; treating publish as successful."
                 echo "::endgroup::"
                 return 0
               fi
@@ -131,7 +181,7 @@ jobs:
             return 1
           }
 
-          # Topological order: leaf → dependent
+          # Topological order: leaf -> dependent
           publish_crate beam-core
           sleep 30   # let crates.io index pick up beam-core
 
