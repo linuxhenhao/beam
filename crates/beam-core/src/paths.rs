@@ -170,4 +170,8 @@ impl BeamPaths {
     pub fn cli_pid_markers_dir(&self) -> PathBuf {
         self.state_dir().join(".beam-cli-pids")
     }
+
+    pub fn zellij_web_tokens_json(&self) -> PathBuf {
+        self.state_dir().join("zellij-web-tokens.json")
+    }
 }

@@ -167,7 +167,7 @@ fn patched_json_escape(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::adapter::home_test_lock;
-    use beam_core::{BackendType, InitConfig, ScreenAnalyzerConfig};
+    use beam_core::{InitConfig, ScreenAnalyzerConfig};
     use std::fs::{self, create_dir_all};
     use std::path::PathBuf;
     use uuid::Uuid;
@@ -182,14 +182,13 @@ mod tests {
             cli_id: "antigravity".to_string(),
             cli_bin: "/bin/agy".to_string(),
             cli_args: vec![],
-            backend_type: BackendType::Tmux,
+
             prompt: "prompt".to_string(),
             resume: false,
             cli_session_id: Some("cli-session".to_string()),
             lark_app_id: "app".to_string(),
             lark_app_secret: "secret".to_string(),
             prompt_turn_id: None,
-            web_port: None,
             owner_open_id: None,
             adopted_from: None,
             adopt_restored_from_metadata: false,

@@ -15,6 +15,7 @@ mod terminal_proxy;
 mod trigger_log;
 mod webhook_key;
 mod webhook_lifecycle;
+mod zellij_web;
 mod workflow_cancellation;
 mod workflow_catalog;
 mod workflow_commands;
@@ -45,8 +46,8 @@ use axum::{
 };
 use base64::Engine;
 use beam_core::{
-    AdoptCandidate, AdoptTmuxSessionRequest, AdoptedFrom, ApiHealth, AttemptResumeRequest,
-    BackendType, BeamPaths, BotConfig, BotSummary, ChatMode, CliUsageLimitState, ColdWorkflowRun,
+    AdoptedFrom, ApiHealth, AttemptResumeRequest,
+    BeamPaths, BotConfig, BotSummary, ChatMode, CliUsageLimitState, ColdWorkflowRun,
     Config, CreateSessionRequest, DaemonOverview, DaemonRuntimeState, DaemonToWorker, DisplayMode,
     EventDraft, EventLog, EventWindowOpts, FinalOutputKind, FinalOutputRequest, InitConfig,
     PendingResponseCardState, RestartSessionRequest, ResumeSessionRequest, RunChatBinding,
@@ -505,19 +506,6 @@ enum AttemptResumeWaitOutcome {
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct TmuxPaneProbe {
-    session_name: String,
-    window_index: String,
-    pane_index: String,
-    pane_id: String,
-    pane_pid: i32,
-    pane_current_command: String,
-    pane_current_path: String,
-    pane_width: Option<u16>,
-    pane_height: Option<u16>,
-}
-
-#[derive(Debug, serde::Deserialize)]
 struct LarkTokenResponse {
     code: i32,
     msg: Option<String>,
@@ -548,7 +536,7 @@ enum LarkTextAction {
     Close,
     Restart,
     Card,
-    AdoptTmux(String),
+    AdoptZellij(String),
     AdoptList,
     PassthroughInput(String),
     ReuseSessionInput,
@@ -560,7 +548,7 @@ enum LarkEventOutcome {
     CloseSession { reply: String },
     RestartSession { reply: String },
     ShowCard { reply: String },
-    AdoptTmux { target: String },
+    AdoptZellij { target: String },
     AdoptList,
     PassthroughInput { text: String },
     ReplyOnly { reply: String },
@@ -1078,13 +1066,11 @@ async fn spawn_worker(state: AppState, session: Session, init: InitConfig) -> Re
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             match serde_json::from_str::<WorkerToDaemon>(&line) {
-                Ok(WorkerToDaemon::Ready { port, token }) => {
+                Ok(WorkerToDaemon::Ready { zellij_session }) => {
                     {
                         let snapshot = {
                             let mut sessions = state.sessions.lock().await;
                             if let Some(entry) = sessions.get_mut(&session_id_for_task) {
-                                entry.web_port = Some(port);
-                                entry.worker_token = Some(token);
                                 entry.terminal_url = Some(format!(
                                     "http://{}:{}/s/{}",
                                     state.external_host,
@@ -1096,6 +1082,25 @@ async fn spawn_worker(state: AppState, session: Session, init: InitConfig) -> Re
                             sessions.clone()
                         };
                         let _ = persist_sessions(&state.paths, &snapshot).await;
+                        // Record the zellij session name for this beam session
+                        if !zellij_session.is_empty() {
+                            info!(
+                                "worker ready: beam session {} -> zellij session {}",
+                                session_id_for_task, zellij_session
+                            );
+                        }
+                        // Mark any attempt resume entries as ready (signal via web_port=1)
+                        {
+                            let mut resumes = state.attempt_resumes.lock().await;
+                            for (_, entry) in resumes.iter_mut() {
+                                if entry.session_id == session_id_for_task
+                                    && entry.web_port.is_none()
+                                {
+                                    entry.web_port = Some(1);
+                                    entry.write_token = Some(String::new());
+                                }
+                            }
+                        }
                     }
                     let _ =
                         patch_lark_streaming_card(&state, &session_id_for_task, "starting").await;
@@ -1438,14 +1443,12 @@ fn build_init_from_session(
         cli_id: session.cli_id.clone().context("session missing cli_id")?,
         cli_bin: session.cli_bin.clone().context("session missing cli_bin")?,
         cli_args: session.cli_args.clone(),
-        backend_type: session.backend_type.clone(),
         prompt: String::new(),
         resume: true,
         cli_session_id: session.cli_session_id.clone(),
         lark_app_id: session.lark_app_id.clone(),
         lark_app_secret,
         prompt_turn_id: None,
-        web_port: None,
         owner_open_id: session.owner_open_id.clone(),
         adopted_from: session.adopted_from.clone(),
         adopt_restored_from_metadata: session.adopted_from.is_some(),
@@ -1492,14 +1495,6 @@ async fn send_worker_message(
         return Err(e.into());
     }
     Ok(())
-}
-
-fn tmux_has_session(target: &str) -> bool {
-    std::process::Command::new("tmux")
-        .args(["has-session", "-t", target])
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
 }
 
 fn zellij_has_session(target: &str) -> bool {
@@ -1871,21 +1866,8 @@ fn join_zellij_adopt_candidates(
         .collect()
 }
 
-fn should_auto_fork_on_restore(backend_type: &BackendType, quiet_restart: bool) -> bool {
-    matches!(backend_type, BackendType::Tmux | BackendType::Zellij) && !quiet_restart
-}
-
-fn session_tmux_target(session: &Session) -> String {
-    session
-        .adopted_from
-        .as_ref()
-        .and_then(|adopted| adopted.tmux_target.clone())
-        .unwrap_or_else(|| {
-            format!(
-                "bmx-{}",
-                &session.session_id[..8.min(session.session_id.len())]
-            )
-        })
+fn should_auto_fork_on_restore(quiet_restart: bool) -> bool {
+    !quiet_restart
 }
 
 fn session_zellij_target(session: &Session) -> String {
@@ -1901,14 +1883,12 @@ fn session_zellij_target(session: &Session) -> String {
         })
 }
 
-fn reconcile_restored_sessions_with<FT, FZ>(
+fn reconcile_restored_sessions_with<FZ>(
     sessions: &mut HashMap<String, Session>,
     quiet_restart: bool,
-    has_tmux_session: FT,
     has_zellij_session: FZ,
 ) -> Vec<Session>
 where
-    FT: Fn(&str) -> bool,
     FZ: Fn(&str) -> bool,
 {
     let mut restore_candidates = Vec::new();
@@ -1916,63 +1896,23 @@ where
         if session.status != SessionStatus::Active {
             continue;
         }
-        let is_live = match session.backend_type {
-            BackendType::Tmux => has_tmux_session(&session_tmux_target(session)),
-            BackendType::Zellij => has_zellij_session(&session_zellij_target(session)),
-            BackendType::Pty => false,
-        };
+        let is_live = has_zellij_session(&session_zellij_target(session));
 
         if is_live {
             session.worker_pid = None;
-            if should_auto_fork_on_restore(&session.backend_type, quiet_restart) {
+            if should_auto_fork_on_restore(quiet_restart) {
                 restore_candidates.push(session.clone());
             } else {
                 session.terminal_url = None;
-                session.worker_token = None;
             }
         } else {
             session.status = SessionStatus::Closed;
             session.closed_at = Some(Utc::now());
             session.worker_pid = None;
             session.terminal_url = None;
-            session.worker_token = None;
         }
     }
     restore_candidates
-}
-
-async fn wait_for_tmux_absent(target: &str, timeout: std::time::Duration) -> bool {
-    let deadline = tokio::time::Instant::now() + timeout;
-    while tokio::time::Instant::now() < deadline {
-        if !tmux_has_session(target) {
-            return true;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    !tmux_has_session(target)
-}
-
-fn probe_tmux_panes() -> Result<Vec<TmuxPaneProbe>> {
-    let format = r##"{"session_name":"#{session_name}","window_index":"#{window_index}","pane_index":"#{pane_index}","pane_id":"#{pane_id}","pane_pid":#{pane_pid},"pane_current_command":"#{pane_current_command}","pane_current_path":"#{pane_current_path}","pane_width":#{pane_width},"pane_height":#{pane_height}}"##;
-    let output = std::process::Command::new("tmux")
-        .args(["list-panes", "-a", "-F", format])
-        .output()
-        .context("failed to list tmux panes")?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "tmux list-panes failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    let stdout =
-        String::from_utf8(output.stdout).context("tmux list-panes output was not utf-8")?;
-    stdout
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            serde_json::from_str::<TmuxPaneProbe>(line).context("failed to parse tmux pane probe")
-        })
-        .collect()
 }
 
 fn lark_base_url() -> String {
@@ -2176,7 +2116,7 @@ fn is_operate_command(text: &str) -> bool {
     matches!(
         text,
         "/close" | "/restart" | "/card" | "/adopt" | "/adopt list"
-    ) || text.starts_with("/adopt tmux ")
+    ) || text.starts_with("/adopt zellij ")
 }
 
 async fn lark_tenant_token(state: &AppState, bot: &BotConfig) -> Result<String> {
@@ -3805,6 +3745,44 @@ fn build_writable_session_card(session: &Session, write_url: &str) -> String {
     .to_string()
 }
 
+fn build_readonly_link_card(session: &Session, ro_url: &str, ro_token: &str) -> String {
+    let title = session
+        .cli_id
+        .clone()
+        .unwrap_or_else(|| session.session_id.clone());
+    let header = format!("Read-only terminal · {}", if session.title.trim().is_empty() { &title } else { &session.title });
+    serde_json::json!({
+        "config": { "wide_screen_mode": true },
+        "header": {
+            "title": { "tag": "plain_text", "content": header },
+            "template": "blue"
+        },
+        "elements": [
+            {
+                "tag": "markdown",
+                "content": format!("**Read-only access**\n\nToken: `{}`\n\nUse this token to log in to the terminal in read-only mode.", ro_token)
+            },
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": { "tag": "plain_text", "content": "Open read-only terminal" },
+                        "type": "primary",
+                        "multi_url": {
+                            "url": ro_url,
+                            "pc_url": ro_url,
+                            "android_url": ro_url,
+                            "ios_url": ro_url,
+                        }
+                    }
+                ]
+            }
+        ]
+    })
+    .to_string()
+}
+
 fn next_display_mode(current: Option<DisplayMode>) -> DisplayMode {
     match current.unwrap_or(DisplayMode::Hidden) {
         DisplayMode::Hidden => DisplayMode::Screenshot,
@@ -3917,13 +3895,27 @@ fn build_export_text_reply(session: &Session) -> String {
     out.trim_end().to_string()
 }
 
+/// Load zellij web tokens from the standard paths location (for card rendering).
+/// Returns None if the file doesn't exist or can't be parsed.
+fn load_zellij_web_tokens_for_card() -> Option<zellij_web::ZellijWebTokens> {
+    let paths = BeamPaths::discover().ok()?;
+    zellij_web::load_zellij_web_tokens(&paths.zellij_web_tokens_json()).ok().flatten()
+}
+
 fn build_streaming_card(session: &Session, status: &str) -> String {
     let title = if session.title.trim().is_empty() {
         session.session_id.clone()
     } else {
         session.title.clone()
     };
-    let terminal = session.terminal_url.clone().unwrap_or_default();
+    let mut terminal = session.terminal_url.clone().unwrap_or_default();
+    // Attach read-only token if available
+    let zellij_tokens = load_zellij_web_tokens_for_card();
+    let ro_token = zellij_tokens.as_ref().and_then(|t| t.read_only_token.as_deref()).filter(|t| !t.is_empty());
+    let ro_token_str = ro_token.unwrap_or("");
+    if !ro_token_str.is_empty() && !terminal.is_empty() {
+        terminal = format!("{}?token={}", terminal, ro_token_str);
+    }
     let effective_status = if status == "limited"
         && session
             .usage_limit
@@ -3936,13 +3928,18 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
     };
     let display_mode = session.display_mode.unwrap_or(DisplayMode::Hidden);
     let card_nonce = session.stream_card_nonce.clone();
+    let token_hint = if ro_token_str.is_empty() {
+        String::new()
+    } else {
+        format!("\nRead-only token: `{}` (use Get write link for write access)", ro_token_str)
+    };
     let mut elements = vec![
         serde_json::json!({
             "tag": "markdown",
             "content": if terminal.is_empty() {
                 format!("session `{}`", session.session_id)
             } else {
-                format!("session `{}`\n[Open terminal]({})", session.session_id, terminal)
+                format!("session `{}`\n[Open terminal]({}){}", session.session_id, terminal, token_hint)
             }
         }),
         serde_json::json!({ "tag": "hr" }),
@@ -4016,6 +4013,21 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
             "ios_url": terminal,
         },
     }));
+    // Get read-only link button (shows the read-only token URL)
+    if !ro_token_str.is_empty() {
+        actions.push(serde_json::json!({
+            "tag": "button",
+            "text": { "tag": "plain_text", "content": "Get read-only link" },
+            "type": "default",
+            "value": {
+                "action": "get_read_only_link",
+                "root_id": session.root_message_id,
+                "session_id": session.session_id,
+                "cli_id": session.cli_id.clone().unwrap_or_else(|| "cli".to_string()),
+                "card_nonce": action_nonce.clone(),
+            }
+        }));
+    }
     actions.push(serde_json::json!({
         "tag": "button",
         "text": { "tag": "plain_text", "content": "Get write link" },
@@ -4518,8 +4530,8 @@ fn classify_lark_text_action(text: &str, has_existing_session: bool) -> LarkText
     if text == "/card" {
         return LarkTextAction::Card;
     }
-    if let Some(rest) = text.strip_prefix("/adopt tmux ") {
-        return LarkTextAction::AdoptTmux(rest.trim().to_string());
+    if let Some(rest) = text.strip_prefix("/adopt zellij ") {
+        return LarkTextAction::AdoptZellij(rest.trim().to_string());
     }
     if text == "/adopt" || text == "/adopt list" {
         return LarkTextAction::AdoptList;
@@ -4558,15 +4570,26 @@ fn build_adopt_already_attached_reply(session: &Session) -> String {
     )
 }
 
-fn build_adopt_tmux_result_reply(result: Result<&SessionSummary, &str>) -> String {
+fn build_adopt_zellij_result_reply(result: Result<&SessionSummary, &str>) -> String {
     match result {
         Ok(session) => format!("adopted {}", session.session_id),
         Err(err) => format!("adopt failed: {}", err),
     }
 }
 
-fn build_adopt_list_error_reply(err: &str) -> String {
-    format!("adopt list failed: {}", err)
+fn build_zellij_adopt_list_reply(items: &[ZellijAdoptCandidate]) -> String {
+    if items.is_empty() {
+        return "no zellij sessions available for adoption".to_string();
+    }
+    let mut out = String::from("Available zellij sessions:\n");
+    for item in items {
+        out.push_str(&format!(
+            "  {}:{}  {}  {}\n",
+            item.zellij_session, item.zellij_pane_id, item.title, item.cwd
+        ));
+    }
+    out.push_str("\n/adopt zellij <session>:<pane_id>");
+    out
 }
 
 fn build_closed_session_reply(session: &Session) -> String {
@@ -5190,13 +5213,13 @@ fn decide_lark_event_outcome(
             }
             .to_string(),
         },
-        LarkTextAction::AdoptTmux(target) => {
+        LarkTextAction::AdoptZellij(target) => {
             if let Some(session) = existing.filter(|session| session.adopted_from.is_some()) {
                 LarkEventOutcome::ReplyOnly {
                     reply: build_adopt_already_attached_reply(session),
                 }
             } else {
-                LarkEventOutcome::AdoptTmux { target }
+                LarkEventOutcome::AdoptZellij { target }
             }
         }
         LarkTextAction::AdoptList => {
@@ -5322,25 +5345,6 @@ async fn handle_introduce_command(
         .ok_or_else(|| (StatusCode::NOT_FOUND, "bot config not found".to_string()))?;
     let _ = lark_reply_message(state, &bot, message_id, &reply).await;
     Ok(true)
-}
-
-fn build_adopt_list_reply(items: &[TmuxPaneProbe]) -> String {
-    let listing = items
-        .iter()
-        .filter(|pane| !pane.session_name.starts_with("bmx-"))
-        .map(|pane| {
-            format!(
-                "{}:{}.{} {}",
-                pane.session_name, pane.window_index, pane.pane_index, pane.pane_current_command
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    if listing.is_empty() {
-        "no tmux panes".to_string()
-    } else {
-        listing
-    }
 }
 
 fn parse_lark_inbound_message(
@@ -5550,7 +5554,6 @@ struct SessionCreateSpec {
     cli_id: String,
     cli_bin: String,
     cli_args: Vec<String>,
-    backend_type: BackendType,
     prompt: String,
     lark_app_id: String,
     owner_open_id: Option<String>,
@@ -5576,15 +5579,12 @@ async fn create_session_internal(
         created_at: Utc::now(),
         closed_at: None,
         working_dir: Some(spec.working_dir.clone()),
-        web_port: None,
-        worker_token: None,
         lark_app_id: spec.lark_app_id.clone(),
         owner_open_id: spec.owner_open_id.clone(),
         worker_pid: None,
         cli_id: Some(spec.cli_id.clone()),
         cli_bin: Some(spec.cli_bin.clone()),
         cli_args: spec.cli_args.clone(),
-        backend_type: spec.backend_type.clone(),
         cli_session_id: None,
         last_cli_input: None,
         stream_card_id: None,
@@ -5630,7 +5630,6 @@ async fn create_session_internal(
         cli_id: spec.cli_id,
         cli_bin: spec.cli_bin,
         cli_args: spec.cli_args,
-        backend_type: spec.backend_type,
         prompt: spec.prompt.clone(),
         resume: false,
         cli_session_id: None,
@@ -5641,7 +5640,6 @@ async fn create_session_internal(
             .unwrap_or_default(),
         lark_app_id: spec.lark_app_id,
         prompt_turn_id,
-        web_port: None,
         owner_open_id: spec.owner_open_id,
         adopted_from: spec.adopted_from,
         adopt_restored_from_metadata: false,
@@ -6278,40 +6276,45 @@ async fn handle_lark_event_payload(
             }
             return Ok(Json(serde_json::json!({ "ok": true })));
         }
-        LarkEventOutcome::AdoptTmux { target } => {
-            let title = format!("adopt {}", target);
-            let result = adopt_tmux_session(
+        LarkEventOutcome::AdoptZellij { target } => {
+            // Parse "session:pane_id" or just "session"
+            let (zellij_session, zellij_pane_id) = match target.split_once(':') {
+                Some((s, p)) => (s.to_string(), p.to_string()),
+                None => (target.clone(), "terminal_0".to_string()),
+            };
+            let result = adopt_zellij_session(
                 State(state.clone()),
-                Json(AdoptTmuxSessionRequest {
-                    title: Some(title),
-                    tmux_target: target.clone(),
+                Json(AdoptZellijSessionRequest {
+                    zellij_session,
+                    zellij_pane_id,
                     cli_id: bot.cli_id.clone(),
                     cli_bin: bot.cli_bin.clone().unwrap_or_else(|| bot.cli_id.clone()),
+                    title: Some(format!("adopt {}", target)),
+                    cwd: String::new(),
+                    pane_cols: None,
+                    pane_rows: None,
                 }),
             )
             .await;
             match result {
                 Ok((_, Json(session))) => {
-                    let reply = build_adopt_tmux_result_reply(Ok(&session));
+                    let reply = build_adopt_zellij_result_reply(Ok(&session));
                     let _ = lark_reply_message(&state, &bot, message_id, &reply).await;
                 }
                 Err((_, err)) => {
-                    let reply = build_adopt_tmux_result_reply(Err(err.as_str()));
+                    let reply = build_adopt_zellij_result_reply(Err(err.as_str()));
                     let _ = lark_reply_message(&state, &bot, message_id, &reply).await;
                 }
             }
             return Ok(Json(serde_json::json!({ "ok": true })));
         }
         LarkEventOutcome::AdoptList => {
-            match probe_tmux_panes() {
-                Ok(items) => {
-                    let body = build_adopt_list_reply(&items);
-                    let _ = lark_reply_message(&state, &bot, message_id, &body).await;
-                }
-                Err(err) => {
-                    let reply = build_adopt_list_error_reply(&err.to_string());
-                    let _ = lark_reply_message(&state, &bot, message_id, &reply).await;
-                }
+            let items = discover_zellij_adopt_candidates();
+            if items.is_empty() {
+                let _ = lark_reply_message(&state, &bot, message_id, "no zellij sessions available for adoption").await;
+            } else {
+                let body = build_zellij_adopt_list_reply(&items);
+                let _ = lark_reply_message(&state, &bot, message_id, &body).await;
             }
             return Ok(Json(serde_json::json!({ "ok": true })));
         }
@@ -6498,7 +6501,6 @@ async fn handle_lark_event_payload(
                 created_at: Utc::now().timestamp_millis(),
                 cli_id: bot.cli_id.clone(),
                 cli_bin: bot.cli_bin.clone().unwrap_or_else(|| bot.cli_id.clone()),
-                backend_type: bot.backend_type.clone().unwrap_or(BackendType::Tmux),
                 root_working_dir: root_working_dir.clone(),
                 candidate_dirs: candidate_dirs.clone(),
                 card_message_id: None,
@@ -7149,7 +7151,6 @@ async fn handle_lark_card_action_payload(
                 cli_id: pending.cli_id.clone(),
                 cli_bin: pending.cli_bin.clone(),
                 cli_args: Vec::new(),
-                backend_type: pending.backend_type.clone(),
                 prompt,
                 lark_app_id: pending.lark_app_id.clone(),
                 owner_open_id: pending.sender_open_id.clone(),
@@ -7532,6 +7533,82 @@ async fn handle_lark_card_action_payload(
                 ))),
             }
         }
+        "get_read_only_link" => {
+            let session_snapshot = {
+                let sessions = state.sessions.lock().await;
+                sessions.get(&session_id).cloned()
+            };
+            let Some(session) = session_snapshot else {
+                return Ok(Json(build_lark_card_action_toast(
+                    "error",
+                    "session not found",
+                )));
+            };
+            let zellij_tokens = load_zellij_web_tokens_for_card();
+            let ro_token = zellij_tokens
+                .as_ref()
+                .and_then(|t| t.read_only_token.as_deref())
+                .filter(|t| !t.is_empty());
+            let Some(ro_token) = ro_token else {
+                return Ok(Json(build_lark_card_action_toast(
+                    "error",
+                    "terminal not ready",
+                )));
+            };
+            let ro_url = format!(
+                "http://{}:{}/s/{}?token={}",
+                state.external_host,
+                state.config.web.proxy_base_port,
+                session.session_id,
+                ro_token
+            );
+            let card_json = build_readonly_link_card(&session, &ro_url, ro_token);
+            if session.lark_app_id != "local" {
+                if let Some(operator_open_id) = action.operator_open_id.as_deref() {
+                    let delivered = match private_card_delivery(session.chat_type.as_deref()) {
+                        PrivateCardDelivery::Ephemeral => {
+                            lark_send_ephemeral_card(
+                                &state,
+                                &bot,
+                                &session.chat_id,
+                                operator_open_id,
+                                &card_json,
+                            )
+                            .await
+                        }
+                        PrivateCardDelivery::DirectMessage => {
+                            lark_send_open_id_card(&state, &bot, operator_open_id, &card_json).await
+                        }
+                    };
+                    return match delivered {
+                        Ok(_) => Ok(Json(build_lark_card_action_toast(
+                            "success",
+                            "read-only link ready",
+                        ))),
+                        Err(err) => Ok(Json(build_lark_card_action_toast(
+                            "error",
+                            &format!("link delivery failed: {}", err),
+                        ))),
+                    };
+                }
+                return Ok(Json(build_lark_card_action_toast(
+                    "error",
+                    "link delivery failed: missing operator",
+                )));
+            }
+            let card =
+                serde_json::from_str::<Value>(&card_json).unwrap_or_else(|_| serde_json::json!({}));
+            Ok(Json(serde_json::json!({
+                "toast": {
+                    "type": "success",
+                    "content": "read-only link ready",
+                },
+                "card": {
+                    "type": "raw",
+                    "data": card,
+                }
+            })))
+        }
         "get_write_link" => {
             let session_snapshot = {
                 let sessions = state.sessions.lock().await;
@@ -7543,7 +7620,14 @@ async fn handle_lark_card_action_payload(
                     "session not found",
                 )));
             };
-            if session.web_port.is_none() || session.worker_token.is_none() {
+            // Load zellij web tokens
+            let zellij_tokens = zellij_web::load_zellij_web_tokens(&state.paths.zellij_web_tokens_json())
+                .unwrap_or(None);
+            let write_token = zellij_tokens
+                .as_ref()
+                .and_then(|t| t.write_token.as_deref())
+                .unwrap_or("");
+            if write_token.is_empty() {
                 return Ok(Json(build_lark_card_action_toast(
                     "error",
                     "terminal not ready",
@@ -7554,7 +7638,7 @@ async fn handle_lark_card_action_payload(
                 state.external_host,
                 state.config.web.proxy_base_port,
                 session.session_id,
-                session.worker_token.as_deref().unwrap_or("")
+                write_token
             );
             let card_json = build_writable_session_card(&session, &write_url);
             if session.lark_app_id != "local" {
@@ -8363,15 +8447,12 @@ async fn create_session(
         created_at: Utc::now(),
         closed_at: None,
         working_dir: Some(expand_tilde(&req.working_dir)),
-        web_port: None,
-        worker_token: None,
         lark_app_id: "local".to_string(),
         owner_open_id: None,
         worker_pid: None,
         cli_id: Some(req.cli_id.clone()),
         cli_bin: Some(req.cli_bin.clone()),
         cli_args: req.cli_args.clone(),
-        backend_type: req.backend_type.clone().unwrap_or(BackendType::Tmux),
         cli_session_id: None,
         last_cli_input: None,
         stream_card_id: None,
@@ -8425,14 +8506,12 @@ async fn create_session(
         cli_id: req.cli_id,
         cli_bin: req.cli_bin,
         cli_args: req.cli_args,
-        backend_type: session.backend_type.clone(),
         prompt: req.prompt,
         resume: false,
         cli_session_id: None,
         lark_app_id: "local".to_string(),
         lark_app_secret: String::new(),
         prompt_turn_id,
-        web_port: None,
         owner_open_id: None,
         adopted_from: None,
         adopt_restored_from_metadata: false,
@@ -8645,7 +8724,19 @@ async fn start_workflow_attempt_resume(
             let resumes = state.attempt_resumes.lock().await;
             resumes.get(&key).cloned()
         } {
-            if let (Some(web_port), Some(write_token)) = (existing.web_port, existing.write_token) {
+            if let (Some(_web_port), Some(_write_token)) = (existing.web_port, existing.write_token) {
+                // Get zellij web tokens for the terminal URL
+                let zellij_tokens = zellij_web::load_zellij_web_tokens(&state.paths.zellij_web_tokens_json())
+                    .unwrap_or(None);
+                let actual_write_token = zellij_tokens
+                    .as_ref()
+                    .and_then(|t| t.write_token.as_deref())
+                    .unwrap_or("");
+                let terminal_url = format!(
+                    "http://{}:{}/s/{}?token={}",
+                    state.external_host, state.config.web.proxy_base_port,
+                    existing.session_id, actual_write_token
+                );
                 return Ok((
                     StatusCode::OK,
                     Json(serde_json::json!({
@@ -8657,9 +8748,9 @@ async fn start_workflow_attempt_resume(
                         "sessionId": existing.session_id,
                         "originalSessionId": existing.original_session_id,
                         "cliSessionId": existing.cli_session_id,
-                        "webPort": web_port,
-                        "writeToken": write_token,
-                        "url": format!("http://127.0.0.1:{}/?token={}", web_port, write_token),
+                        "webPort": state.config.web.proxy_base_port,
+                        "writeToken": actual_write_token,
+                        "url": terminal_url,
                         "alreadyRunning": true,
                         "startedAt": existing.started_at,
                         "logPath": existing.log_path,
@@ -8669,9 +8760,20 @@ async fn start_workflow_attempt_resume(
             }
             return match wait_for_attempt_resume_ready(&state, &key, &existing.sidecar_path).await {
                 AttemptResumeWaitOutcome::Ready(waiting) => {
-                    if let (Some(web_port), Some(write_token)) =
+                    if let (Some(_web_port), Some(_write_token)) =
                         (waiting.web_port, waiting.write_token.clone())
                     {
+                        let zellij_tokens = zellij_web::load_zellij_web_tokens(&state.paths.zellij_web_tokens_json())
+                            .unwrap_or(None);
+                        let actual_write_token = zellij_tokens
+                            .as_ref()
+                            .and_then(|t| t.write_token.as_deref())
+                            .unwrap_or("");
+                        let terminal_url = format!(
+                            "http://{}:{}/s/{}?token={}",
+                            state.external_host, state.config.web.proxy_base_port,
+                            waiting.session_id, actual_write_token
+                        );
                         Ok((
                             StatusCode::OK,
                             Json(serde_json::json!({
@@ -8683,9 +8785,9 @@ async fn start_workflow_attempt_resume(
                                 "sessionId": waiting.session_id,
                                 "originalSessionId": waiting.original_session_id,
                                 "cliSessionId": waiting.cli_session_id,
-                                "webPort": web_port,
-                                "writeToken": write_token,
-                                "url": format!("http://127.0.0.1:{}/?token={}", web_port, write_token),
+                                "webPort": state.config.web.proxy_base_port,
+                                "writeToken": actual_write_token,
+                                "url": terminal_url,
                                 "alreadyRunning": false,
                                 "startedAt": waiting.started_at,
                                 "logPath": waiting.log_path,
@@ -8758,7 +8860,6 @@ async fn start_workflow_attempt_resume(
         .await
         .map_err(internal_error)?;
     let log_path = resume_dir.join("terminal.log");
-    let _pty_log_path = resume_dir.join("pty.log");
     let sidecar_path = resume_dir.join("resume.json");
 
     let session_id = Uuid::new_v4().to_string();
@@ -8779,18 +8880,12 @@ async fn start_workflow_attempt_resume(
         created_at: Utc::now(),
         closed_at: None,
         working_dir: Some(working_dir.clone()),
-        web_port: None,
-        worker_token: None,
         lark_app_id: "local".to_string(),
         owner_open_id: None,
         worker_pid: None,
         cli_id: Some(bot.cli_id.clone()),
         cli_bin: Some(bot.cli_bin.clone().unwrap_or_else(|| bot.cli_id.clone())),
         cli_args: Vec::new(),
-        backend_type: bot
-            .backend_type
-            .clone()
-            .unwrap_or_else(|| state.config.daemon.backend_type.clone()),
         cli_session_id: None,
         last_cli_input: None,
         stream_card_id: None,
@@ -8840,14 +8935,12 @@ async fn start_workflow_attempt_resume(
         cli_id: bot.cli_id.clone(),
         cli_bin: bot.cli_bin.clone().unwrap_or_else(|| bot.cli_id.clone()),
         cli_args: Vec::new(),
-        backend_type: session.backend_type.clone(),
         prompt: String::new(),
         resume: true,
         cli_session_id: terminal.cli_session_id.clone(),
         lark_app_id: bot.lark_app_id.clone(),
         lark_app_secret: bot.lark_app_secret.clone(),
         prompt_turn_id: None,
-        web_port: None,
         owner_open_id: None,
         adopted_from: None,
         adopt_restored_from_metadata: false,
@@ -8923,12 +9016,12 @@ async fn start_workflow_attempt_resume(
         }
     };
     let web_port = ready_entry.web_port.unwrap_or_default();
-    let write_token = ready_entry.write_token.clone().unwrap_or_default();
+    let _write_token = ready_entry.write_token.clone().unwrap_or_default();
     let updated_entry = {
         let mut resumes = state.attempt_resumes.lock().await;
         if let Some(existing) = resumes.get_mut(&key) {
             existing.web_port = Some(web_port);
-            existing.write_token = Some(write_token.clone());
+            existing.write_token = Some(_write_token.clone());
             existing.updated_at = Utc::now().timestamp_millis().max(0) as u64;
             Some(existing.clone())
         } else {
@@ -8940,6 +9033,17 @@ async fn start_workflow_attempt_resume(
             .await
             .map_err(internal_error)?;
     }
+    let zellij_tokens = zellij_web::load_zellij_web_tokens(&state.paths.zellij_web_tokens_json())
+        .unwrap_or(None);
+    let actual_write_token = zellij_tokens
+        .as_ref()
+        .and_then(|t| t.write_token.as_deref())
+        .unwrap_or("");
+    let terminal_url = format!(
+        "http://{}:{}/s/{}?token={}",
+        state.external_host, state.config.web.proxy_base_port,
+        session_id, actual_write_token
+    );
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({
@@ -8951,9 +9055,9 @@ async fn start_workflow_attempt_resume(
             "sessionId": session_id,
             "originalSessionId": terminal.session_id,
             "cliSessionId": terminal.cli_session_id,
-            "webPort": web_port,
-            "writeToken": write_token,
-            "url": format!("http://127.0.0.1:{}/?token={}", web_port, write_token),
+            "webPort": state.config.web.proxy_base_port,
+            "writeToken": actual_write_token,
+            "url": terminal_url,
             "alreadyRunning": false,
             "startedAt": started_at,
             "logPath": log_path.display().to_string(),
@@ -9337,8 +9441,8 @@ async fn close_session(
             .await
             .map_err(internal_error)?;
     } else if session.adopted_from.is_none() {
-        let _ = std::process::Command::new("tmux")
-            .args(["kill-session", "-t", &session_tmux_target(&session)])
+        let _ = std::process::Command::new("zellij")
+            .args(["delete-session", &session_zellij_target(&session), "-f"])
             .output();
     }
 
@@ -9369,11 +9473,10 @@ async fn close_session(
         warn!("failed to delete frozen cards for {}: {}", session_id, err);
     }
     if session.adopted_from.is_none() {
-        let _ = wait_for_tmux_absent(
-            &session_tmux_target(&session),
-            std::time::Duration::from_secs(3),
-        )
-        .await;
+        let target = session_zellij_target(&session);
+        let _ = std::process::Command::new("zellij")
+            .args(["delete-session", &target, "-f"])
+            .output();
     }
     Ok(StatusCode::OK)
 }
@@ -9390,17 +9493,17 @@ async fn restart_session(
             .cloned()
             .ok_or_else(|| (StatusCode::NOT_FOUND, "session not found".to_string()))?
     };
-    let target = session_tmux_target(&session);
+    let target = session_zellij_target(&session);
 
     if let Some(adopted) = session
         .adopted_from
         .as_ref()
-        .and_then(|v| v.tmux_target.as_ref())
+        .and_then(|v| v.zellij_session.as_ref())
     {
-        if !tmux_has_session(adopted) {
+        if !zellij_has_session(adopted) {
             return Err((
                 StatusCode::CONFLICT,
-                "adopted tmux target no longer exists".to_string(),
+                "adopted zellij session no longer exists".to_string(),
             ));
         }
     }
@@ -9413,13 +9516,9 @@ async fn restart_session(
         }
     }
     if session.adopted_from.is_none() {
-        let absent = wait_for_tmux_absent(&target, std::time::Duration::from_secs(3)).await;
-        if !absent {
-            let _ = std::process::Command::new("tmux")
-                .args(["kill-session", "-t", &target])
-                .output();
-            let _ = wait_for_tmux_absent(&target, std::time::Duration::from_secs(1)).await;
-        }
+        let _ = std::process::Command::new("zellij")
+            .args(["delete-session", &target, "-f"])
+            .output();
     }
     {
         let snapshot = {
@@ -9429,7 +9528,6 @@ async fn restart_session(
                 entry.closed_at = None;
                 entry.worker_pid = None;
                 entry.terminal_url = None;
-                entry.worker_token = None;
                 entry.current_screen = None;
                 entry.last_screen_status = None;
                 entry.usage_limit = None;
@@ -9484,7 +9582,6 @@ async fn resume_session(
             entry.closed_at = None;
             entry.worker_pid = None;
             entry.terminal_url = None;
-            entry.worker_token = None;
             entry.current_screen = None;
             entry.last_screen_status = None;
             entry.usage_limit = None;
@@ -9539,161 +9636,9 @@ async fn refresh_session(
     Ok(StatusCode::ACCEPTED)
 }
 
-async fn list_adopt_candidates() -> Result<Json<Vec<AdoptCandidate>>, (StatusCode, String)> {
-    let items = probe_tmux_panes().map_err(internal_error)?;
-    let candidates = items
-        .into_iter()
-        .filter(|pane| !pane.session_name.starts_with("bmx-"))
-        .map(|pane| AdoptCandidate {
-            tmux_target: format!(
-                "{}:{}.{}",
-                pane.session_name, pane.window_index, pane.pane_index
-            ),
-            session_name: pane.session_name,
-            pane_id: pane.pane_id,
-            title: format!(
-                "{}:{} {}",
-                pane.window_index, pane.pane_index, pane.pane_current_command
-            ),
-            cwd: pane.pane_current_path,
-            pid: pane.pane_pid,
-            cols: pane.pane_width,
-            rows: pane.pane_height,
-        })
-        .collect();
-    Ok(Json(candidates))
-}
-
 async fn list_zellij_adopt_candidates()
 -> Result<Json<Vec<ZellijAdoptCandidate>>, (StatusCode, String)> {
     Ok(Json(discover_zellij_adopt_candidates()))
-}
-
-async fn adopt_tmux_session(
-    State(state): State<AppState>,
-    Json(req): Json<AdoptTmuxSessionRequest>,
-) -> Result<(StatusCode, Json<SessionSummary>), (StatusCode, String)> {
-    let panes = probe_tmux_panes().map_err(internal_error)?;
-    let pane = panes
-        .into_iter()
-        .find(|pane| {
-            format!(
-                "{}:{}.{}",
-                pane.session_name, pane.window_index, pane.pane_index
-            ) == req.tmux_target
-        })
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "tmux target not found".to_string()))?;
-
-    let session_id = Uuid::new_v4().to_string();
-    let adopted_from = AdoptedFrom {
-        tmux_target: Some(req.tmux_target.clone()),
-        zellij_session: None,
-        zellij_pane_id: None,
-        original_cli_pid: pane.pane_pid,
-        session_id: None,
-        cli_id: Some(req.cli_id.clone()),
-        cwd: pane.pane_current_path.clone(),
-        pane_cols: pane.pane_width,
-        pane_rows: pane.pane_height,
-    };
-    let title = req
-        .title
-        .clone()
-        .unwrap_or_else(|| format!("adopt {}", req.tmux_target));
-    let session = Session {
-        session_id: session_id.clone(),
-        title,
-        chat_id: "local".to_string(),
-        chat_type: Some("local".to_string()),
-        root_message_id: session_id.clone(),
-        quote_target_id: None,
-        scope: SessionScope::Thread,
-        status: SessionStatus::Active,
-        created_at: Utc::now(),
-        closed_at: None,
-        working_dir: Some(pane.pane_current_path.clone()),
-        web_port: None,
-        worker_token: None,
-        lark_app_id: "local".to_string(),
-        owner_open_id: None,
-        worker_pid: None,
-        cli_id: Some(req.cli_id.clone()),
-        cli_bin: Some(req.cli_bin.clone()),
-        cli_args: Vec::new(),
-        backend_type: BackendType::Tmux,
-        cli_session_id: None,
-        last_cli_input: None,
-        stream_card_id: None,
-        stream_card_nonce: None,
-        display_mode: None,
-        current_screen: None,
-        last_screen_status: None,
-        usage_limit: None,
-        current_image_key: None,
-        tui_prompt_card_id: None,
-        tui_prompt_options: Vec::new(),
-        tui_prompt_multi_select: None,
-        tui_toggled_indices: Vec::new(),
-        pending_response_card_id: None,
-        pending_response_card_state: None,
-        last_patched_response_card_id: None,
-        terminal_url: None,
-        last_final_output_turn_id: None,
-        last_final_output: None,
-        adopted_from: Some(adopted_from.clone()),
-        bot_name: None,
-        bot_open_id: None,
-        disable_cli_bypass: false,
-        initial_prompt: None,
-        model: None,
-        locale: None,
-        resume_session_id: None,
-        thread_id: None,
-    };
-    {
-        let snapshot = {
-            let mut sessions = state.sessions.lock().await;
-            sessions.insert(session_id.clone(), session.clone());
-            sessions.clone()
-        };
-        persist_sessions(&state.paths, &snapshot)
-            .await
-            .map_err(internal_error)?;
-    }
-
-    let init = InitConfig {
-        session_id: session_id.clone(),
-        title: session.title.clone(),
-        chat_id: session.chat_id.clone(),
-        root_message_id: session.root_message_id.clone(),
-        working_dir: pane.pane_current_path,
-        cli_id: req.cli_id,
-        cli_bin: req.cli_bin,
-        cli_args: Vec::new(),
-        backend_type: BackendType::Tmux,
-        prompt: String::new(),
-        resume: false,
-        cli_session_id: None,
-        lark_app_id: "local".to_string(),
-        lark_app_secret: String::new(),
-        prompt_turn_id: None,
-        web_port: None,
-        owner_open_id: None,
-        adopted_from: Some(adopted_from),
-        adopt_restored_from_metadata: false,
-        screen_analyzer: state.config.screen_analyzer.clone(),
-        bot_name: None,
-        bot_open_id: None,
-        disable_cli_bypass: false,
-        initial_prompt: None,
-        model: None,
-        locale: None,
-        resume_session_id: None,
-    };
-    spawn_worker(state.clone(), session.clone(), init)
-        .await
-        .map_err(internal_error)?;
-    Ok((StatusCode::CREATED, Json(SessionSummary::from(&session))))
 }
 
 async fn adopt_zellij_session(
@@ -9744,15 +9689,12 @@ async fn adopt_zellij_session(
         created_at: Utc::now(),
         closed_at: None,
         working_dir: Some(adopted_from.cwd.clone()),
-        web_port: None,
-        worker_token: None,
         lark_app_id: "local".to_string(),
         owner_open_id: None,
         worker_pid: None,
         cli_id: Some(req.cli_id.clone()),
         cli_bin: Some(req.cli_bin.clone()),
         cli_args: Vec::new(),
-        backend_type: BackendType::Zellij,
         cli_session_id: None,
         last_cli_input: None,
         stream_card_id: None,
@@ -9802,14 +9744,12 @@ async fn adopt_zellij_session(
         cli_id: req.cli_id,
         cli_bin: req.cli_bin,
         cli_args: Vec::new(),
-        backend_type: BackendType::Zellij,
         prompt: String::new(),
         resume: false,
         cli_session_id: None,
         lark_app_id: "local".to_string(),
         lark_app_secret: String::new(),
         prompt_turn_id: None,
-        web_port: None,
         owner_open_id: None,
         adopted_from: Some(adopted_from),
         adopt_restored_from_metadata: false,
@@ -9867,12 +9807,11 @@ async fn ensure_worker_for_session(state: &AppState, session_id: &str) -> Result
     if session.status != SessionStatus::Active {
         anyhow::bail!("session {} is not active", session_id);
     }
-    if session.backend_type != BackendType::Tmux {
-        anyhow::bail!("session {} has no live worker to attach", session_id);
-    }
-    let target = session_tmux_target(&session);
-    if !tmux_has_session(&target) {
-        anyhow::bail!("tmux session is not available for {}", session_id);
+    {
+        let target = session_zellij_target(&session);
+        if !zellij_has_session(&target) {
+            anyhow::bail!("zellij session is not available for {}", session_id);
+        }
     }
 
     let init = build_init_from_session(&session, &state.config, &state.bots)?;
@@ -9956,7 +9895,6 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         let restore_candidates = reconcile_restored_sessions_with(
             &mut sessions,
             state.config.daemon.quiet_restart,
-            tmux_has_session,
             zellij_has_session,
         );
         let snapshot = sessions.clone();
@@ -10959,10 +10897,6 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
                 cli_id: bot.cli_id.clone(),
                 cli_bin: bot.cli_bin.clone().unwrap_or_else(|| bot.cli_id.clone()),
                 cli_args: Vec::new(),
-                backend_type: bot
-                    .backend_type
-                    .clone()
-                    .unwrap_or_else(|| state.config.daemon.backend_type.clone()),
                 prompt,
                 lark_app_id: bot_id.clone(),
                 owner_open_id: None,
@@ -11314,7 +11248,6 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
                             .map(|oc| oc.chat_id.clone())
                             .collect(),
                         private_card: bot.private_card,
-                        backend_type: bot.backend_type.clone().unwrap_or_default(),
                         active_sessions: active,
                     }
                 })
@@ -11348,7 +11281,6 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
                 .map(|oc| oc.chat_id.clone())
                 .collect(),
             private_card: bot.private_card,
-            backend_type: bot.backend_type.clone().unwrap_or_default(),
             active_sessions: active,
         }))
     }
@@ -11385,7 +11317,6 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         Ok(Json(SessionLocateInfo {
             session_id: session.session_id.clone(),
             terminal_url: session.terminal_url.clone(),
-            web_port: session.web_port,
             worker_pid: session.worker_pid,
         }))
     }
@@ -11831,10 +11762,6 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         .route("/api/trigger", post(api_trigger))
         .route("/api/asks", post(ask::create_ask))
         .route(
-            "/adopt/tmux",
-            get(list_adopt_candidates).post(adopt_tmux_session),
-        )
-        .route(
             "/adopt/zellij",
             get(list_zellij_adopt_candidates).post(adopt_zellij_session),
         )
@@ -11885,11 +11812,21 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         .route("/webhook/{workflow_id}", post(handle_webhook_trigger))
         .route("/sessions/{session_id}/final-output", post(final_output));
 
+    // Start zellij web server and ensure tokens
+    let zellij_web_port = state.config.web.proxy_base_port + 1;
+    zellij_web::ensure_zellij_web(zellij_web_port)
+        .with_context(|| format!("failed to start zellij web server on port {zellij_web_port}"))?;
+    zellij_web::ensure_zellij_web_tokens(
+        &state.paths.zellij_web_tokens_json(),
+        zellij_web_port,
+    )
+    .with_context(|| "failed to create zellij web tokens")?;
+
     // Start terminal proxy
     let proxy_host = state.config.web.host.clone();
     let proxy_port = state.config.web.proxy_base_port;
     let proxy_sessions = state.sessions.clone();
-    terminal_proxy::start_proxy(&proxy_host, proxy_port, proxy_sessions)
+    terminal_proxy::start_proxy(&proxy_host, proxy_port, zellij_web_port, proxy_sessions)
         .await
         .with_context(|| format!("failed to start terminal proxy on {proxy_host}:{proxy_port}"))?;
 
@@ -12127,15 +12064,12 @@ mod tests {
             created_at: Utc::now(),
             closed_at: Some(Utc::now()),
             working_dir: Some("/tmp/project".to_string()),
-            web_port: None,
-            worker_token: None,
             lark_app_id: "app-1".to_string(),
             owner_open_id: None,
             worker_pid: None,
             cli_id: Some("codex".to_string()),
             cli_bin: Some("codex".to_string()),
             cli_args: Vec::new(),
-            backend_type: BackendType::Tmux,
             cli_session_id: None,
             last_cli_input: None,
             stream_card_id: None,
@@ -12425,7 +12359,6 @@ mod tests {
             cli_bin: None,
             model: None,
             working_dir: None,
-            backend_type: None,
             lark_encrypt_key: None,
             lark_verification_token: None,
             allowed_users: Vec::new(),
@@ -12452,7 +12385,6 @@ mod tests {
             cli_bin: None,
             model: None,
             working_dir: None,
-            backend_type: None,
             lark_encrypt_key: None,
             lark_verification_token: None,
             allowed_users: vec!["ou_owner".to_string()],
@@ -12499,7 +12431,6 @@ mod tests {
             cli_bin: None,
             model: None,
             working_dir: None,
-            backend_type: None,
             lark_encrypt_key: None,
             lark_verification_token: None,
             allowed_users: vec!["ou_owner".to_string(), "ou_peer".to_string()],
@@ -12766,8 +12697,8 @@ mod tests {
             LarkTextAction::Card
         );
         assert_eq!(
-            classify_lark_text_action("/adopt tmux  0:1.0  ", false),
-            LarkTextAction::AdoptTmux("0:1.0".to_string())
+            classify_lark_text_action("/adopt zellij  0:1.0  ", false),
+            LarkTextAction::AdoptZellij("0:1.0".to_string())
         );
         assert_eq!(
             classify_lark_text_action("/adopt", false),
@@ -13323,7 +13254,7 @@ mod tests {
         );
         assert_eq!(
             decide_lark_event_outcome(
-                LarkTextAction::AdoptTmux("0:2.0".to_string()),
+                LarkTextAction::AdoptZellij("0:2.0".to_string()),
                 Some(&session)
             ),
             LarkEventOutcome::ReplyOnly {
@@ -13354,7 +13285,6 @@ mod tests {
             cli_bin: None,
             model: None,
             working_dir: None,
-            backend_type: None,
             lark_encrypt_key: None,
             lark_verification_token: None,
             allowed_users: vec!["ou_owner".to_string()],
@@ -13462,109 +13392,16 @@ mod tests {
     }
 
     #[test]
-    fn build_adopt_list_reply_filters_owned_beam_sessions() {
-        let items = vec![
-            TmuxPaneProbe {
-                session_name: "work".to_string(),
-                window_index: "0".to_string(),
-                pane_index: "1".to_string(),
-                pane_id: "%1".to_string(),
-                pane_pid: 100,
-                pane_current_command: "codex".to_string(),
-                pane_current_path: "/repo".to_string(),
-                pane_width: Some(120),
-                pane_height: Some(40),
-            },
-            TmuxPaneProbe {
-                session_name: "bmx-deadbeef".to_string(),
-                window_index: "0".to_string(),
-                pane_index: "0".to_string(),
-                pane_id: "%2".to_string(),
-                pane_pid: 101,
-                pane_current_command: "claude".to_string(),
-                pane_current_path: "/repo".to_string(),
-                pane_width: Some(120),
-                pane_height: Some(40),
-            },
-        ];
-        assert_eq!(build_adopt_list_reply(&items), "work:0.1 codex");
-    }
-
-    #[test]
-    fn build_adopt_list_reply_handles_empty_visible_candidates() {
-        let items = vec![TmuxPaneProbe {
-            session_name: "bmx-deadbeef".to_string(),
-            window_index: "0".to_string(),
-            pane_index: "0".to_string(),
-            pane_id: "%2".to_string(),
-            pane_pid: 101,
-            pane_current_command: "claude".to_string(),
-            pane_current_path: "/repo".to_string(),
-            pane_width: Some(120),
-            pane_height: Some(40),
-        }];
-        assert_eq!(build_adopt_list_reply(&items), "no tmux panes");
-        assert_eq!(build_adopt_list_reply(&[]), "no tmux panes");
-    }
-
-    #[test]
     fn build_adopt_helpers_render_stable_replies() {
-        let mut session = make_session("sess-1");
-        session.adopted_from = Some(AdoptedFrom {
-            tmux_target: Some("0:2.0".to_string()),
-            zellij_session: None,
-            zellij_pane_id: None,
-            original_cli_pid: 12345,
-            session_id: None,
-            cli_id: Some("codex".to_string()),
-            cwd: "/repo".to_string(),
-            pane_cols: Some(120),
-            pane_rows: Some(40),
-        });
+        let session = make_session("sess-1");
+        let summary = SessionSummary::from(&session);
         assert_eq!(
-            build_adopt_already_attached_reply(&session),
-            "session already adopted from codex (0:2.0)\ndisconnect it before running /adopt again"
-        );
-
-        let mut adopted_session = make_session("sess-2");
-        adopted_session.title = "adopt 0:2.0".to_string();
-        let summary = SessionSummary::from(&adopted_session);
-        assert_eq!(
-            build_adopt_tmux_result_reply(Ok(&summary)),
-            "adopted sess-2"
+            build_adopt_zellij_result_reply(Ok(&summary)),
+            "adopted sess-1"
         );
         assert_eq!(
-            build_adopt_tmux_result_reply(Err("tmux target not found")),
-            "adopt failed: tmux target not found"
-        );
-        assert_eq!(
-            build_adopt_list_error_reply("tmux unavailable"),
-            "adopt list failed: tmux unavailable"
-        );
-    }
-
-    #[test]
-    fn build_close_and_restart_helpers_render_result_sensitive_replies() {
-        let session = make_session("sess-9");
-        assert_eq!(
-            build_closed_session_reply(&session),
-            "session closed: sess-9\nresume: beam session resume sess-9"
-        );
-        assert_eq!(
-            build_close_result_reply(&session, Ok(StatusCode::OK)),
-            "session closed: sess-9\nresume: beam session resume sess-9"
-        );
-        assert_eq!(
-            build_close_result_reply(&session, Err("session not found")),
-            "close failed: session not found"
-        );
-        assert_eq!(
-            build_restart_result_reply(Ok(StatusCode::ACCEPTED)),
-            "session restarting"
-        );
-        assert_eq!(
-            build_restart_result_reply(Err("adopted tmux target no longer exists")),
-            "restart failed: adopted tmux target no longer exists"
+            build_adopt_zellij_result_reply(Err("session not found")),
+            "adopt failed: session not found"
         );
     }
 
@@ -13722,8 +13559,7 @@ mod tests {
                 cli_bin: None,
                 model: None,
                 working_dir: None,
-                backend_type: None,
-                lark_encrypt_key: None,
+                    lark_encrypt_key: None,
                 lark_verification_token: None,
                 allowed_users: vec!["ou_owner".to_string()],
                 private_card: false,
@@ -13793,8 +13629,7 @@ mod tests {
                 cli_bin: None,
                 model: None,
                 working_dir: None,
-                backend_type: None,
-                lark_encrypt_key: None,
+                    lark_encrypt_key: None,
                 lark_verification_token: None,
                 allowed_users: Vec::new(),
                 private_card: false,
@@ -13888,8 +13723,7 @@ mod tests {
                 cli_bin: None,
                 model: None,
                 working_dir: None,
-                backend_type: None,
-                lark_encrypt_key: None,
+                    lark_encrypt_key: None,
                 lark_verification_token: None,
                 allowed_users: Vec::new(),
                 private_card: false,
@@ -17122,57 +16956,28 @@ mod tests {
 
     #[test]
     fn should_auto_fork_on_restore_matches_quiet_restart_gate() {
-        assert!(should_auto_fork_on_restore(&BackendType::Tmux, false));
-        assert!(!should_auto_fork_on_restore(&BackendType::Tmux, true));
-        assert!(!should_auto_fork_on_restore(&BackendType::Pty, false));
-        assert!(should_auto_fork_on_restore(&BackendType::Zellij, false));
-        assert!(!should_auto_fork_on_restore(&BackendType::Zellij, true));
+        assert!(should_auto_fork_on_restore(false));
+        assert!(!should_auto_fork_on_restore(true));
     }
 
     #[test]
-    fn reconcile_restored_sessions_closes_non_persistent_and_missing_persistent_sessions() {
-        let mut non_tmux = make_session("pty-1");
-        non_tmux.status = SessionStatus::Active;
-        non_tmux.closed_at = None;
-        non_tmux.backend_type = BackendType::Pty;
-        non_tmux.worker_pid = Some(10);
-        non_tmux.terminal_url = Some("http://127.0.0.1:1".to_string());
-
-        let mut missing_tmux = make_session("tmux-missing");
-        missing_tmux.status = SessionStatus::Active;
-        missing_tmux.closed_at = None;
-        missing_tmux.backend_type = BackendType::Tmux;
-        missing_tmux.worker_pid = Some(11);
-        missing_tmux.terminal_url = Some("http://127.0.0.1:2".to_string());
-
+    fn reconcile_restored_sessions_closes_missing_zellij_sessions() {
         let mut missing_zellij = make_session("zellij-missing");
         missing_zellij.status = SessionStatus::Active;
         missing_zellij.closed_at = None;
-        missing_zellij.backend_type = BackendType::Zellij;
         missing_zellij.worker_pid = Some(12);
         missing_zellij.terminal_url = Some("http://127.0.0.1:4".to_string());
 
         let mut sessions = HashMap::from([
-            (non_tmux.session_id.clone(), non_tmux),
-            (missing_tmux.session_id.clone(), missing_tmux),
             (missing_zellij.session_id.clone(), missing_zellij),
         ]);
         let restore = reconcile_restored_sessions_with(
             &mut sessions,
             false,
             |_target| false,
-            |_target| false,
         );
 
         assert!(restore.is_empty());
-        assert_eq!(sessions["pty-1"].status, SessionStatus::Closed);
-        assert!(sessions["pty-1"].closed_at.is_some());
-        assert_eq!(sessions["pty-1"].worker_pid, None);
-        assert_eq!(sessions["pty-1"].terminal_url, None);
-        assert_eq!(sessions["tmux-missing"].status, SessionStatus::Closed);
-        assert!(sessions["tmux-missing"].closed_at.is_some());
-        assert_eq!(sessions["tmux-missing"].worker_pid, None);
-        assert_eq!(sessions["tmux-missing"].terminal_url, None);
         assert_eq!(sessions["zellij-missing"].status, SessionStatus::Closed);
         assert!(sessions["zellij-missing"].closed_at.is_some());
         assert_eq!(sessions["zellij-missing"].worker_pid, None);
@@ -17181,45 +16986,25 @@ mod tests {
 
     #[test]
     fn reconcile_restored_sessions_respects_quiet_restart() {
-        let mut tmux_session = make_session("tmux-live");
-        tmux_session.status = SessionStatus::Active;
-        tmux_session.closed_at = None;
-        tmux_session.worker_pid = Some(22);
-        tmux_session.terminal_url = Some("http://127.0.0.1:3".to_string());
-
         let mut zellij_session = make_session("zellij-live");
         zellij_session.status = SessionStatus::Active;
         zellij_session.closed_at = None;
-        zellij_session.backend_type = BackendType::Zellij;
         zellij_session.worker_pid = Some(23);
         zellij_session.terminal_url = Some("http://127.0.0.1:4".to_string());
 
         let mut eager_sessions = HashMap::from([
-            (tmux_session.session_id.clone(), tmux_session.clone()),
             (zellij_session.session_id.clone(), zellij_session.clone()),
         ]);
         let eager_restore = reconcile_restored_sessions_with(
             &mut eager_sessions,
             false,
             |_target| true,
-            |_target| true,
         );
-        assert_eq!(eager_restore.len(), 2);
-        assert!(
-            eager_restore
-                .iter()
-                .any(|session| session.session_id == "tmux-live")
-        );
+        assert_eq!(eager_restore.len(), 1);
         assert!(
             eager_restore
                 .iter()
                 .any(|session| session.session_id == "zellij-live")
-        );
-        assert_eq!(eager_sessions["tmux-live"].status, SessionStatus::Active);
-        assert_eq!(eager_sessions["tmux-live"].worker_pid, None);
-        assert_eq!(
-            eager_sessions["tmux-live"].terminal_url,
-            Some("http://127.0.0.1:3".to_string())
         );
         assert_eq!(eager_sessions["zellij-live"].status, SessionStatus::Active);
         assert_eq!(eager_sessions["zellij-live"].worker_pid, None);
@@ -17229,19 +17014,14 @@ mod tests {
         );
 
         let mut quiet_sessions = HashMap::from([
-            (tmux_session.session_id.clone(), tmux_session),
             (zellij_session.session_id.clone(), zellij_session),
         ]);
         let quiet_restore = reconcile_restored_sessions_with(
             &mut quiet_sessions,
             true,
             |_target| true,
-            |_target| true,
         );
         assert!(quiet_restore.is_empty());
-        assert_eq!(quiet_sessions["tmux-live"].status, SessionStatus::Active);
-        assert_eq!(quiet_sessions["tmux-live"].worker_pid, None);
-        assert_eq!(quiet_sessions["tmux-live"].terminal_url, None);
         assert_eq!(quiet_sessions["zellij-live"].status, SessionStatus::Active);
         assert_eq!(quiet_sessions["zellij-live"].worker_pid, None);
         assert_eq!(quiet_sessions["zellij-live"].terminal_url, None);
@@ -17403,8 +17183,8 @@ mod tests {
             LarkTextAction::AdoptList
         );
         assert_eq!(
-            classify_lark_text_action("/adopt tmux mysession:0.1", false),
-            LarkTextAction::AdoptTmux("mysession:0.1".into())
+            classify_lark_text_action("/adopt zellij mysession:0.1", false),
+            LarkTextAction::AdoptZellij("mysession:0.1".into())
         );
         assert_eq!(
             classify_lark_text_action("hello world", false),
@@ -17501,7 +17281,6 @@ mod tests {
             cli_bin: None,
             model: None,
             working_dir: None,
-            backend_type: None,
             lark_encrypt_key: None,
             lark_verification_token: None,
             allowed_users: vec!["ou_owner".to_string()],
@@ -17607,7 +17386,6 @@ mod tests {
             cli_bin: None,
             model: None,
             working_dir: None,
-            backend_type: None,
             lark_encrypt_key: None,
             lark_verification_token: None,
             allowed_users: vec!["ou_owner".to_string()],
@@ -18117,8 +17895,7 @@ mod tests {
                 cli_bin: None,
                 model: None,
                 working_dir: None,
-                backend_type: None,
-                lark_encrypt_key: None,
+                    lark_encrypt_key: None,
                 lark_verification_token: None,
                 allowed_users: Vec::new(),
                 private_card: false,
@@ -18192,8 +17969,7 @@ mod tests {
                 cli_bin: None,
                 model: None,
                 working_dir: None,
-                backend_type: None,
-                lark_encrypt_key: None,
+                    lark_encrypt_key: None,
                 lark_verification_token: None,
                 allowed_users: Vec::new(),
                 private_card: false,
@@ -18243,8 +18019,7 @@ mod tests {
                 cli_bin: None,
                 model: None,
                 working_dir: None,
-                backend_type: None,
-                lark_encrypt_key: None,
+                    lark_encrypt_key: None,
                 lark_verification_token: None,
                 allowed_users: Vec::new(),
                 private_card: false,
@@ -18322,8 +18097,7 @@ mod tests {
                 cli_bin: None,
                 model: None,
                 working_dir: None,
-                backend_type: None,
-                lark_encrypt_key: None,
+                    lark_encrypt_key: None,
                 lark_verification_token: None,
                 allowed_users: Vec::new(),
                 private_card: false,

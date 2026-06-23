@@ -1,7 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::config::BackendType;
 use crate::ipc::{CliUsageLimitState, DisplayMode, ScreenStatus};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -94,10 +93,6 @@ pub struct Session {
     pub closed_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub working_dir: Option<String>,
-    #[serde(default)]
-    pub web_port: Option<u16>,
-    #[serde(default)]
-    pub worker_token: Option<String>,
     pub lark_app_id: String,
     #[serde(default)]
     pub owner_open_id: Option<String>,
@@ -109,8 +104,6 @@ pub struct Session {
     pub cli_bin: Option<String>,
     #[serde(default)]
     pub cli_args: Vec<String>,
-    #[serde(default)]
-    pub backend_type: BackendType,
     #[serde(default)]
     pub cli_session_id: Option<String>,
     #[serde(default)]

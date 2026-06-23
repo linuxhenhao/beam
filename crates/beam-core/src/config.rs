@@ -4,23 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum BackendType {
-    Pty,
-    Tmux,
-    Zellij,
-}
-
-impl Default for BackendType {
-    fn default() -> Self {
-        Self::Tmux
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonConfig {
-    #[serde(default)]
-    pub backend_type: BackendType,
     #[serde(default)]
     pub quiet_restart: bool,
     #[serde(default = "default_working_dirs")]
@@ -34,7 +18,6 @@ fn default_working_dirs() -> Vec<String> {
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
-            backend_type: BackendType::default(),
             quiet_restart: false,
             working_dirs: default_working_dirs(),
         }
@@ -94,8 +77,6 @@ pub struct BotConfig {
     pub model: Option<String>,
     #[serde(rename = "workingDir", default)]
     pub working_dir: Option<String>,
-    #[serde(rename = "backendType", default)]
-    pub backend_type: Option<BackendType>,
     #[serde(rename = "larkEncryptKey", default)]
     pub lark_encrypt_key: Option<String>,
     #[serde(rename = "larkVerificationToken", default)]

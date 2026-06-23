@@ -167,7 +167,6 @@ mod tests {
             cli_bin: None,
             model: None,
             working_dir: None,
-            backend_type: None,
             lark_encrypt_key: None,
             lark_verification_token: None,
             allowed_users: vec![],

@@ -23,7 +23,7 @@ pub mod workflow_sidecar;
 pub mod workflow_snapshot;
 
 pub use api::{
-    AdoptCandidate, AdoptTmuxSessionRequest, ApiHealth, AttemptResumeEndResponse,
+    ApiHealth, AttemptResumeEndResponse,
     AttemptResumeRequest, AttemptResumeStartResponse, BotSummary, CreateSessionRequest,
     DaemonOverview, DaemonRuntimeState, FinalOutputRequest, RestartSessionRequest,
     ResumeSessionRequest, SessionGroup, SessionInputRequest, SessionLocateInfo, SessionSummary,
@@ -31,7 +31,7 @@ pub use api::{
 };
 pub use ask::{AskOption, AskQuestion, AskRequest, AskResult, legacy_selected};
 pub use config::{
-    BackendType, BotConfig, Config, DaemonConfig, LarkConfig, MessageQuotaConfig,
+    BotConfig, Config, DaemonConfig, LarkConfig, MessageQuotaConfig,
     OncallChatBinding, QuotaEntry, ScreenAnalyzerConfig, WebConfig,
 };
 pub use ipc::{

@@ -426,10 +426,6 @@ async fn run_workflow_subagent_session(
             cli_id: bot.cli_id.clone(),
             cli_bin: bot.cli_bin.clone().unwrap_or_else(|| bot.cli_id.clone()),
             cli_args: Vec::new(),
-            backend_type: bot
-                .backend_type
-                .clone()
-                .unwrap_or_else(|| state.config.daemon.backend_type.clone()),
             prompt: with_workflow_output_protocol(&resolved_prompt),
             lark_app_id: "local".to_string(),
             owner_open_id: None,

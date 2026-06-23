@@ -12,7 +12,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use beam_core::{BackendType, SessionScope};
+use beam_core::SessionScope;
 
 // --- Constants ---
 
@@ -90,8 +90,6 @@ pub struct PendingCreateSession {
     // Bot info for session creation
     pub cli_id: String,
     pub cli_bin: String,
-    pub backend_type: BackendType,
-    // Working directory info
     pub root_working_dir: String,
     /// All scanned candidate dirs (relative paths from root)
     pub candidate_dirs: Vec<String>,
@@ -1844,7 +1842,6 @@ mod tests {
                 created_at: created_at_ms,
                 cli_id: "codex".to_string(),
                 cli_bin: "codex".to_string(),
-                backend_type: BackendType::Tmux,
                 root_working_dir: "/tmp".to_string(),
                 candidate_dirs: vec![".".to_string()],
                 card_message_id: None,
