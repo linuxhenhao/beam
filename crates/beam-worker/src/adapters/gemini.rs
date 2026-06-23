@@ -545,6 +545,10 @@ mod tests {
             Ok(())
         }
 
+        async fn cursor_position(&self) -> Result<Option<(u16, u16)>> {
+            Ok(None)
+        }
+
         fn subscribe(&self) -> tokio::sync::broadcast::Receiver<String> {
             let (_tx, rx) = tokio::sync::broadcast::channel(1);
             rx

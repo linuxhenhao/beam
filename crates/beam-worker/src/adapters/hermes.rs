@@ -587,6 +587,10 @@ conn.commit()
             Ok(())
         }
 
+        async fn cursor_position(&self) -> Result<Option<(u16, u16)>> {
+            Ok(None)
+        }
+
         fn subscribe(&self) -> tokio::sync::broadcast::Receiver<String> {
             let (tx, rx) = tokio::sync::broadcast::channel(1);
             drop(tx);

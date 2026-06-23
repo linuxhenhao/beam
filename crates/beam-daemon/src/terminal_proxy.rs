@@ -26,6 +26,39 @@ struct ProxyState {
     sessions: Arc<Mutex<HashMap<String, Session>>>,
 }
 
+async fn serve_xterm_js() -> impl IntoResponse {
+    let mut res = Response::new(axum::body::Body::from(
+        include_str!("../../beam-worker/assets/xterm/xterm.js"),
+    ));
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/javascript; charset=utf-8"),
+    );
+    res
+}
+
+async fn serve_xterm_css() -> impl IntoResponse {
+    let mut res = Response::new(axum::body::Body::from(
+        include_str!("../../beam-worker/assets/xterm/xterm.css"),
+    ));
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/css; charset=utf-8"),
+    );
+    res
+}
+
+async fn serve_addon_fit_js() -> impl IntoResponse {
+    let mut res = Response::new(axum::body::Body::from(
+        include_str!("../../beam-worker/assets/xterm/addon-fit.js"),
+    ));
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/javascript; charset=utf-8"),
+    );
+    res
+}
+
 pub async fn start_proxy(
     host: &str,
     port: u16,
@@ -39,6 +72,9 @@ pub async fn start_proxy(
     let app = Router::new()
         .route("/s/{session_id}", get(handle_terminal))
         .route("/s/{session_id}/ws", get(handle_ws))
+        .route("/assets/xterm/xterm.js", get(serve_xterm_js))
+        .route("/assets/xterm/xterm.css", get(serve_xterm_css))
+        .route("/assets/xterm/addon-fit.js", get(serve_addon_fit_js))
         .fallback(fallback_404)
         .with_state(state);
 
