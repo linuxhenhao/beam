@@ -12,8 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont, point};
 use anyhow::{Context, Result};
 use beam_core::{
-    BeamPaths, CliUsageLimitKind, CliUsageLimitState, DaemonToWorker, DisplayMode,
-    InitConfig, ScreenAnalyzerConfig, ScreenStatus, TermActionKey, TuiPromptOption, WorkerToDaemon,
+    BeamPaths, CliUsageLimitKind, CliUsageLimitState, DaemonToWorker, DisplayMode, InitConfig,
+    ScreenAnalyzerConfig, ScreenStatus, TermActionKey, TuiPromptOption, WorkerToDaemon,
 };
 use image::{ColorType, ImageBuffer, ImageEncoder, Rgba, codecs::png::PngEncoder};
 use reqwest::multipart::{Form, Part};
@@ -27,9 +27,7 @@ use unicode_width::UnicodeWidthChar;
 use uuid::Uuid;
 
 use crate::adapter::CliAdapter;
-use crate::backend::{
-    SessionBackend, SpawnOpts, ZellijBackend, ZellijObserveBackend,
-};
+use crate::backend::{SessionBackend, SpawnOpts, ZellijBackend, ZellijObserveBackend};
 
 fn render_screen_for_display_mode(screen: &str, mode: DisplayMode) -> String {
     match mode {
@@ -1043,15 +1041,11 @@ pub async fn run(init: InitConfig) -> Result<()> {
                 );
                 (Box::new(observe), "observe")
             } else {
-                let zellij = ZellijBackend::new(
-                    session_name.clone(),
-                );
+                let zellij = ZellijBackend::new(session_name.clone());
                 (Box::new(zellij), "spawn")
             }
         } else {
-            let zellij = ZellijBackend::new(
-                session_name.clone(),
-            );
+            let zellij = ZellijBackend::new(session_name.clone());
             (Box::new(zellij), "spawn")
         };
     let spawn_spec = adapter.lock().await.build_spawn_spec(&init);

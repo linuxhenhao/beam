@@ -18,8 +18,7 @@ impl BeamPaths {
             return Ok(Self::from_root(root));
         }
 
-        let home =
-            env::var("HOME").context("HOME is not set and BEAM_HOME was not provided")?;
+        let home = env::var("HOME").context("HOME is not set and BEAM_HOME was not provided")?;
         Ok(Self::from_root(Path::new(&home).join(".beam")))
     }
 

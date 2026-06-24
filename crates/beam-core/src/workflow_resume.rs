@@ -361,9 +361,8 @@ mod tests {
     async fn schedule_resume_reconciles_found_task() {
         let paths = temp_paths("found");
         let _ = std::fs::remove_dir_all(paths.root());
-        let params: BTreeMap<String, Value> = BTreeMap::from([
-            (String::from("name"), Value::String("beam".to_string())),
-        ]);
+        let params: BTreeMap<String, Value> =
+            BTreeMap::from([(String::from("name"), Value::String("beam".to_string()))]);
         let run_id = "run-1";
         bootstrap_workflow_run(
             &paths,

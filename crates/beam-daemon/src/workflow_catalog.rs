@@ -117,8 +117,7 @@ pub(crate) fn parse_workflow_text_command(text: &str) -> Option<WorkflowTextComm
 /// - Duplicate keys are rejected
 /// - Unclosed quotes → [`shell_words::ParseError`] returned as `Invalid`
 fn tokenize_workflow_params(input: &str) -> Result<HashMap<String, String>, String> {
-    let tokens =
-        shell_words::split(input).map_err(|e| format!("参数引号不匹配: {}", e))?;
+    let tokens = shell_words::split(input).map_err(|e| format!("参数引号不匹配: {}", e))?;
 
     let mut params = HashMap::new();
     for token in &tokens {
@@ -231,7 +230,9 @@ pub(crate) async fn list_workflow_definitions() -> Result<Vec<WorkflowCatalogEnt
     list_workflow_definitions_in(workflow_definition_search_dirs()).await
 }
 
-pub(crate) async fn list_workflow_definitions_in(dirs: Vec<PathBuf>) -> Result<Vec<WorkflowCatalogEntry>> {
+pub(crate) async fn list_workflow_definitions_in(
+    dirs: Vec<PathBuf>,
+) -> Result<Vec<WorkflowCatalogEntry>> {
     let mut seen = HashSet::new();
     let mut entries = Vec::new();
     for dir in dirs {
@@ -387,7 +388,10 @@ pub(crate) async fn list_workflow_runs(
     Ok(rows)
 }
 
-pub(crate) fn project_workflow_run_row(run_id: &str, snapshot: &beam_core::RunSnapshotDTO) -> WorkflowRunRow {
+pub(crate) fn project_workflow_run_row(
+    run_id: &str,
+    snapshot: &beam_core::RunSnapshotDTO,
+) -> WorkflowRunRow {
     let effect_set: HashSet<_> = snapshot.dangling.effect_attempted.iter().cloned().collect();
     let wait_set: HashSet<_> = snapshot.dangling.waits.iter().cloned().collect();
     let wr_set: HashSet<_> = snapshot.dangling.wait_resolutions.iter().cloned().collect();

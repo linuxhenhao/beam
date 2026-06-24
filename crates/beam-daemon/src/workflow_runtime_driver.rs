@@ -121,11 +121,8 @@ async fn send_progress_card(state: &AppState, run_id: &str, workflow_id: &str) {
         _ => return,
     };
 
-    let card = crate::workflow_progress_card::build_workflow_progress_card(
-        &snapshot,
-        run_id,
-        workflow_id,
-    );
+    let card =
+        crate::workflow_progress_card::build_workflow_progress_card(&snapshot, run_id, workflow_id);
 
     let binding_path = run_dir.join("chat-binding.json");
     let binding: Option<RunChatBinding> = tokio::fs::read_to_string(&binding_path)
@@ -148,9 +145,7 @@ async fn send_progress_card(state: &AppState, run_id: &str, workflow_id: &str) {
     if let Some(card_msg_id) = card_map.get(run_id) {
         let _ = crate::lark_update_card(state, &bot, card_msg_id, &card_json).await;
     } else {
-        if let Ok(msg_id) =
-            crate::send_lark_card_in_chat(state, &bot, &chat_id, &card_json).await
-        {
+        if let Ok(msg_id) = crate::send_lark_card_in_chat(state, &bot, &chat_id, &card_json).await {
             card_map.insert(run_id.to_string(), msg_id);
         }
     }

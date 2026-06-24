@@ -4,9 +4,9 @@ use std::{os::unix::process::CommandExt, process::Command as StdCommand};
 
 use anyhow::{Context, Result, bail};
 use beam_core::{
-    ApiHealth, BotConfig, BeamPaths,
-    CreateSessionRequest, DaemonRuntimeState, FinalOutputRequest, RestartSessionRequest,
-    ResumeSessionRequest, Session, SessionInputRequest, SessionStatus, SessionSummary,
+    ApiHealth, BeamPaths, BotConfig, CreateSessionRequest, DaemonRuntimeState, FinalOutputRequest,
+    RestartSessionRequest, ResumeSessionRequest, Session, SessionInputRequest, SessionStatus,
+    SessionSummary,
 };
 use clap::{Args, Parser, Subcommand};
 use reqwest::Client;
@@ -324,11 +324,10 @@ fn cmd_schedule(args: Vec<String>, paths: &BeamPaths) -> Result<()> {
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(" ");
-            let parsed = beam_core::parse_schedule(&raw_schedule)
-                .map_err(|err| anyhow::anyhow!(err))?;
+            let parsed =
+                beam_core::parse_schedule(&raw_schedule).map_err(|err| anyhow::anyhow!(err))?;
             let content = if prompt.is_empty() {
-                if let Some(natural) = beam_core::parse_natural_schedule(&positional.join(" "))
-                {
+                if let Some(natural) = beam_core::parse_natural_schedule(&positional.join(" ")) {
                     natural.prompt
                 } else {
                     raw_schedule.clone()
@@ -621,8 +620,7 @@ fn spawn_background_daemon(exe: &Path, paths: &BeamPaths) -> Result<()> {
 mod tests {
     use super::{
         BotInfoEntry, Cli, Command, SessionCommand, active_sessions, discover_session_id_from_pid,
-        format_bot_info_entries_for_cli, format_duration, parse_migrate_flags,
-        setup_backup_file,
+        format_bot_info_entries_for_cli, format_duration, parse_migrate_flags, setup_backup_file,
     };
     use beam_core::{BeamPaths, SessionStatus, SessionSummary};
     use chrono::Utc;
@@ -636,10 +634,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("time before unix epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!(
-            "beam-cli-{label}-{nanos}-{}",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("beam-cli-{label}-{nanos}-{}", std::process::id()))
     }
 
     fn paths_for(root: &Path) -> BeamPaths {
@@ -1277,7 +1272,8 @@ async fn main() -> Result<()> {
                         }
                         SessionCommand::Adopt(args) => {
                             // Parse target as "session:pane_id" or "session"
-                            let (zellij_session, zellij_pane_id) = match args.target.split_once(':') {
+                            let (zellij_session, zellij_pane_id) = match args.target.split_once(':')
+                            {
                                 Some((session, pane)) => (session.to_string(), pane.to_string()),
                                 None => (args.target.clone(), "terminal_0".to_string()),
                             };
@@ -1306,11 +1302,19 @@ async fn main() -> Result<()> {
                             }
                             let items = resp.json::<Vec<serde_json::Value>>().await?;
                             for item in &items {
-                                let session = item.get("zellij_session").and_then(|v| v.as_str()).unwrap_or("-");
-                                let pane_id = item.get("zellij_pane_id").and_then(|v| v.as_str()).unwrap_or("-");
-                                let pid = item.get("cli_pid").and_then(|v| v.as_i64()).unwrap_or(-1);
+                                let session = item
+                                    .get("zellij_session")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("-");
+                                let pane_id = item
+                                    .get("zellij_pane_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("-");
+                                let pid =
+                                    item.get("cli_pid").and_then(|v| v.as_i64()).unwrap_or(-1);
                                 let cwd = item.get("cwd").and_then(|v| v.as_str()).unwrap_or("-");
-                                let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("-");
+                                let title =
+                                    item.get("title").and_then(|v| v.as_str()).unwrap_or("-");
                                 println!(
                                     "{}:{}  pid={}  cwd={}  {}",
                                     session, pane_id, pid, cwd, title
@@ -1363,11 +1367,7 @@ fn setup_backup_file(path: &Path) -> Result<Option<PathBuf>> {
 }
 
 async fn validate_setup_credentials(app_id: &str, app_secret: &str) -> Result<()> {
-    if std::env::var("BEAM_SKIP_SETUP_VALIDATION")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
+    if std::env::var("BEAM_SKIP_SETUP_VALIDATION").ok().as_deref() == Some("1") {
         println!("⚠️  已跳过远程凭证校验（BEAM_SKIP_SETUP_VALIDATION=1）。");
         return Ok(());
     }

@@ -638,11 +638,7 @@ mod tests {
             updated_at: 1,
         };
         // Output blob: { "val": null }
-        fs::write(
-            temp.join("null-out.json"),
-            r#"{"val":null}"#,
-        )
-        .unwrap();
+        fs::write(temp.join("null-out.json"), r#"{"val":null}"#).unwrap();
 
         let def = WorkflowDefinition {
             workflow_id: "flow-null".to_string(),

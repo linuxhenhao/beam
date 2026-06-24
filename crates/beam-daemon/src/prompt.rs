@@ -193,9 +193,8 @@ pub fn build_follow_up_content(content: &str, opts: &FollowUpContentOptions) -> 
     }
 
     if opts.cli_id != "mira" {
-        blocks.push(
-            "<beam_reminder>你可以继续对话，或使用 Ctrl+C 返回</beam_reminder>".to_string(),
-        );
+        blocks
+            .push("<beam_reminder>你可以继续对话，或使用 Ctrl+C 返回</beam_reminder>".to_string());
     }
 
     blocks.join("\n\n")

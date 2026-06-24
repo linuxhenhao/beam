@@ -108,10 +108,7 @@ pub struct TerminalTicketPayload {
 /// Generate a terminal ticket (HMAC-SHA256 signed with per-process random secret).
 ///
 /// Returns a URL-safe ticket string for use as `?beam_terminal_ticket=...`.
-pub fn generate_terminal_ticket(
-    session_id: &str,
-    permission: TerminalPermission,
-) -> String {
+pub fn generate_terminal_ticket(session_id: &str, permission: TerminalPermission) -> String {
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -127,14 +124,12 @@ pub fn generate_terminal_ticket(
     );
 
     let secret = ticket_secret();
-    let mut mac =
-        HmacSha256::new_from_slice(secret).expect("HMAC can take key of any size");
+    let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC can take key of any size");
     mac.update(payload.as_bytes());
     let signature = mac.finalize().into_bytes();
     let sig_hex = hex_encode(&signature);
 
-    let payload_b64 =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.as_bytes());
+    let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.as_bytes());
     format!("{}.{}", payload_b64, sig_hex)
 }
 
@@ -156,8 +151,7 @@ pub fn verify_terminal_ticket(
 
     // Verify HMAC
     let secret = ticket_secret();
-    let mut mac =
-        HmacSha256::new_from_slice(secret).expect("HMAC can take key of any size");
+    let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC can take key of any size");
     mac.update(payload.as_bytes());
     let expected_sig = hex_decode(sig_hex)?;
     mac.verify_slice(&expected_sig).ok()?;
@@ -273,10 +267,7 @@ impl TerminalAuthState {
 
     /// Look up a Beam cookie value and return the mapped entry.
     /// Returns `(zellij_cookie, session_id, permission)` if found and not expired.
-    pub async fn lookup(
-        &self,
-        beam_cookie: &str,
-    ) -> Option<(String, String, TerminalPermission)> {
+    pub async fn lookup(&self, beam_cookie: &str) -> Option<(String, String, TerminalPermission)> {
         let mut inner = self.inner.lock().await;
         inner.prune();
         inner
@@ -450,16 +441,12 @@ mod tests {
     #[test]
     fn ticket_expired_rejected() {
         // Create a ticket-like payload with epoch 0 timestamp
-        let old_payload = format!(
-            "session-x:write:0:{}",
-            uuid::Uuid::new_v4().simple()
-        );
+        let old_payload = format!("session-x:write:0:{}", uuid::Uuid::new_v4().simple());
         let secret = ticket_secret();
         let mut mac = HmacSha256::new_from_slice(secret).unwrap();
         mac.update(old_payload.as_bytes());
         let sig = hex_encode(&mac.finalize().into_bytes());
-        let b64 =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(old_payload.as_bytes());
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(old_payload.as_bytes());
         let ticket = format!("{}.{}", b64, sig);
         let mut used = UsedTickets::default();
         assert!(verify_terminal_ticket(&ticket, "session-x", &mut used).is_none());
@@ -542,9 +529,7 @@ mod tests {
 
     #[test]
     fn extract_beam_cookie_found() {
-        let result = extract_beam_cookie(
-            "beam_terminal_session=abc123def456; other=value",
-        );
+        let result = extract_beam_cookie("beam_terminal_session=abc123def456; other=value");
         assert_eq!(result, Some("abc123def456".to_string()));
     }
 
@@ -560,8 +545,7 @@ mod tests {
 
     #[test]
     fn extract_zellij_set_cookie_standard() {
-        let result =
-            extract_zellij_set_cookie("session=abc123; HttpOnly; SameSite=Strict; Path=/");
+        let result = extract_zellij_set_cookie("session=abc123; HttpOnly; SameSite=Strict; Path=/");
         assert_eq!(result, Some("session=abc123".to_string()));
     }
 
@@ -649,9 +633,6 @@ mod tests {
         // Must be at least 16 bytes (uuid v4)
         assert!(secret.len() >= 16);
         // Must NOT equal the old hardcoded value
-        assert_ne!(
-            secret,
-            b"beam-terminal-proxy-ticket-secret-v1"
-        );
+        assert_ne!(secret, b"beam-terminal-proxy-ticket-secret-v1");
     }
 }

@@ -234,10 +234,7 @@ pub fn create_task(
     Ok(task)
 }
 
-pub fn get_task(
-    paths: &BeamPaths,
-    id: &str,
-) -> Result<Option<ScheduledTask>, ScheduleStoreError> {
+pub fn get_task(paths: &BeamPaths, id: &str) -> Result<Option<ScheduledTask>, ScheduleStoreError> {
     let tasks = load_tasks(paths)?;
     Ok(tasks.get(id).cloned())
 }
@@ -351,9 +348,7 @@ pub fn append_output_log(
     Ok(path)
 }
 
-fn load_tasks(
-    paths: &BeamPaths,
-) -> Result<BTreeMap<String, ScheduledTask>, ScheduleStoreError> {
+fn load_tasks(paths: &BeamPaths) -> Result<BTreeMap<String, ScheduledTask>, ScheduleStoreError> {
     let path = paths.schedules_json();
     if !path.exists() {
         return Ok(BTreeMap::new());

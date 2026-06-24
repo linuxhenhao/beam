@@ -23,9 +23,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use beam_core::{
-    BeamPaths, EventDraft, EventLog, WorkflowActor, WorkflowOutputRef, get_task,
-};
+use beam_core::{BeamPaths, EventDraft, EventLog, WorkflowActor, WorkflowOutputRef, get_task};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -81,11 +79,7 @@ pub trait ProviderReconciler: Send + Sync {
     ///
     /// The default implementation returns an error (idempotent submit not supported).
     #[allow(unused_variables)]
-    async fn idempotent_submit(
-        &self,
-        state: &AppState,
-        canonical_input: &Value,
-    ) -> Result<Value> {
+    async fn idempotent_submit(&self, state: &AppState, canonical_input: &Value) -> Result<Value> {
         anyhow::bail!(
             "idempotentSubmit is not supported for provider '{}'",
             self.provider_name()
@@ -207,7 +201,9 @@ impl ProviderReconciler for BeamScheduleReconciler {
     ) -> Result<Value> {
         // beam-schedule uses readOnlyLookup; idempotentSubmit is not applicable.
         // If the task doesn't exist, the caller should issue a freshRetry.
-        anyhow::bail!("beam-schedule does not support idempotentSubmit; use readOnlyLookup + freshRetry")
+        anyhow::bail!(
+            "beam-schedule does not support idempotentSubmit; use readOnlyLookup + freshRetry"
+        )
     }
 
     fn is_retryable_error(&self, _err: &anyhow::Error) -> bool {
@@ -273,20 +269,14 @@ impl ProviderReconciler for FeishuImReconciler {
         Ok(None)
     }
 
-    async fn idempotent_submit(
-        &self,
-        state: &AppState,
-        canonical_input: &Value,
-    ) -> Result<Value> {
+    async fn idempotent_submit(&self, state: &AppState, canonical_input: &Value) -> Result<Value> {
         let parsed = Self::parse_raw_input(canonical_input)?;
 
         let bot = state
             .bots
             .get(&parsed.lark_app_id)
             .cloned()
-            .ok_or_else(|| {
-                anyhow::anyhow!("bot '{}' is not registered.", parsed.lark_app_id)
-            })?;
+            .ok_or_else(|| anyhow::anyhow!("bot '{}' is not registered.", parsed.lark_app_id))?;
 
         let (submit_kind, message_id) = if let Some(chat_id) = parsed.chat_id.as_deref() {
             let mid = crate::lark_send_chat_message(state, &bot, chat_id, &parsed.content).await?;
@@ -356,10 +346,7 @@ pub enum ReconcileActivityOutcome {
     },
     /// This activity was skipped (not applicable to this reconciler).
     #[allow(dead_code)]
-    Skipped {
-        activity_id: String,
-        reason: String,
-    },
+    Skipped { activity_id: String, reason: String },
 }
 
 /// Run reconciliation for a single dangling activity using the given reconciler.
@@ -390,10 +377,13 @@ pub async fn reconcile_activity(
     let mut outcomes = Vec::new();
 
     // --- Step 1: Check prior reconcileResult recovery ---
-    let snapshot = beam_core::read_run_snapshot(run_dir).await?.ok_or_else(|| {
-        anyhow::anyhow!("missing run snapshot for activity {}", activity_id)
-    })?;
-    let activity = snapshot.activities.iter().find(|a| a.activity_id == activity_id);
+    let snapshot = beam_core::read_run_snapshot(run_dir)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("missing run snapshot for activity {}", activity_id))?;
+    let activity = snapshot
+        .activities
+        .iter()
+        .find(|a| a.activity_id == activity_id);
     if let Some(latest) = activity.and_then(|a| a.attempts.last()) {
         if let Some(recovery) =
             beam_core::recover_prior_reconcile_result(log, activity_id, latest).await?
@@ -886,12 +876,7 @@ pub async fn reconcile_provider_dangling_effects(
 
         // Load sidecar if needed
         let sidecar = if reconciler.requires_effect_input() {
-            beam_core::load_effect_input_sidecar(
-                run_dir,
-                activity_id,
-                &latest.attempt_id,
-            )
-            .await?
+            beam_core::load_effect_input_sidecar(run_dir, activity_id, &latest.attempt_id).await?
         } else {
             None
         };
@@ -1230,7 +1215,10 @@ mod tests {
         let r2 = global_reconciler_registry();
         let p1 = r1 as *const _;
         let p2 = r2 as *const _;
-        assert_eq!(p1, p2, "global reconciler registry should be the same instance");
+        assert_eq!(
+            p1, p2,
+            "global reconciler registry should be the same instance"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1319,7 +1307,9 @@ mod tests {
             "larkAppId": "app-1",
             "content": "no target"
         });
-        let canonical = r.canonical_input(&raw).expect("canonical input should parse");
+        let canonical = r
+            .canonical_input(&raw)
+            .expect("canonical input should parse");
         assert_eq!(canonical["larkAppId"], "app-1");
         assert_eq!(canonical["content"], "no target");
         assert!(canonical.get("chatId").is_none());
@@ -1416,10 +1406,7 @@ mod tests {
             .read_only_lookup(&state, &paths, "nonexistent-key")
             .await
             .expect("read_only_lookup");
-        assert!(
-            result.is_none(),
-            "should return None for non-existent task"
-        );
+        assert!(result.is_none(), "should return None for non-existent task");
         let _ = std::fs::remove_dir_all(paths.root());
     }
 
@@ -1447,8 +1434,7 @@ mod tests {
 
         // Write effectAttempted for a provider that has no reconciler registered
         {
-            let mut log =
-                EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
+            let mut log = EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
             let _ = log
                 .append(EventDraft {
                     event_type: "attemptCreated".to_string(),
@@ -1494,8 +1480,7 @@ mod tests {
             .expect("snapshot");
         let state = make_state(&paths);
         let registry = default_reconciler_registry();
-        let mut log =
-            EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
+        let mut log = EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
 
         let result = reconcile_provider_dangling_effects(
             &registry,
@@ -1509,7 +1494,10 @@ mod tests {
         .expect("reconcile_provider_dangling_effects");
 
         // Should have produced manual recovery (not skipped)
-        assert!(!result.reconciled.is_empty(), "should produce manual recovery");
+        assert!(
+            !result.reconciled.is_empty(),
+            "should produce manual recovery"
+        );
         assert_eq!(result.reconciled[0].decision, "manual");
 
         // Verify the EventLog has the expected manual recovery events
@@ -1523,8 +1511,7 @@ mod tests {
             "decision should be manual"
         );
         assert!(
-            reconcile_result
-                .payload["evidence"]["message"]
+            reconcile_result.payload["evidence"]["message"]
                 .as_str()
                 .unwrap()
                 .contains("no reconciler registered"),
@@ -1551,9 +1538,8 @@ mod tests {
         let paths = temp_paths("registry-schedule-found");
         let _ = std::fs::remove_dir_all(paths.root());
 
-        let params: BTreeMap<String, Value> = BTreeMap::from([
-            (String::from("name"), Value::String("beam".to_string())),
-        ]);
+        let params: BTreeMap<String, Value> =
+            BTreeMap::from([(String::from("name"), Value::String("beam".to_string()))]);
         let run_id = "run-reg-sched";
         bootstrap_workflow_run(
             &paths,
@@ -1573,8 +1559,7 @@ mod tests {
 
         // Write events and create the task
         {
-            let mut log =
-                EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
+            let mut log = EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
             let _ = log
                 .append(EventDraft {
                     event_type: "attemptCreated".to_string(),
@@ -1648,8 +1633,7 @@ mod tests {
             .unwrap()
             .expect("snapshot");
         let state = make_state(&paths);
-        let mut log =
-            EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
+        let mut log = EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
         let registry = default_reconciler_registry();
 
         let result = reconcile_provider_dangling_effects(
@@ -1664,10 +1648,7 @@ mod tests {
         .expect("reconcile");
 
         assert_eq!(result.reconciled.len(), 1);
-        assert_eq!(
-            result.reconciled[0].decision,
-            "completedByIdempotentSubmit"
-        );
+        assert_eq!(result.reconciled[0].decision, "completedByIdempotentSubmit");
 
         let events = log.read_all().unwrap();
         assert!(
@@ -1687,9 +1668,8 @@ mod tests {
         let paths = temp_paths("registry-schedule-freshretry");
         let _ = std::fs::remove_dir_all(paths.root());
 
-        let params: BTreeMap<String, Value> = BTreeMap::from([
-            (String::from("name"), Value::String("beam".to_string())),
-        ]);
+        let params: BTreeMap<String, Value> =
+            BTreeMap::from([(String::from("name"), Value::String("beam".to_string()))]);
         let run_id = "run-reg-sched-fr";
         bootstrap_workflow_run(
             &paths,
@@ -1709,8 +1689,7 @@ mod tests {
 
         // Write events but DO NOT create the task – simulate missing effect
         {
-            let mut log =
-                EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
+            let mut log = EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
             let _ = log
                 .append(EventDraft {
                     event_type: "attemptCreated".to_string(),
@@ -1755,8 +1734,7 @@ mod tests {
             .unwrap()
             .expect("snapshot");
         let state = make_state(&paths);
-        let mut log =
-            EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
+        let mut log = EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
         let registry = default_reconciler_registry();
 
         let result = reconcile_provider_dangling_effects(
@@ -1831,7 +1809,10 @@ mod tests {
             .read_only_lookup(&state, &paths, "any-key")
             .await
             .expect("read_only_lookup");
-        assert!(result.is_none(), "feishu-im should not support readOnlyLookup");
+        assert!(
+            result.is_none(),
+            "feishu-im should not support readOnlyLookup"
+        );
         let _ = std::fs::remove_dir_all(paths.root());
     }
 
@@ -1864,10 +1845,7 @@ mod tests {
             "chatId": "chat-1",
             "content": "hello"
         });
-        let err = r
-            .idempotent_submit(&state, &canonical)
-            .await
-            .unwrap_err();
+        let err = r.idempotent_submit(&state, &canonical).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("not registered"),
             "should mention bot not registered"
@@ -1904,8 +1882,7 @@ mod tests {
 
         // Write attemptCreated + effectAttempted with a deliberately wrong inputHash
         {
-            let mut log =
-                EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
+            let mut log = EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
             let _ = log
                 .append(EventDraft {
                     event_type: "attemptCreated".to_string(),
@@ -1967,8 +1944,7 @@ mod tests {
             .unwrap()
             .expect("snapshot");
         let state = make_state(&paths);
-        let mut log =
-            EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
+        let mut log = EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
         let registry = default_reconciler_registry();
 
         let result = reconcile_provider_dangling_effects(
@@ -2067,14 +2043,15 @@ mod tests {
             "content": "hello"
         });
         let r = FeishuImReconciler;
-        let canonical = r.canonical_input(&sidecar_content).expect("canonical_input");
+        let canonical = r
+            .canonical_input(&sidecar_content)
+            .expect("canonical_input");
         let canonical_bytes = serde_json::to_vec(&canonical).unwrap();
         let correct_hash = sha256_hex(&canonical_bytes);
 
         // Write attemptCreated + effectAttempted with the CORRECT hash
         {
-            let mut log =
-                EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
+            let mut log = EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
             let _ = log
                 .append(EventDraft {
                     event_type: "attemptCreated".to_string(),
@@ -2131,8 +2108,7 @@ mod tests {
             .unwrap()
             .expect("snapshot");
         let state = make_state(&paths);
-        let mut log =
-            EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
+        let mut log = EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
         let registry = default_reconciler_registry();
 
         let result = reconcile_provider_dangling_effects(
@@ -2155,16 +2131,14 @@ mod tests {
 
         // Verify the events do NOT contain hashMismatch
         let events = log.read_all().unwrap();
-        let has_hash_mismatch = events
-            .iter()
-            .any(|e| {
-                e.event_type == "reconcileResult"
-                    && e.payload
-                        .get("evidence")
-                        .and_then(|v| v.get("returned"))
-                        .and_then(|v| v.as_str())
-                        == Some("hashMismatch")
-            });
+        let has_hash_mismatch = events.iter().any(|e| {
+            e.event_type == "reconcileResult"
+                && e.payload
+                    .get("evidence")
+                    .and_then(|v| v.get("returned"))
+                    .and_then(|v| v.as_str())
+                    == Some("hashMismatch")
+        });
         assert!(
             !has_hash_mismatch,
             "should NOT have hashMismatch when hash matches"
@@ -2191,9 +2165,8 @@ mod tests {
         let paths = temp_paths("prior-freshretry-noprogress");
         let _ = std::fs::remove_dir_all(paths.root());
 
-        let params: BTreeMap<String, Value> = BTreeMap::from([
-            (String::from("name"), Value::String("beam".to_string())),
-        ]);
+        let params: BTreeMap<String, Value> =
+            BTreeMap::from([(String::from("name"), Value::String("beam".to_string()))]);
         let run_id = "run-prior-fr";
         bootstrap_workflow_run(
             &paths,
@@ -2213,8 +2186,7 @@ mod tests {
 
         // Write dangling effectAttempted (task does NOT exist → freshRetry).
         {
-            let mut log =
-                EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
+            let mut log = EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
             let _ = log
                 .append(EventDraft {
                     event_type: "attemptCreated".to_string(),
@@ -2255,8 +2227,7 @@ mod tests {
         }
 
         let state = make_state(&paths);
-        let mut log =
-            EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
+        let mut log = EventLog::new(run_id.to_string(), paths.workflow_runs_dir()).unwrap();
         let registry = default_reconciler_registry();
 
         // --- First reconciliation: should write reconcileResult{decision=freshRetry} ---
@@ -2275,13 +2246,20 @@ mod tests {
         .await
         .expect("first reconcile");
 
-        assert_eq!(result1.fresh_retry.len(), 1, "first call: should have freshRetry");
+        assert_eq!(
+            result1.fresh_retry.len(),
+            1,
+            "first call: should have freshRetry"
+        );
         let events_after_first = log.read_all().unwrap();
         let count_after_first = events_after_first.len();
         let has_reconcile_result = events_after_first
             .iter()
             .any(|e| e.event_type == "reconcileResult");
-        assert!(has_reconcile_result, "first call should write reconcileResult");
+        assert!(
+            has_reconcile_result,
+            "first call should write reconcileResult"
+        );
 
         // --- Second reconciliation: prior freshRetry exists, must NOT write new events ---
         let snap2 = beam_core::read_run_snapshot(&paths.workflow_run_dir(run_id))

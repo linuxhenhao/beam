@@ -16,7 +16,6 @@ mod terminal_proxy;
 mod trigger_log;
 mod webhook_key;
 mod webhook_lifecycle;
-mod zellij_web;
 mod workflow_cancellation;
 mod workflow_catalog;
 mod workflow_commands;
@@ -27,6 +26,7 @@ mod workflow_progress_card;
 mod workflow_reconcilers;
 mod workflow_resume;
 mod workflow_runtime_driver;
+mod zellij_web;
 
 // Re-export workflow catalog items for backward compatibility (used by route handlers and tests)
 pub(crate) use workflow_catalog::*;
@@ -47,16 +47,16 @@ use axum::{
 };
 use base64::Engine;
 use beam_core::{
-    AdoptedFrom, ApiHealth, AttemptResumeRequest,
-    BeamPaths, BotConfig, BotSummary, ChatMode, CliUsageLimitState, ColdWorkflowRun,
-    Config, CreateSessionRequest, DaemonOverview, DaemonRuntimeState, DaemonToWorker, DisplayMode,
-    EventDraft, EventLog, EventWindowOpts, FinalOutputKind, FinalOutputRequest, InitConfig,
-    PendingResponseCardState, RestartSessionRequest, ResumeSessionRequest, RunChatBinding,
-    RunStatus, ScreenStatus, Session, SessionGroup, SessionInputRequest, SessionLocateInfo,
-    SessionScope, SessionStatus, SessionSummary, TalkEvaluation, TermActionKey, TuiPromptOption,
-    WaitResolution, WorkerToDaemon, WorkflowActor, WorkflowOutputRef, can_operate, evaluate_talk,
-    grant_restricted, parse_workflow_definition, read_event_window, read_run_events_pure,
-    read_run_snapshot, scan_cold_workflow_runs,
+    AdoptedFrom, ApiHealth, AttemptResumeRequest, BeamPaths, BotConfig, BotSummary, ChatMode,
+    CliUsageLimitState, ColdWorkflowRun, Config, CreateSessionRequest, DaemonOverview,
+    DaemonRuntimeState, DaemonToWorker, DisplayMode, EventDraft, EventLog, EventWindowOpts,
+    FinalOutputKind, FinalOutputRequest, InitConfig, PendingResponseCardState,
+    RestartSessionRequest, ResumeSessionRequest, RunChatBinding, RunStatus, ScreenStatus, Session,
+    SessionGroup, SessionInputRequest, SessionLocateInfo, SessionScope, SessionStatus,
+    SessionSummary, TalkEvaluation, TermActionKey, TuiPromptOption, WaitResolution, WorkerToDaemon,
+    WorkflowActor, WorkflowOutputRef, can_operate, evaluate_talk, grant_restricted,
+    parse_workflow_definition, read_event_window, read_run_events_pure, read_run_snapshot,
+    scan_cold_workflow_runs,
 };
 use chrono::Utc;
 use connector_store::{
@@ -3751,7 +3751,14 @@ fn build_readonly_link_card(session: &Session, ro_url: &str, _ro_token: &str) ->
         .cli_id
         .clone()
         .unwrap_or_else(|| session.session_id.clone());
-    let header = format!("Read-only terminal · {}", if session.title.trim().is_empty() { &title } else { &session.title });
+    let header = format!(
+        "Read-only terminal · {}",
+        if session.title.trim().is_empty() {
+            &title
+        } else {
+            &session.title
+        }
+    );
     serde_json::json!({
         "config": { "wide_screen_mode": true },
         "header": {
@@ -3900,7 +3907,9 @@ fn build_export_text_reply(session: &Session) -> String {
 /// Returns None if the file doesn't exist or can't be parsed.
 fn load_zellij_web_tokens_for_card() -> Option<zellij_web::ZellijWebTokens> {
     let paths = BeamPaths::discover().ok()?;
-    zellij_web::load_zellij_web_tokens(&paths.zellij_web_tokens_json()).ok().flatten()
+    zellij_web::load_zellij_web_tokens(&paths.zellij_web_tokens_json())
+        .ok()
+        .flatten()
 }
 
 /// Build a terminal URL with a Beam ticket attached, falling back to raw token
@@ -6334,7 +6343,13 @@ async fn handle_lark_event_payload(
         LarkEventOutcome::AdoptList => {
             let items = discover_zellij_adopt_candidates();
             if items.is_empty() {
-                let _ = lark_reply_message(&state, &bot, message_id, "no zellij sessions available for adoption").await;
+                let _ = lark_reply_message(
+                    &state,
+                    &bot,
+                    message_id,
+                    "no zellij sessions available for adoption",
+                )
+                .await;
             } else {
                 let body = build_zellij_adopt_list_reply(&items);
                 let _ = lark_reply_message(&state, &bot, message_id, &body).await;
@@ -6749,9 +6764,7 @@ fn normalize_lark_ws_card_action(action: CardAction) -> Value {
 /// [`normalize_lark_ws_card_action`], then restores the dropped fields with
 /// correct precedence: `/operator` is canonical; `/operator_id` is restored
 /// only when `/operator` is absent.
-fn normalize_lark_ws_card_action_from_raw(
-    raw: Value,
-) -> Result<Value, feishu_core::Error> {
+fn normalize_lark_ws_card_action_from_raw(raw: Value) -> Result<Value, feishu_core::Error> {
     // Snapshot fields that feishu-sdk 0.1.2 CardAction deserialization drops:
     // - form_value: CardActionValue has no form_value field
     // - operator / operator_id / context: CardAction has no operator / context fields
@@ -7611,9 +7624,7 @@ async fn handle_lark_card_action_payload(
             let ro_url = build_terminal_url_with_ticket(
                 &format!(
                     "http://{}:{}/s/{}",
-                    state.external_host,
-                    state.config.web.proxy_base_port,
-                    session.session_id,
+                    state.external_host, state.config.web.proxy_base_port, session.session_id,
                 ),
                 &session.session_id,
                 terminal_auth::TerminalPermission::ReadOnly,
@@ -7677,11 +7688,12 @@ async fn handle_lark_card_action_payload(
                 )));
             };
             // Check that write token is available (needed server-side to fulfill the ticket)
-            let write_token_available = zellij_web::load_zellij_web_tokens(&state.paths.zellij_web_tokens_json())
-                .unwrap_or(None)
-                .as_ref()
-                .and_then(|t| t.write_token.as_deref())
-                .map_or(false, |t| !t.is_empty());
+            let write_token_available =
+                zellij_web::load_zellij_web_tokens(&state.paths.zellij_web_tokens_json())
+                    .unwrap_or(None)
+                    .as_ref()
+                    .and_then(|t| t.write_token.as_deref())
+                    .map_or(false, |t| !t.is_empty());
             if !write_token_available {
                 return Ok(Json(build_lark_card_action_toast(
                     "error",
@@ -7691,9 +7703,7 @@ async fn handle_lark_card_action_payload(
             let write_url = build_terminal_url_with_ticket(
                 &format!(
                     "http://{}:{}/s/{}",
-                    state.external_host,
-                    state.config.web.proxy_base_port,
-                    session.session_id,
+                    state.external_host, state.config.web.proxy_base_port, session.session_id,
                 ),
                 &session.session_id,
                 terminal_auth::TerminalPermission::Write,
@@ -8782,13 +8792,12 @@ async fn start_workflow_attempt_resume(
             let resumes = state.attempt_resumes.lock().await;
             resumes.get(&key).cloned()
         } {
-            if let (Some(_web_port), Some(_write_token)) = (existing.web_port, existing.write_token) {
+            if let (Some(_web_port), Some(_write_token)) = (existing.web_port, existing.write_token)
+            {
                 let terminal_url = build_terminal_url_with_ticket(
                     &format!(
                         "http://{}:{}/s/{}",
-                        state.external_host,
-                        state.config.web.proxy_base_port,
-                        existing.session_id,
+                        state.external_host, state.config.web.proxy_base_port, existing.session_id,
                     ),
                     &existing.session_id,
                     terminal_auth::TerminalPermission::Write,
@@ -9089,9 +9098,7 @@ async fn start_workflow_attempt_resume(
     let terminal_url = build_terminal_url_with_ticket(
         &format!(
             "http://{}:{}/s/{}",
-            state.external_host,
-            state.config.web.proxy_base_port,
-            session_id,
+            state.external_host, state.config.web.proxy_base_port, session_id,
         ),
         &session_id,
         terminal_auth::TerminalPermission::Write,
@@ -13628,7 +13635,7 @@ mod tests {
                 cli_bin: None,
                 model: None,
                 working_dir: None,
-                    lark_encrypt_key: None,
+                lark_encrypt_key: None,
                 lark_verification_token: None,
                 allowed_users: vec!["ou_owner".to_string()],
                 private_card: false,
@@ -13698,7 +13705,7 @@ mod tests {
                 cli_bin: None,
                 model: None,
                 working_dir: None,
-                    lark_encrypt_key: None,
+                lark_encrypt_key: None,
                 lark_verification_token: None,
                 allowed_users: Vec::new(),
                 private_card: false,
@@ -15373,8 +15380,7 @@ mod tests {
             }
         });
 
-        let payload = normalize_lark_ws_card_action_from_raw(raw)
-            .expect("normalize from raw");
+        let payload = normalize_lark_ws_card_action_from_raw(raw).expect("normalize from raw");
 
         // Verify the normalized payload has both the value fields and form_value
         assert_eq!(
@@ -15434,8 +15440,7 @@ mod tests {
             "token": "x-token"
         });
 
-        let payload = normalize_lark_ws_card_action_from_raw(raw)
-            .expect("normalize from raw");
+        let payload = normalize_lark_ws_card_action_from_raw(raw).expect("normalize from raw");
 
         // Verify normalized payload has operator and context
         assert_eq!(
@@ -15443,11 +15448,15 @@ mod tests {
             Some("ou_ac4d3f69f6c8b13349ba3f51c7b7c2cc")
         );
         assert_eq!(
-            payload.pointer("/context/open_message_id").and_then(Value::as_str),
+            payload
+                .pointer("/context/open_message_id")
+                .and_then(Value::as_str),
             Some("om_abc123")
         );
         assert_eq!(
-            payload.pointer("/action/value/action").and_then(Value::as_str),
+            payload
+                .pointer("/action/value/action")
+                .and_then(Value::as_str),
             Some("get_write_link")
         );
 
@@ -15485,8 +15494,7 @@ mod tests {
             }
         });
 
-        let payload = normalize_lark_ws_card_action_from_raw(raw)
-            .expect("normalize from raw");
+        let payload = normalize_lark_ws_card_action_from_raw(raw).expect("normalize from raw");
 
         let parsed = parse_lark_card_action(&payload).expect("parse");
         assert_eq!(
@@ -15523,8 +15531,7 @@ mod tests {
             }
         });
 
-        let payload = normalize_lark_ws_card_action_from_raw(raw)
-            .expect("normalize from raw");
+        let payload = normalize_lark_ws_card_action_from_raw(raw).expect("normalize from raw");
 
         let parsed = parse_lark_card_action(&payload).expect("parse");
         assert_eq!(parsed.action, "restart");
@@ -15562,13 +15569,18 @@ mod tests {
             }
         });
 
-        let payload = normalize_lark_ws_card_action_from_raw(raw)
-            .expect("normalize from raw");
+        let payload = normalize_lark_ws_card_action_from_raw(raw).expect("normalize from raw");
         let parsed = parse_lark_card_action(&payload).expect("parse");
 
-        assert_eq!(parsed.operator_open_id.as_deref(), Some("ou_from_operator_id"),
-            "operator_open_id must be extracted from /operator_id/open_id");
-        assert_eq!(parsed.clicked_message_id.as_deref(), Some("om_from_context"));
+        assert_eq!(
+            parsed.operator_open_id.as_deref(),
+            Some("ou_from_operator_id"),
+            "operator_open_id must be extracted from /operator_id/open_id"
+        );
+        assert_eq!(
+            parsed.clicked_message_id.as_deref(),
+            Some("om_from_context")
+        );
     }
 
     #[test]
@@ -15594,8 +15606,7 @@ mod tests {
             }
         });
 
-        let payload = normalize_lark_ws_card_action_from_raw(raw)
-            .expect("normalize from raw");
+        let payload = normalize_lark_ws_card_action_from_raw(raw).expect("normalize from raw");
         let parsed = parse_lark_card_action(&payload).expect("parse");
 
         assert_eq!(
@@ -15603,7 +15614,10 @@ mod tests {
             Some("ou_from_operator"),
             "/operator must win over /operator_id"
         );
-        assert_eq!(parsed.clicked_message_id.as_deref(), Some("om_from_context"));
+        assert_eq!(
+            parsed.clicked_message_id.as_deref(),
+            Some("om_from_context")
+        );
     }
 
     #[test]
@@ -16715,8 +16729,7 @@ mod tests {
         topic_session.chat_type = Some("topic".to_string());
         topic_session.root_message_id = "first-topic-msg".to_string();
 
-        let sessions =
-            HashMap::from([(topic_session.session_id.clone(), topic_session.clone())]);
+        let sessions = HashMap::from([(topic_session.session_id.clone(), topic_session.clone())]);
 
         let parsed = ParsedLarkInboundMessage {
             event_id: "evt-topic-2".to_string(),
@@ -16752,8 +16765,7 @@ mod tests {
         topic_session.root_message_id = "topic-root-msg".to_string();
         topic_session.thread_id = Some("omt_thread".to_string());
 
-        let sessions =
-            HashMap::from([(topic_session.session_id.clone(), topic_session.clone())]);
+        let sessions = HashMap::from([(topic_session.session_id.clone(), topic_session.clone())]);
 
         let parsed = ParsedLarkInboundMessage {
             event_id: "evt-full".to_string(),
@@ -16792,8 +16804,7 @@ mod tests {
         topic_session.chat_type = Some("topic".to_string());
         topic_session.root_message_id = "first-msg".to_string();
 
-        let sessions =
-            HashMap::from([(topic_session.session_id.clone(), topic_session.clone())]);
+        let sessions = HashMap::from([(topic_session.session_id.clone(), topic_session.clone())]);
 
         let parsed = ParsedLarkInboundMessage {
             event_id: "evt-fb".to_string(),
@@ -16836,8 +16847,7 @@ mod tests {
         topic_session.chat_type = Some("topic".to_string());
         topic_session.root_message_id = "topic-a-root".to_string();
 
-        let sessions =
-            HashMap::from([(topic_session.session_id.clone(), topic_session.clone())]);
+        let sessions = HashMap::from([(topic_session.session_id.clone(), topic_session.clone())]);
 
         // Message with different root_id — should NOT match the existing session.
         let parsed = ParsedLarkInboundMessage {
@@ -17012,14 +17022,8 @@ mod tests {
         missing_zellij.worker_pid = Some(12);
         missing_zellij.terminal_url = Some("http://127.0.0.1:4".to_string());
 
-        let mut sessions = HashMap::from([
-            (missing_zellij.session_id.clone(), missing_zellij),
-        ]);
-        let restore = reconcile_restored_sessions_with(
-            &mut sessions,
-            false,
-            |_target| false,
-        );
+        let mut sessions = HashMap::from([(missing_zellij.session_id.clone(), missing_zellij)]);
+        let restore = reconcile_restored_sessions_with(&mut sessions, false, |_target| false);
 
         assert!(restore.is_empty());
         assert_eq!(sessions["zellij-missing"].status, SessionStatus::Closed);
@@ -17036,14 +17040,10 @@ mod tests {
         zellij_session.worker_pid = Some(23);
         zellij_session.terminal_url = Some("http://127.0.0.1:4".to_string());
 
-        let mut eager_sessions = HashMap::from([
-            (zellij_session.session_id.clone(), zellij_session.clone()),
-        ]);
-        let eager_restore = reconcile_restored_sessions_with(
-            &mut eager_sessions,
-            false,
-            |_target| true,
-        );
+        let mut eager_sessions =
+            HashMap::from([(zellij_session.session_id.clone(), zellij_session.clone())]);
+        let eager_restore =
+            reconcile_restored_sessions_with(&mut eager_sessions, false, |_target| true);
         assert_eq!(eager_restore.len(), 1);
         assert!(
             eager_restore
@@ -17057,14 +17057,10 @@ mod tests {
             Some("http://127.0.0.1:4".to_string())
         );
 
-        let mut quiet_sessions = HashMap::from([
-            (zellij_session.session_id.clone(), zellij_session),
-        ]);
-        let quiet_restore = reconcile_restored_sessions_with(
-            &mut quiet_sessions,
-            true,
-            |_target| true,
-        );
+        let mut quiet_sessions =
+            HashMap::from([(zellij_session.session_id.clone(), zellij_session)]);
+        let quiet_restore =
+            reconcile_restored_sessions_with(&mut quiet_sessions, true, |_target| true);
         assert!(quiet_restore.is_empty());
         assert_eq!(quiet_sessions["zellij-live"].status, SessionStatus::Active);
         assert_eq!(quiet_sessions["zellij-live"].worker_pid, None);
@@ -17145,10 +17141,16 @@ mod tests {
         session.scope = SessionScope::Chat;
         // Chat scope matches on chat_id only
         assert!(session_anchor_matches(
-            &session, "app-1", "chat-1", "any-anchor"
+            &session,
+            "app-1",
+            "chat-1",
+            "any-anchor"
         ));
         assert!(!session_anchor_matches(
-            &session, "app-1", "chat-9", "any-anchor"
+            &session,
+            "app-1",
+            "chat-9",
+            "any-anchor"
         ));
     }
 
@@ -17168,15 +17170,24 @@ mod tests {
 
         // Follow-up with root_id=first-msg matches via root_message_id fallback.
         assert!(session_anchor_matches(
-            &session, "app-1", "dm-chat", "first-msg"
+            &session,
+            "app-1",
+            "dm-chat",
+            "first-msg"
         ));
         // Different root_id does NOT match.
         assert!(!session_anchor_matches(
-            &session, "app-1", "dm-chat", "other-msg"
+            &session,
+            "app-1",
+            "dm-chat",
+            "other-msg"
         ));
         // Different chat_id does NOT match.
         assert!(!session_anchor_matches(
-            &session, "app-1", "other-chat", "first-msg"
+            &session,
+            "app-1",
+            "other-chat",
+            "first-msg"
         ));
 
         // After thread_id is backfilled, root_message_id fallback STILL works.
@@ -17185,11 +17196,17 @@ mod tests {
         // which must match root_message_id even though thread_id is now Some.
         session.thread_id = Some("omt_thread".to_string());
         assert!(session_anchor_matches(
-            &session, "app-1", "dm-chat", "first-msg"
+            &session,
+            "app-1",
+            "dm-chat",
+            "first-msg"
         ));
         // thread_id matching also works.
         assert!(session_anchor_matches(
-            &session, "app-1", "dm-chat", "omt_thread"
+            &session,
+            "app-1",
+            "dm-chat",
+            "omt_thread"
         ));
         // A bogus anchor matches neither.
         assert!(!session_anchor_matches(
@@ -17200,7 +17217,10 @@ mod tests {
         // root_message_id (only p2p sessions get the fallback).
         session.chat_type = Some("group".to_string());
         assert!(!session_anchor_matches(
-            &session, "app-1", "dm-chat", "first-msg"
+            &session,
+            "app-1",
+            "dm-chat",
+            "first-msg"
         ));
     }
 
@@ -17548,13 +17568,7 @@ mod tests {
         );
         // p2p with root_id but no thread_id: still use root_id as anchor.
         assert_eq!(
-            decide_lark_routing(
-                "msg-3",
-                "chat-dm",
-                Some("p2p"),
-                Some("first-msg"),
-                None
-            ),
+            decide_lark_routing("msg-3", "chat-dm", Some("p2p"), Some("first-msg"), None),
             (SessionScope::Thread, "first-msg")
         );
     }
@@ -17564,13 +17578,7 @@ mod tests {
         // p2p message with thread_id but no root_id: use thread_id so events
         // after thread_id backfill can still match.
         assert_eq!(
-            decide_lark_routing(
-                "msg-4",
-                "chat-dm",
-                Some("p2p"),
-                None,
-                Some("omt_thread")
-            ),
+            decide_lark_routing("msg-4", "chat-dm", Some("p2p"), None, Some("omt_thread")),
             (SessionScope::Thread, "omt_thread")
         );
     }
@@ -17939,7 +17947,7 @@ mod tests {
                 cli_bin: None,
                 model: None,
                 working_dir: None,
-                    lark_encrypt_key: None,
+                lark_encrypt_key: None,
                 lark_verification_token: None,
                 allowed_users: Vec::new(),
                 private_card: false,
@@ -18013,7 +18021,7 @@ mod tests {
                 cli_bin: None,
                 model: None,
                 working_dir: None,
-                    lark_encrypt_key: None,
+                lark_encrypt_key: None,
                 lark_verification_token: None,
                 allowed_users: Vec::new(),
                 private_card: false,
@@ -18063,7 +18071,7 @@ mod tests {
                 cli_bin: None,
                 model: None,
                 working_dir: None,
-                    lark_encrypt_key: None,
+                lark_encrypt_key: None,
                 lark_verification_token: None,
                 allowed_users: Vec::new(),
                 private_card: false,
@@ -18141,7 +18149,7 @@ mod tests {
                 cli_bin: None,
                 model: None,
                 working_dir: None,
-                    lark_encrypt_key: None,
+                lark_encrypt_key: None,
                 lark_verification_token: None,
                 allowed_users: Vec::new(),
                 private_card: false,

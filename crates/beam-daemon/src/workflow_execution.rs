@@ -20,18 +20,16 @@ use anyhow::Result;
 use axum::extract::{Path as AxumPath, State};
 use beam_core::{
     BootstrapWorkflowRunInput, RunChatBinding, SessionScope, WorkflowDispatchOutcome,
-    WorkflowDispatchRun, WorkflowDispatchSession, WorkflowExecutionHooks,
-    bootstrap_workflow_run, mint_workflow_run_id, parse_workflow_output,
-    with_workflow_output_protocol,
+    WorkflowDispatchRun, WorkflowDispatchSession, WorkflowExecutionHooks, bootstrap_workflow_run,
+    mint_workflow_run_id, parse_workflow_output, with_workflow_output_protocol,
 };
 use chrono::Utc;
 use serde_json::Value;
 
 use crate::{
     AppState, SessionCreateSpec, await_session_final_output, close_session,
-    create_session_internal, expand_tilde,
-    workflow_cancellation, workflow_host_executors, workflow_reconcilers,
-    workflow_runtime_driver,
+    create_session_internal, expand_tilde, workflow_cancellation, workflow_host_executors,
+    workflow_reconcilers, workflow_runtime_driver,
 };
 
 // ---------------------------------------------------------------------------
@@ -56,14 +54,8 @@ impl WorkflowExecutionHooks for DaemonWorkflowExecutionHooks {
             ctx.run_id,
             ctx.activity_id,
         );
-        run_workflow_subagent_session(
-            &self.state,
-            ctx,
-            node,
-            resolved_prompt,
-            Some(&guard.token),
-        )
-        .await
+        run_workflow_subagent_session(&self.state, ctx, node, resolved_prompt, Some(&guard.token))
+            .await
     }
 
     async fn execute_host_executor(
@@ -78,14 +70,7 @@ impl WorkflowExecutionHooks for DaemonWorkflowExecutionHooks {
             ctx.run_id,
             ctx.activity_id,
         );
-        run_workflow_host_executor(
-            &self.state,
-            ctx,
-            node,
-            parsed_input,
-            Some(&guard.token),
-        )
-        .await
+        run_workflow_host_executor(&self.state, ctx, node, parsed_input, Some(&guard.token)).await
     }
 
     fn prepare_host_executor(
@@ -191,10 +176,8 @@ impl WorkflowExecutionHooks for DaemonWorkflowExecutionHooks {
         // If the entire run is being cancelled, cancel all tokens at once.
         // We detect this by checking whether the run-level cancel intent is
         // present in the snapshot.
-        if let Ok(Some(snap)) = beam_core::read_run_snapshot(
-            &self.state.paths.workflow_run_dir(run_id),
-        )
-        .await
+        if let Ok(Some(snap)) =
+            beam_core::read_run_snapshot(&self.state.paths.workflow_run_dir(run_id)).await
         {
             if snap.run.cancelled_run_intent.is_some() {
                 let count = registry.cancel_run(run_id).len();
@@ -267,9 +250,7 @@ impl WorkflowExecutionHooks for DaemonWorkflowExecutionHooks {
 pub(crate) async fn terminate_workflow_worker_process(state: &AppState, session_id: &str) {
     let worker_pid = {
         let sessions = state.sessions.lock().await;
-        sessions
-            .get(session_id)
-            .and_then(|s| s.worker_pid)
+        sessions.get(session_id).and_then(|s| s.worker_pid)
     };
     let Some(pid) = worker_pid else {
         tracing::debug!(
@@ -436,49 +417,26 @@ async fn run_workflow_subagent_session(
     .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
     let session_id = session.session_id.clone();
-    let output =
-        match await_session_final_output(
-            state,
-            &session_id,
-            Duration::from_secs(180),
-            cancel_token,
-        )
-        .await
-        {
-            Ok(output) => output,
-            Err(err) => {
-                // Distinguish cancellation from other failures.
-                if cancel_token.map_or(false, |t| t.is_cancelled()) {
-                    // Forcefully terminate the worker process before cleaning up
-                    // the session.  The gentle DaemonToWorker::Close message may
-                    // never be processed by a stuck worker, so we escalate via
-                    // SIGINT → grace → SIGKILL.
-                    terminate_workflow_worker_process(state, &session_id).await;
-                    let _ =
-                        close_session(State(state.clone()), AxumPath(session_id.clone())).await;
-                    return Ok(WorkflowDispatchOutcome::Cancelled {
-                        cancel_origin_event_id: String::new(),
-                        session: Some(WorkflowDispatchSession {
-                            session_id,
-                            bot_name: node.bot.clone(),
-                            started_at: Utc::now().timestamp_millis().max(0) as u64,
-                            ended_at: Some(Utc::now().timestamp_millis().max(0) as u64),
-                            cli_session_id: None,
-                            lark_app_id: Some("local".to_string()),
-                            cli_id: Some(bot.cli_id.clone()),
-                            working_dir: Some(working_dir),
-                            web_port: None,
-                            log_path: None,
-                        }),
-                    });
-                }
-
-                // Non-cancellation failure: gentle close.
+    let output = match await_session_final_output(
+        state,
+        &session_id,
+        Duration::from_secs(180),
+        cancel_token,
+    )
+    .await
+    {
+        Ok(output) => output,
+        Err(err) => {
+            // Distinguish cancellation from other failures.
+            if cancel_token.map_or(false, |t| t.is_cancelled()) {
+                // Forcefully terminate the worker process before cleaning up
+                // the session.  The gentle DaemonToWorker::Close message may
+                // never be processed by a stuck worker, so we escalate via
+                // SIGINT → grace → SIGKILL.
+                terminate_workflow_worker_process(state, &session_id).await;
                 let _ = close_session(State(state.clone()), AxumPath(session_id.clone())).await;
-                return Ok(WorkflowDispatchOutcome::Failed {
-                    error_code: "WorkerCrashed".to_string(),
-                    error_class: "retryable".to_string(),
-                    error_message: err.to_string(),
+                return Ok(WorkflowDispatchOutcome::Cancelled {
+                    cancel_origin_event_id: String::new(),
                     session: Some(WorkflowDispatchSession {
                         session_id,
                         bot_name: node.bot.clone(),
@@ -493,7 +451,28 @@ async fn run_workflow_subagent_session(
                     }),
                 });
             }
-        };
+
+            // Non-cancellation failure: gentle close.
+            let _ = close_session(State(state.clone()), AxumPath(session_id.clone())).await;
+            return Ok(WorkflowDispatchOutcome::Failed {
+                error_code: "WorkerCrashed".to_string(),
+                error_class: "retryable".to_string(),
+                error_message: err.to_string(),
+                session: Some(WorkflowDispatchSession {
+                    session_id,
+                    bot_name: node.bot.clone(),
+                    started_at: Utc::now().timestamp_millis().max(0) as u64,
+                    ended_at: Some(Utc::now().timestamp_millis().max(0) as u64),
+                    cli_session_id: None,
+                    lark_app_id: Some("local".to_string()),
+                    cli_id: Some(bot.cli_id.clone()),
+                    working_dir: Some(working_dir),
+                    web_port: None,
+                    log_path: None,
+                }),
+            });
+        }
+    };
     let parsed_output = parse_workflow_output(&output).unwrap_or(Value::String(output.clone()));
     let _ = close_session(State(state.clone()), AxumPath(session_id.clone())).await;
     Ok(WorkflowDispatchOutcome::Succeeded {

@@ -1406,7 +1406,9 @@ mod tests {
     use crate::RunChatBinding;
     use crate::RunState;
     use crate::workflow_definition::NodeBase;
-    use crate::workflow_definition::{DecisionNode, HumanGate, LoopNode, LoopOutputProjection, LoopTerminate};
+    use crate::workflow_definition::{
+        DecisionNode, HumanGate, LoopNode, LoopOutputProjection, LoopTerminate,
+    };
     use crate::workflow_snapshot::NodeStatus;
     use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
@@ -1490,9 +1492,8 @@ mod tests {
         fs::write(run_dir.join("params.json"), r#"{"name":"beam"}"#).unwrap();
 
         let paths = crate::BeamPaths::from_root(run_dir.clone());
-        let params: BTreeMap<String, Value> = BTreeMap::from([
-            (String::from("name"), Value::String("beam".to_string())),
-        ]);
+        let params: BTreeMap<String, Value> =
+            BTreeMap::from([(String::from("name"), Value::String("beam".to_string()))]);
         let run_id = "run-1";
         let bootstrap = crate::bootstrap_workflow_run(
             &paths,
@@ -2213,9 +2214,8 @@ mod tests {
         let _ = fs::remove_dir_all(&run_dir);
         fs::create_dir_all(run_dir.join("blobs")).unwrap();
         let paths = crate::BeamPaths::from_root(run_dir.clone());
-        let params: BTreeMap<String, Value> = BTreeMap::from([
-            (String::from("name"), Value::String("beam".to_string())),
-        ]);
+        let params: BTreeMap<String, Value> =
+            BTreeMap::from([(String::from("name"), Value::String("beam".to_string()))]);
         let run_id = "run-1";
         crate::bootstrap_workflow_run(
             &paths,
@@ -4427,7 +4427,10 @@ mod tests {
                     && e.payload.get("iteration").and_then(Value::as_u64) == Some(1)
             });
             assert!(loop_started, "expected loopStarted event for rl");
-            assert!(iter_started, "expected loopIterationStarted with iteration 1 for rl");
+            assert!(
+                iter_started,
+                "expected loopIterationStarted with iteration 1 for rl"
+            );
         }
 
         let _ = fs::remove_dir_all(&run_dir);
@@ -4480,36 +4483,40 @@ mod tests {
         // Verify loop lifecycle events
         let loop_started = events.iter().find(|e| e.event_type == "loopStarted");
         assert!(loop_started.is_some(), "missing loopStarted");
-        let iter_started = events
-            .iter()
-            .find(|e| e.event_type == "loopIterationStarted" && e.payload.get("iteration") == Some(&Value::Number(1.into())));
+        let iter_started = events.iter().find(|e| {
+            e.event_type == "loopIterationStarted"
+                && e.payload.get("iteration") == Some(&Value::Number(1.into()))
+        });
         assert!(iter_started.is_some(), "missing loopIterationStarted(1)");
 
         // Verify activity IDs use the correct loop-scoped format
-        let implement_work_id =
-            format!("{}::loop::review-loop.1::work::implement", run_id);
+        let implement_work_id = format!("{}::loop::review-loop.1::work::implement", run_id);
         let review_work_id = format!("{}::loop::review-loop.1::work::review", run_id);
-        let decision_gate_id =
-            format!("{}::loop::review-loop.1::gate::reviewDecision", run_id);
+        let decision_gate_id = format!("{}::loop::review-loop.1::gate::reviewDecision", run_id);
 
         let has_implement = events.iter().any(|e| {
             e.event_type == "attemptCreated"
-                && e.payload.get("activityId").and_then(Value::as_str)
-                    == Some(&implement_work_id)
+                && e.payload.get("activityId").and_then(Value::as_str) == Some(&implement_work_id)
         });
         let has_review = events.iter().any(|e| {
             e.event_type == "attemptCreated"
-                && e.payload.get("activityId").and_then(Value::as_str)
-                    == Some(&review_work_id)
+                && e.payload.get("activityId").and_then(Value::as_str) == Some(&review_work_id)
         });
         let has_decision_gate = events.iter().any(|e| {
             e.event_type == "waitCreated"
-                && e.payload.get("activityId").and_then(Value::as_str)
-                    == Some(&decision_gate_id)
+                && e.payload.get("activityId").and_then(Value::as_str) == Some(&decision_gate_id)
         });
 
-        assert!(has_implement, "missing implement work dispatch: {}", implement_work_id);
-        assert!(has_review, "missing review work dispatch: {}", review_work_id);
+        assert!(
+            has_implement,
+            "missing implement work dispatch: {}",
+            implement_work_id
+        );
+        assert!(
+            has_review,
+            "missing review work dispatch: {}",
+            review_work_id
+        );
         assert!(
             has_decision_gate,
             "missing reviewDecision gate wait: {}",
@@ -4546,8 +4553,7 @@ mod tests {
         )
         .unwrap();
 
-        let decision_gate_id =
-            format!("{}::loop::review-loop.1::gate::reviewDecision", run_id);
+        let decision_gate_id = format!("{}::loop::review-loop.1::gate::reviewDecision", run_id);
 
         // First: drive to AwaitingWait.
         {
@@ -4598,18 +4604,23 @@ mod tests {
                     && e.payload.get("iteration").and_then(Value::as_u64) == Some(1)
                     && e.payload.get("resolution").and_then(Value::as_str) == Some("rejected")
             });
-            assert!(iter1_finished, "expected loopIterationFinished with resolution=rejected for iteration 1");
+            assert!(
+                iter1_finished,
+                "expected loopIterationFinished with resolution=rejected for iteration 1"
+            );
 
             // Verify StartLoopIteration(2).
             let iter2_started = events.iter().any(|e| {
                 e.event_type == "loopIterationStarted"
                     && e.payload.get("iteration").and_then(Value::as_u64) == Some(2)
             });
-            assert!(iter2_started, "expected loopIterationStarted with iteration=2");
+            assert!(
+                iter2_started,
+                "expected loopIterationStarted with iteration=2"
+            );
 
             // Verify iteration 2 dispatches work (body nodes run again).
-            let implement_work_v2 =
-                format!("{}::loop::review-loop.2::work::implement", run_id);
+            let implement_work_v2 = format!("{}::loop::review-loop.2::work::implement", run_id);
             let has_iter2_implement = events.iter().any(|e| {
                 e.event_type == "attemptCreated"
                     && e.payload.get("activityId").and_then(Value::as_str)
@@ -4652,8 +4663,7 @@ mod tests {
         )
         .unwrap();
 
-        let decision_gate_id =
-            format!("{}::loop::review-loop.1::gate::reviewDecision", run_id);
+        let decision_gate_id = format!("{}::loop::review-loop.1::gate::reviewDecision", run_id);
 
         // First: drive to AwaitingWait.
         {
@@ -4809,12 +4819,10 @@ mod tests {
         assert!(iter_started, "expected loopIterationStarted(1)");
 
         // Body node (implement) should have failed.
-        let implement_work_id =
-            format!("{}::loop::review-loop.1::work::implement", run_id);
+        let implement_work_id = format!("{}::loop::review-loop.1::work::implement", run_id);
         let has_implement_fail = events.iter().any(|e| {
             e.event_type == "activityFailed"
-                && e.payload.get("activityId").and_then(Value::as_str)
-                    == Some(&implement_work_id)
+                && e.payload.get("activityId").and_then(Value::as_str) == Some(&implement_work_id)
         });
         assert!(
             has_implement_fail,
@@ -4876,8 +4884,7 @@ mod tests {
         // We'll go through iterations 1→2→3, rejecting each time until the
         // final one causes failure.
 
-        let iter1_gate_id =
-            format!("{}::loop::review-loop.1::gate::reviewDecision", run_id);
+        let iter1_gate_id = format!("{}::loop::review-loop.1::gate::reviewDecision", run_id);
 
         // Iteration 1: drive to gate, reject.
         {
@@ -4940,8 +4947,7 @@ mod tests {
         // Reject iteration 2.
         {
             let mut log = EventLog::new(run_id, paths.workflow_runs_dir()).unwrap();
-            let iter2_gate_id =
-                format!("{}::loop::review-loop.2::gate::reviewDecision", run_id);
+            let iter2_gate_id = format!("{}::loop::review-loop.2::gate::reviewDecision", run_id);
             let _ = log
                 .append(EventDraft {
                     event_type: "waitResolved".to_string(),
@@ -4989,8 +4995,7 @@ mod tests {
         // Reject iteration 3 (final iteration) → loop should fail.
         {
             let mut log = EventLog::new(run_id, paths.workflow_runs_dir()).unwrap();
-            let iter3_gate_id =
-                format!("{}::loop::review-loop.3::gate::reviewDecision", run_id);
+            let iter3_gate_id = format!("{}::loop::review-loop.3::gate::reviewDecision", run_id);
             let _ = log
                 .append(EventDraft {
                     event_type: "waitResolved".to_string(),
@@ -5095,10 +5100,10 @@ mod tests {
             _node: &SubagentNode,
             resolved_prompt: String,
         ) -> Result<WorkflowDispatchOutcome> {
-            self.prompts.lock().await.push((
-                _ctx.node_id.to_string(),
-                resolved_prompt.clone(),
-            ));
+            self.prompts
+                .lock()
+                .await
+                .push((_ctx.node_id.to_string(), resolved_prompt.clone()));
             // Produce a JSON object with common workflow output fields so
             // that $ref bindings (implement.output.code,
             // review.output.preview) resolve correctly.
@@ -5136,9 +5141,10 @@ mod tests {
         fs::create_dir_all(run_dir.join("blobs")).unwrap();
         let paths = crate::BeamPaths::from_root(run_dir.clone());
         let run_id = "run-real-crl-1";
-        let params: BTreeMap<String, Value> = BTreeMap::from([
-            (String::from("task"), Value::String("add CLI echo command".to_string())),
-        ]);
+        let params: BTreeMap<String, Value> = BTreeMap::from([(
+            String::from("task"),
+            Value::String("add CLI echo command".to_string()),
+        )]);
         crate::bootstrap_workflow_run(
             &paths,
             crate::BootstrapWorkflowRunInput {
@@ -5195,18 +5201,12 @@ mod tests {
 
         // Verify loop-scoped activity IDs exist
         let events = rt.log.read_all().unwrap();
-        let decision_gate_id =
-            format!("{}::loop::review-loop.1::gate::reviewDecision", run_id);
+        let decision_gate_id = format!("{}::loop::review-loop.1::gate::reviewDecision", run_id);
         let has_gate_wait = events.iter().any(|e| {
             e.event_type == "waitCreated"
-                && e.payload.get("activityId").and_then(Value::as_str)
-                    == Some(&decision_gate_id)
+                && e.payload.get("activityId").and_then(Value::as_str) == Some(&decision_gate_id)
         });
-        assert!(
-            has_gate_wait,
-            "expected gate wait for {}",
-            decision_gate_id
-        );
+        assert!(has_gate_wait, "expected gate wait for {}", decision_gate_id);
 
         let _ = fs::remove_dir_all(&run_dir);
     }
@@ -5225,9 +5225,8 @@ mod tests {
         fs::create_dir_all(run_dir.join("blobs")).unwrap();
         let paths = crate::BeamPaths::from_root(run_dir.clone());
         let run_id = "run-real-crl-rej";
-        let params: BTreeMap<String, Value> = BTreeMap::from([
-            (String::from("task"), Value::String("add test".to_string())),
-        ]);
+        let params: BTreeMap<String, Value> =
+            BTreeMap::from([(String::from("task"), Value::String("add test".to_string()))]);
         crate::bootstrap_workflow_run(
             &paths,
             crate::BootstrapWorkflowRunInput {
@@ -5261,8 +5260,7 @@ mod tests {
         }
 
         // Reject iteration 1 with a comment.
-        let decision_gate_id =
-            format!("{}::loop::review-loop.1::gate::reviewDecision", run_id);
+        let decision_gate_id = format!("{}::loop::review-loop.1::gate::reviewDecision", run_id);
         {
             let mut log = EventLog::new(run_id, paths.workflow_runs_dir()).unwrap();
             let _ = log
@@ -5299,7 +5297,10 @@ mod tests {
                 e.event_type == "loopIterationFinished"
                     && e.payload.get("iteration").and_then(Value::as_u64) == Some(1)
             });
-            assert!(iter1_finished.is_some(), "expected loopIterationFinished for iteration 1");
+            assert!(
+                iter1_finished.is_some(),
+                "expected loopIterationFinished for iteration 1"
+            );
             let payload = &iter1_finished.unwrap().payload;
             assert_eq!(
                 payload.get("resolution").and_then(Value::as_str),
@@ -5360,9 +5361,10 @@ mod tests {
         fs::create_dir_all(run_dir.join("blobs")).unwrap();
         let paths = crate::BeamPaths::from_root(run_dir.clone());
         let run_id = "run-real-crl-app";
-        let params: BTreeMap<String, Value> = BTreeMap::from([
-            (String::from("task"), Value::String("add feature".to_string())),
-        ]);
+        let params: BTreeMap<String, Value> = BTreeMap::from([(
+            String::from("task"),
+            Value::String("add feature".to_string()),
+        )]);
         crate::bootstrap_workflow_run(
             &paths,
             crate::BootstrapWorkflowRunInput {
@@ -5392,8 +5394,7 @@ mod tests {
         }
 
         // Approve.
-        let decision_gate_id =
-            format!("{}::loop::review-loop.1::gate::reviewDecision", run_id);
+        let decision_gate_id = format!("{}::loop::review-loop.1::gate::reviewDecision", run_id);
         {
             let mut log = EventLog::new(run_id, paths.workflow_runs_dir()).unwrap();
             let _ = log

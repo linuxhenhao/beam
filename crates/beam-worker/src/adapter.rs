@@ -235,11 +235,7 @@ mod tests {
     use std::fs;
 
     fn temp_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "beam-common-{}-{}",
-            name,
-            uuid::Uuid::new_v4()
-        ))
+        std::env::temp_dir().join(format!("beam-common-{}-{}", name, uuid::Uuid::new_v4()))
     }
 
     #[test]

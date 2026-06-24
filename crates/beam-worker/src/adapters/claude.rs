@@ -375,11 +375,7 @@ mod tests {
     use beam_core::FinalOutputKind;
 
     fn temp_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "beam-claude-{}-{}",
-            name,
-            uuid::Uuid::new_v4()
-        ))
+        std::env::temp_dir().join(format!("beam-claude-{}-{}", name, uuid::Uuid::new_v4()))
     }
 
     #[test]

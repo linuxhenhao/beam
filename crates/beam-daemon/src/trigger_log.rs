@@ -70,10 +70,7 @@ pub fn new_trigger_id() -> String {
 }
 
 #[cfg(test)]
-pub fn append_trigger_log(
-    paths: &BeamPaths,
-    entry: TriggerLogEntry,
-) -> Result<TriggerLogEntry> {
+pub fn append_trigger_log(paths: &BeamPaths, entry: TriggerLogEntry) -> Result<TriggerLogEntry> {
     let fp = path(paths);
     if let Some(parent) = fp.parent() {
         fs::create_dir_all(parent)?;

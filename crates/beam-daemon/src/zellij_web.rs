@@ -46,13 +46,17 @@ pub struct ZellijWebTokens {
 impl ZellijWebTokens {
     /// Check whether both tokens are present and valid.
     pub fn is_complete(&self) -> bool {
-        self.read_only_token.as_ref().map_or(false, |t| !t.is_empty())
+        self.read_only_token
+            .as_ref()
+            .map_or(false, |t| !t.is_empty())
             && self.write_token.as_ref().map_or(false, |t| !t.is_empty())
     }
 
     /// Check whether at least one usable token exists.
     pub fn has_any_token(&self) -> bool {
-        self.read_only_token.as_ref().map_or(false, |t| !t.is_empty())
+        self.read_only_token
+            .as_ref()
+            .map_or(false, |t| !t.is_empty())
             || self.write_token.as_ref().map_or(false, |t| !t.is_empty())
     }
 }
@@ -97,9 +101,8 @@ fn parse_zellij_web_status_output(stdout: &str, stderr: &str) -> bool {
     let combined = format!("{}\n{}", stdout, stderr);
     let lower = combined.to_lowercase();
 
-    let is_online = lower.contains("running")
-        || lower.contains("online")
-        || lower.contains("listening");
+    let is_online =
+        lower.contains("running") || lower.contains("online") || lower.contains("listening");
     let is_offline = lower.contains("offline")
         || lower.contains("stopped")
         || lower.contains("not running")
@@ -152,7 +155,10 @@ pub fn zellij_web_start(port: u16) -> Result<()> {
         );
     }
 
-    info!("zellij web start command succeeded, waiting for server to come online on port {}", port);
+    info!(
+        "zellij web start command succeeded, waiting for server to come online on port {}",
+        port
+    );
 
     // Poll for up to 10 seconds, every 200 ms
     if wait_for_zellij_web(port, Duration::from_secs(10), Duration::from_millis(200)) {
@@ -189,12 +195,28 @@ enum TokenStrategy {
 impl TokenStrategy {
     fn args(&self) -> Vec<String> {
         match self {
-            TokenStrategy::Named { token_name, read_only } => {
-                let flag = if *read_only { "--create-read-only-token" } else { "--create-token" };
-                vec!["web".into(), flag.into(), "--token-name".into(), token_name.clone()]
+            TokenStrategy::Named {
+                token_name,
+                read_only,
+            } => {
+                let flag = if *read_only {
+                    "--create-read-only-token"
+                } else {
+                    "--create-token"
+                };
+                vec![
+                    "web".into(),
+                    flag.into(),
+                    "--token-name".into(),
+                    token_name.clone(),
+                ]
             }
             TokenStrategy::Bare { read_only } => {
-                let flag = if *read_only { "--create-read-only-token" } else { "--create-token" };
+                let flag = if *read_only {
+                    "--create-read-only-token"
+                } else {
+                    "--create-token"
+                };
                 vec!["web".into(), flag.into()]
             }
         }
@@ -211,9 +233,7 @@ impl TokenStrategy {
 
 /// Run a token creation command; returns (stdout_lines, stderr_lines, success).
 fn run_token_create(strategy: &TokenStrategy) -> (String, String, bool) {
-    let output = Command::new("zellij")
-        .args(strategy.args())
-        .output();
+    let output = Command::new("zellij").args(strategy.args()).output();
     match output {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -271,9 +291,10 @@ fn extract_uuid_from_line(line: &str) -> Option<String> {
             && window[13] == b'-'
             && window[18] == b'-'
             && window[23] == b'-'
-            && window.iter().enumerate().all(|(i, &b)| {
-                [8, 13, 18, 23].contains(&i) || b.is_ascii_hexdigit()
-            })
+            && window
+                .iter()
+                .enumerate()
+                .all(|(i, &b)| [8, 13, 18, 23].contains(&i) || b.is_ascii_hexdigit())
         {
             return Some(String::from_utf8_lossy(window).to_string());
         }
@@ -379,7 +400,11 @@ fn fill_missing_tokens(existing: ZellijWebTokens, port: u16) -> Result<ZellijWeb
     }
 
     // Try to create missing read-only token
-    if tokens.read_only_token.as_ref().map_or(true, |t| t.is_empty()) {
+    if tokens
+        .read_only_token
+        .as_ref()
+        .map_or(true, |t| t.is_empty())
+    {
         match try_create_token(false, true) {
             Ok(tok) => {
                 info!("filled missing read-only token");
@@ -437,7 +462,10 @@ fn create_tokens_with_fallback(port: u16) -> Result<ZellijWebTokens> {
     }
 
     if !tokens.is_complete() {
-        let missing = match (tokens.read_only_token.is_some(), tokens.write_token.is_some()) {
+        let missing = match (
+            tokens.read_only_token.is_some(),
+            tokens.write_token.is_some(),
+        ) {
             (false, true) => "read-only",
             (true, false) => "write",
             _ => unreachable!(),
@@ -456,12 +484,20 @@ fn create_tokens_with_fallback(port: u16) -> Result<ZellijWebTokens> {
 /// `want_write`: true = write token, false = read-only.
 /// `primary`: true for the first token attempt (write), false for second (read-only).
 fn try_create_token(want_write: bool, is_read_only: bool) -> Result<String> {
-    let token_name = if want_write { "beam-write" } else { "beam-read-only" };
+    let token_name = if want_write {
+        "beam-write"
+    } else {
+        "beam-read-only"
+    };
     let ro_name = format!("{}-ro", token_name);
 
     // Strategy 1: try with --token-name (future zellij)
     let strategy = TokenStrategy::Named {
-        token_name: if is_read_only { ro_name } else { token_name.to_string() },
+        token_name: if is_read_only {
+            ro_name
+        } else {
+            token_name.to_string()
+        },
         read_only: is_read_only,
     };
     let (stdout, stderr, success) = run_token_create(&strategy);
@@ -491,9 +527,7 @@ fn try_create_token(want_write: bool, is_read_only: bool) -> Result<String> {
         if let Some(tok) = parse_token_from_output(&stdout, &stderr) {
             return Ok(tok);
         }
-        bail!(
-            "bare token created but could not parse output: stdout={stdout:?} stderr={stderr:?}"
-        );
+        bail!("bare token created but could not parse output: stdout={stdout:?} stderr={stderr:?}");
     }
 
     if is_name_conflict(&stderr) {
@@ -503,10 +537,7 @@ fn try_create_token(want_write: bool, is_read_only: bool) -> Result<String> {
         );
     }
 
-    bail!(
-        "bare token creation failed: stderr={}",
-        stderr.trim()
-    );
+    bail!("bare token creation failed: stderr={}", stderr.trim());
 }
 
 // ── tests ─────────────────────────────────────────────────────────────
@@ -519,7 +550,10 @@ mod tests {
 
     #[test]
     fn named_strategy_args_has_no_ip_port() {
-        let s = TokenStrategy::Named { token_name: "beam-read-only".into(), read_only: true };
+        let s = TokenStrategy::Named {
+            token_name: "beam-read-only".into(),
+            read_only: true,
+        };
         let args = s.args();
         let joined = args.join(" ");
         assert!(args.contains(&"web".to_string()));
@@ -532,7 +566,10 @@ mod tests {
 
     #[test]
     fn named_strategy_rw_args_has_no_ip_port() {
-        let s = TokenStrategy::Named { token_name: "beam-write".into(), read_only: false };
+        let s = TokenStrategy::Named {
+            token_name: "beam-write".into(),
+            read_only: false,
+        };
         let args = s.args();
         let joined = args.join(" ");
         assert!(args.contains(&"--create-token".to_string()));
@@ -548,7 +585,10 @@ mod tests {
         let joined = args.join(" ");
         assert!(args.contains(&"web".to_string()));
         assert!(args.contains(&"--create-read-only-token".to_string()));
-        assert!(!joined.contains("--token-name"), "bare strategy must not have --token-name");
+        assert!(
+            !joined.contains("--token-name"),
+            "bare strategy must not have --token-name"
+        );
         assert!(!joined.contains("--ip"));
         assert!(!joined.contains("--port"));
     }
@@ -575,7 +615,10 @@ mod tests {
         // Real zellij 0.44.x output: "Created token successfully\n\ntoken_1: <uuid> (read-only)"
         let stdout = "Created token successfully\n\ntoken_1: 550e8400-e29b-41d4-a716-446655440000 (read-only)\n";
         let token = parse_token_from_output(stdout, "");
-        assert_eq!(token, Some("550e8400-e29b-41d4-a716-446655440000".to_string()));
+        assert_eq!(
+            token,
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string())
+        );
     }
 
     #[test]
@@ -584,7 +627,10 @@ mod tests {
         let stdout = "token_1: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee (read-only)\n\
                        token_2: 11111111-2222-3333-4444-555555555555 (write)\n";
         let token = parse_token_from_output(stdout, "");
-        assert_eq!(token, Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string()));
+        assert_eq!(
+            token,
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string())
+        );
     }
 
     #[test]
@@ -643,7 +689,10 @@ mod tests {
     #[test]
     fn extract_uuid_missing_dashes_not_matched() {
         // Without dashes, not recognized as UUID (handled by hex fallback)
-        assert_eq!(extract_uuid_from_line("550e8400e29b41d4a716446655440000"), None);
+        assert_eq!(
+            extract_uuid_from_line("550e8400e29b41d4a716446655440000"),
+            None
+        );
     }
 
     // ── is_name_conflict / is_token_name_rejected ──
@@ -651,7 +700,9 @@ mod tests {
     #[test]
     fn detect_name_conflict() {
         assert!(is_name_conflict("Token name 'token_1' already exists"));
-        assert!(is_name_conflict("Failed to create token: Token name 'token_1' already exists"));
+        assert!(is_name_conflict(
+            "Failed to create token: Token name 'token_1' already exists"
+        ));
         assert!(!is_name_conflict("some other error"));
     }
 
@@ -660,19 +711,27 @@ mod tests {
         assert!(is_token_name_rejected(
             "The argument '--create-token' cannot be used with one or more of the other specified arguments"
         ));
-        assert!(!is_token_name_rejected("Token name 'token_1' already exists"));
+        assert!(!is_token_name_rejected(
+            "Token name 'token_1' already exists"
+        ));
     }
 
     // ── parse_zellij_web_status_output ──
 
     #[test]
     fn status_online_with_running_keyword() {
-        assert!(parse_zellij_web_status_output("server is running on port 8801", ""));
+        assert!(parse_zellij_web_status_output(
+            "server is running on port 8801",
+            ""
+        ));
     }
 
     #[test]
     fn status_online_with_listening_keyword() {
-        assert!(parse_zellij_web_status_output("listening on 127.0.0.1:8801", ""));
+        assert!(parse_zellij_web_status_output(
+            "listening on 127.0.0.1:8801",
+            ""
+        ));
     }
 
     #[test]
@@ -699,7 +758,10 @@ mod tests {
     #[test]
     fn status_both_online_and_offline_is_offline() {
         // If output somehow contains both, offline wins (safety)
-        assert!(!parse_zellij_web_status_output("running but also offline", ""));
+        assert!(!parse_zellij_web_status_output(
+            "running but also offline",
+            ""
+        ));
     }
 
     // ── ZellijWebTokens ──

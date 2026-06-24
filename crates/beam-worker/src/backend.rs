@@ -8,8 +8,8 @@ use std::sync::{
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use tokio::io::AsyncBufReadExt;
-use tokio::sync::broadcast;
 use tokio::process::Command as TokioCommand;
+use tokio::sync::broadcast;
 use tracing::warn;
 
 #[derive(Debug, Clone)]
@@ -586,8 +586,7 @@ pub fn viewport_to_ansi_chunk(viewport: &[String]) -> String {
     if viewport.is_empty() {
         return String::new();
     }
-    let mut out =
-        String::with_capacity(viewport.iter().map(|l| l.len() + 2).sum::<usize>() + 16);
+    let mut out = String::with_capacity(viewport.iter().map(|l| l.len() + 2).sum::<usize>() + 16);
     out.push_str("\x1b[?25l");
     out.push_str("\x1b[H");
     out.push_str("\x1b[2J");
@@ -702,9 +701,8 @@ async fn run_zellij_subscribe(
 #[cfg(test)]
 mod tests {
     use super::{
-        numeric_pane_id,
-        parse_zellij_cursor_from_list_panes, parse_zellij_subscribe_viewport,
-        viewport_to_ansi_chunk, is_zellij_pane_closed,
+        is_zellij_pane_closed, numeric_pane_id, parse_zellij_cursor_from_list_panes,
+        parse_zellij_subscribe_viewport, viewport_to_ansi_chunk,
     };
 
     // ---- numeric_pane_id tests ----
@@ -753,10 +751,7 @@ mod tests {
     fn parse_subscribe_pane_update_top_level_viewport() {
         let line = r#"{"event":"pane_update","pane_id":"terminal_1","viewport":["a","b"],"scrollback":null,"is_initial":true}"#;
         let viewport = parse_zellij_subscribe_viewport(line);
-        assert_eq!(
-            viewport,
-            Some(vec!["a".to_string(), "b".to_string()])
-        );
+        assert_eq!(viewport, Some(vec!["a".to_string(), "b".to_string()]));
     }
 
     #[test]
@@ -825,7 +820,10 @@ mod tests {
         assert!(chunk.contains("\x1b[2J"), "should contain clear screen");
         assert!(chunk.contains("\x1b[?25l"), "should hide cursor");
         assert!(chunk.contains("\x1b[?25h"), "should show cursor");
-        assert!(chunk.contains("hello\r\nworld"), "should join lines with CRLF");
+        assert!(
+            chunk.contains("hello\r\nworld"),
+            "should join lines with CRLF"
+        );
     }
 
     #[test]
@@ -834,7 +832,10 @@ mod tests {
         let chunk = viewport_to_ansi_chunk(&viewport);
         assert!(!chunk.ends_with("\r\n"), "must not trail with CRLF");
         assert!(!chunk.ends_with('\n'), "must not trail with LF");
-        assert!(chunk.ends_with("line1\x1b[?25h"), "should end with last line + show cursor");
+        assert!(
+            chunk.ends_with("line1\x1b[?25h"),
+            "should end with last line + show cursor"
+        );
     }
 
     #[test]
@@ -869,10 +870,7 @@ mod tests {
         let json = r#"[
             {"id":1,"is_plugin":false,"cursor_coordinates_in_pane":{"x":10,"y":5}}
         ]"#;
-        assert_eq!(
-            parse_zellij_cursor_from_list_panes(json, 1),
-            Some((10, 5))
-        );
+        assert_eq!(parse_zellij_cursor_from_list_panes(json, 1), Some((10, 5)));
     }
 
     #[test]
@@ -880,10 +878,7 @@ mod tests {
         let json = r#"[
             {"id":1,"cursor_coordinates_in_pane":[3, 7]}
         ]"#;
-        assert_eq!(
-            parse_zellij_cursor_from_list_panes(json, 1),
-            Some((3, 7))
-        );
+        assert_eq!(parse_zellij_cursor_from_list_panes(json, 1), Some((3, 7)));
     }
 
     #[test]
@@ -891,10 +886,7 @@ mod tests {
         let json = r#"[
             {"id":1,"cursor_coordinates_in_pane":[0, 0]}
         ]"#;
-        assert_eq!(
-            parse_zellij_cursor_from_list_panes(json, 1),
-            Some((0, 0))
-        );
+        assert_eq!(parse_zellij_cursor_from_list_panes(json, 1), Some((0, 0)));
     }
 
     #[test]
@@ -904,18 +896,9 @@ mod tests {
             {"id":2,"is_plugin":false,"cursor_coordinates_in_pane":{"x":80,"y":24}},
             {"id":3,"is_plugin":true}
         ]"#;
-        assert_eq!(
-            parse_zellij_cursor_from_list_panes(json, 1),
-            Some((0, 0))
-        );
-        assert_eq!(
-            parse_zellij_cursor_from_list_panes(json, 2),
-            Some((80, 24))
-        );
-        assert_eq!(
-            parse_zellij_cursor_from_list_panes(json, 3),
-            None
-        );
+        assert_eq!(parse_zellij_cursor_from_list_panes(json, 1), Some((0, 0)));
+        assert_eq!(parse_zellij_cursor_from_list_panes(json, 2), Some((80, 24)));
+        assert_eq!(parse_zellij_cursor_from_list_panes(json, 3), None);
     }
 
     #[test]
@@ -928,21 +911,12 @@ mod tests {
 
     #[test]
     fn parse_zellij_cursor_missing_field() {
+        assert_eq!(parse_zellij_cursor_from_list_panes(r#"[]"#, 1), None);
         assert_eq!(
-            parse_zellij_cursor_from_list_panes(r#"[]"#, 1),
+            parse_zellij_cursor_from_list_panes(r#"[{"id":1}]"#, 1),
             None
         );
-        assert_eq!(
-            parse_zellij_cursor_from_list_panes(
-                r#"[{"id":1}]"#,
-                1
-            ),
-            None
-        );
-        assert_eq!(
-            parse_zellij_cursor_from_list_panes("bad json", 1),
-            None
-        );
+        assert_eq!(parse_zellij_cursor_from_list_panes("bad json", 1), None);
     }
 
     #[test]
@@ -950,10 +924,7 @@ mod tests {
         let json = r#"[
             {"id":1,"cursor_coordinates_in_pane":{"x":0,"y":0}}
         ]"#;
-        assert_eq!(
-            parse_zellij_cursor_from_list_panes(json, 1),
-            Some((0, 0))
-        );
+        assert_eq!(parse_zellij_cursor_from_list_panes(json, 1), Some((0, 0)));
     }
 
     #[test]
@@ -961,9 +932,6 @@ mod tests {
         let json = r#"[
             {"id":42,"cursor_coordinates_in_pane":{"x":5,"y":3}}
         ]"#;
-        assert_eq!(
-            parse_zellij_cursor_from_list_panes(json, 42),
-            Some((5, 3))
-        );
+        assert_eq!(parse_zellij_cursor_from_list_panes(json, 42), Some((5, 3)));
     }
 }
