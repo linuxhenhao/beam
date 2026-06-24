@@ -21,8 +21,8 @@ use beam_core::session::Session;
 
 use crate::terminal_auth;
 use crate::terminal_auth::{
-    TerminalAuthState, TerminalPermission, BEAM_COOKIE_NAME, TICKET_QUERY_PARAM,
-    LEGACY_TOKEN_QUERY_PARAM,
+    BEAM_COOKIE_NAME, LEGACY_TOKEN_QUERY_PARAM, TICKET_QUERY_PARAM, TerminalAuthState,
+    TerminalPermission,
 };
 use crate::zellij_web::ZellijWebTokens;
 
@@ -50,6 +50,24 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
 fn should_strip_response_header(name: &str) -> bool {
     let lower = name.to_lowercase();
     STRIP_RESPONSE_HEADERS.contains(&lower.as_str())
+}
+
+fn zellij_token_for_permission(
+    tokens: &ZellijWebTokens,
+    permission: TerminalPermission,
+) -> Option<&str> {
+    match permission {
+        TerminalPermission::ReadOnly => tokens.read_only_token.as_deref(),
+        TerminalPermission::Write => tokens.write_token.as_deref(),
+    }
+    .filter(|token| !token.is_empty())
+}
+
+fn unavailable_token_message(permission: TerminalPermission) -> &'static str {
+    match permission {
+        TerminalPermission::ReadOnly => "read-only token not available",
+        TerminalPermission::Write => "write token not available",
+    }
 }
 
 #[derive(Clone)]
@@ -93,8 +111,14 @@ pub async fn start_proxy(
 
     let app = Router::new()
         // Session main page — handles ticket/cookie auth + proxy
-        .route("/s/{session_id}", axum::routing::any(handle_session_terminal))
-        .route("/s/{session_id}/", axum::routing::any(handle_session_terminal))
+        .route(
+            "/s/{session_id}",
+            axum::routing::any(handle_session_terminal),
+        )
+        .route(
+            "/s/{session_id}/",
+            axum::routing::any(handle_session_terminal),
+        )
         // Session-scoped WS to zellij session (e.g. /s/{sid}/ws)
         .route("/s/{session_id}/ws", axum::routing::any(handle_session_ws))
         // Session-scoped WS to zellij root: /ws/terminal/... and /ws/control
@@ -103,7 +127,10 @@ pub async fn start_proxy(
             axum::routing::any(handle_session_root_ws),
         )
         // Session sub-paths — handles both zellij root APIs and session assets
-        .route("/s/{session_id}/{*path}", axum::routing::any(handle_session_path))
+        .route(
+            "/s/{session_id}/{*path}",
+            axum::routing::any(handle_session_path),
+        )
         // Global WebSocket route (covers zellij web absolute /ws — no auth, deprecated)
         .route("/ws", axum::routing::any(handle_global_ws))
         // Global zellij asset proxy path (rewritten from HTML/JS — no auth, deprecated)
@@ -134,9 +161,7 @@ async fn resolve_zellij_session(
     session_id: &str,
 ) -> Option<String> {
     let sessions = sessions.lock().await;
-    sessions
-        .get(session_id)
-        .map(|s| zellij_session_for_beam(s))
+    sessions.get(session_id).map(|s| zellij_session_for_beam(s))
 }
 
 /// Build target URL for proxying to zellij web.
@@ -153,9 +178,7 @@ fn build_target_url(
     if extra_path.is_empty() {
         format!("http://127.0.0.1:{zellij_web_port}/{zellij_session}{query_str}")
     } else {
-        format!(
-            "http://127.0.0.1:{zellij_web_port}/{zellij_session}/{extra_path}{query_str}"
-        )
+        format!("http://127.0.0.1:{zellij_web_port}/{zellij_session}/{extra_path}{query_str}")
     }
 }
 
@@ -305,10 +328,7 @@ async fn zellij_web_login(
         }
         None => {
             warn!("terminal proxy: zellij login succeeded but no Set-Cookie in response");
-            Err((
-                StatusCode::BAD_GATEWAY,
-                "zellij login missing Set-Cookie",
-            ))
+            Err((StatusCode::BAD_GATEWAY, "zellij login missing Set-Cookie"))
         }
     }
 }
@@ -337,32 +357,14 @@ async fn try_ticket_login(
                 )
                     .into_response()
             })?;
-        let token = match payload.permission {
-            TerminalPermission::ReadOnly => state
-                .zellij_tokens
-                .read_only_token
-                .as_deref()
-                .filter(|t| !t.is_empty())
-                .ok_or_else(|| {
-                    (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "read-only token not available",
-                    )
-                        .into_response()
-                })?,
-            TerminalPermission::Write => state
-                .zellij_tokens
-                .write_token
-                .as_deref()
-                .filter(|t| !t.is_empty())
-                .ok_or_else(|| {
-                    (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "write token not available",
-                    )
-                        .into_response()
-                })?,
-        };
+        let token = zellij_token_for_permission(&state.zellij_tokens, payload.permission)
+            .ok_or_else(|| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    unavailable_token_message(payload.permission),
+                )
+                    .into_response()
+            })?;
         (token.to_string(), payload.permission)
     } else if let Some(legacy_token) = legacy_token {
         // Legacy flow: must match a known read_only_token or write_token
@@ -385,9 +387,7 @@ async fn try_ticket_login(
             TerminalPermission::Write
         } else {
             // Unknown token — reject it
-            warn!(
-                "terminal proxy: unknown legacy token rejected for session {session_id}"
-            );
+            warn!("terminal proxy: unknown legacy token rejected for session {session_id}");
             return Err((
                 StatusCode::UNAUTHORIZED,
                 "unknown legacy token — use beam_terminal_ticket instead",
@@ -396,11 +396,7 @@ async fn try_ticket_login(
         };
         (legacy_token.to_string(), permission)
     } else {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            "terminal authentication required",
-        )
-            .into_response());
+        return Err((StatusCode::UNAUTHORIZED, "terminal authentication required").into_response());
     };
 
     // Call zellij web login
@@ -483,8 +479,9 @@ async fn handle_session_terminal(
             authenticate_via_beam_cookie(&state, &session_id, &headers).await
         {
             // Authenticated via cookie — proxy with injected zellij cookie
-            let zellij_session =
-                resolve_zellij_session(&state.sessions, &session_id).await.unwrap();
+            let zellij_session = resolve_zellij_session(&state.sessions, &session_id)
+                .await
+                .unwrap();
             return proxy_request_with_cookie(
                 &state.http_client,
                 state.zellij_web_port,
@@ -553,16 +550,7 @@ async fn handle_session_ws(
                 .await
             {
                 Some(payload) => {
-                    let token = match payload.permission {
-                        TerminalPermission::ReadOnly => zellij_tokens
-                            .read_only_token
-                            .as_deref()
-                            .filter(|t| !t.is_empty()),
-                        TerminalPermission::Write => zellij_tokens
-                            .write_token
-                            .as_deref()
-                            .filter(|t| !t.is_empty()),
-                    };
+                    let token = zellij_token_for_permission(&zellij_tokens, payload.permission);
                     if let Some(token) = token {
                         match zellij_web_login(&http_client, zellij_web_port, token).await {
                             Ok(cookie) => Some(cookie),
@@ -669,9 +657,7 @@ async fn handle_session_root_ws(
                 relay_ws(client_socket, zellij_ws).await;
             }
             Err(err) => {
-                warn!(
-                    "terminal proxy: failed to connect to zellij root WS {rest_for_log}: {err}"
-                );
+                warn!("terminal proxy: failed to connect to zellij root WS {rest_for_log}: {err}");
             }
         }
     }))
@@ -796,7 +782,16 @@ async fn handle_global_path(
     Path(path): Path<String>,
     req: axum::extract::Request,
 ) -> Response {
-    proxy_request_raw(&state.http_client, state.zellij_web_port, &path, "", req, None, None).await
+    proxy_request_raw(
+        &state.http_client,
+        state.zellij_web_port,
+        &path,
+        "",
+        req,
+        None,
+        None,
+    )
+    .await
 }
 
 /// Fallback handler: proxy all other paths to zellij web root (no auth).
@@ -805,7 +800,16 @@ async fn handle_fallback_proxy(
     req: axum::extract::Request,
 ) -> Response {
     let path = req.uri().path().trim_start_matches('/').to_string();
-    proxy_request_raw(&state.http_client, state.zellij_web_port, &path, "", req, None, None).await
+    proxy_request_raw(
+        &state.http_client,
+        state.zellij_web_port,
+        &path,
+        "",
+        req,
+        None,
+        None,
+    )
+    .await
 }
 
 // ── Core proxy functions ────────────────────────────────────────────────
@@ -1073,6 +1077,48 @@ mod tests {
     }
 
     #[test]
+    fn ticket_permission_selects_matching_zellij_token() {
+        let tokens = ZellijWebTokens {
+            port: 1234,
+            read_only_token: Some("ro-token".to_string()),
+            write_token: Some("write-token".to_string()),
+            token_name: None,
+            read_only_token_name: None,
+            write_token_name: None,
+        };
+
+        assert_eq!(
+            zellij_token_for_permission(&tokens, TerminalPermission::ReadOnly),
+            Some("ro-token")
+        );
+        assert_eq!(
+            zellij_token_for_permission(&tokens, TerminalPermission::Write),
+            Some("write-token")
+        );
+    }
+
+    #[test]
+    fn ticket_permission_rejects_missing_matching_zellij_token() {
+        let tokens = ZellijWebTokens {
+            port: 1234,
+            read_only_token: Some("ro-token".to_string()),
+            write_token: None,
+            token_name: None,
+            read_only_token_name: None,
+            write_token_name: None,
+        };
+
+        assert_eq!(
+            zellij_token_for_permission(&tokens, TerminalPermission::ReadOnly),
+            Some("ro-token")
+        );
+        assert_eq!(
+            zellij_token_for_permission(&tokens, TerminalPermission::Write),
+            None
+        );
+    }
+
+    #[test]
     fn zellij_root_paths_identified() {
         assert!(terminal_auth::is_zellij_root_path("command/login"));
         assert!(terminal_auth::is_zellij_root_path("session"));
@@ -1094,10 +1140,8 @@ mod tests {
 
     #[test]
     fn ws_terminal_path_translated() {
-        let result = terminal_auth::translate_root_ws_path(
-            "ws/terminal/beam-abc-123",
-            "bmx-beam-ab",
-        );
+        let result =
+            terminal_auth::translate_root_ws_path("ws/terminal/beam-abc-123", "bmx-beam-ab");
         assert_eq!(result, "ws/terminal/bmx-beam-ab");
     }
 
