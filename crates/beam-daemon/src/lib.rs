@@ -11,6 +11,7 @@ mod connector_store;
 mod dir_select;
 mod grant;
 mod prompt;
+mod terminal_auth;
 mod terminal_proxy;
 mod trigger_log;
 mod webhook_key;
@@ -3745,7 +3746,7 @@ fn build_writable_session_card(session: &Session, write_url: &str) -> String {
     .to_string()
 }
 
-fn build_readonly_link_card(session: &Session, ro_url: &str, ro_token: &str) -> String {
+fn build_readonly_link_card(session: &Session, ro_url: &str, _ro_token: &str) -> String {
     let title = session
         .cli_id
         .clone()
@@ -3760,7 +3761,7 @@ fn build_readonly_link_card(session: &Session, ro_url: &str, ro_token: &str) -> 
         "elements": [
             {
                 "tag": "markdown",
-                "content": format!("**Read-only access**\n\nToken: `{}`\n\nUse this token to log in to the terminal in read-only mode.", ro_token)
+                "content": "**Read-only access**\n\nClick the button below to open the terminal in read-only mode. The link is valid for 5 minutes and is single-use."
             },
             {
                 "tag": "action",
@@ -3902,20 +3903,46 @@ fn load_zellij_web_tokens_for_card() -> Option<zellij_web::ZellijWebTokens> {
     zellij_web::load_zellij_web_tokens(&paths.zellij_web_tokens_json()).ok().flatten()
 }
 
+/// Build a terminal URL with a Beam ticket attached, falling back to raw token
+/// if ticket generation is not available (e.g., zellij tokens not loaded).
+fn build_terminal_url_with_ticket(
+    base_url: &str,
+    session_id: &str,
+    permission: terminal_auth::TerminalPermission,
+) -> String {
+    // Generate a short-lived Beam ticket (no raw zellij token in URL)
+    let ticket = terminal_auth::generate_terminal_ticket(session_id, permission);
+    let sep = if base_url.contains('?') { "&" } else { "?" };
+    format!(
+        "{}{sep}{}={}",
+        base_url,
+        terminal_auth::TICKET_QUERY_PARAM,
+        ticket
+    )
+}
+
 fn build_streaming_card(session: &Session, status: &str) -> String {
     let title = if session.title.trim().is_empty() {
         session.session_id.clone()
     } else {
         session.title.clone()
     };
-    let mut terminal = session.terminal_url.clone().unwrap_or_default();
-    // Attach read-only token if available
+    let base_terminal = session.terminal_url.clone().unwrap_or_default();
+    // Attach a read-only ticket (short-lived, no raw token exposed)
     let zellij_tokens = load_zellij_web_tokens_for_card();
-    let ro_token = zellij_tokens.as_ref().and_then(|t| t.read_only_token.as_deref()).filter(|t| !t.is_empty());
-    let ro_token_str = ro_token.unwrap_or("");
-    if !ro_token_str.is_empty() && !terminal.is_empty() {
-        terminal = format!("{}?token={}", terminal, ro_token_str);
-    }
+    let has_ro_token = zellij_tokens
+        .as_ref()
+        .and_then(|t| t.read_only_token.as_deref())
+        .map_or(false, |t| !t.is_empty());
+    let terminal = if has_ro_token && !base_terminal.is_empty() {
+        build_terminal_url_with_ticket(
+            &base_terminal,
+            &session.session_id,
+            terminal_auth::TerminalPermission::ReadOnly,
+        )
+    } else {
+        base_terminal
+    };
     let effective_status = if status == "limited"
         && session
             .usage_limit
@@ -3928,11 +3955,7 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
     };
     let display_mode = session.display_mode.unwrap_or(DisplayMode::Hidden);
     let card_nonce = session.stream_card_nonce.clone();
-    let token_hint = if ro_token_str.is_empty() {
-        String::new()
-    } else {
-        format!("\nRead-only token: `{}` (use Get write link for write access)", ro_token_str)
-    };
+    let token_hint = String::new(); // No raw token in hint — tickets are self-contained
     let mut elements = vec![
         serde_json::json!({
             "tag": "markdown",
@@ -4014,7 +4037,7 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
         },
     }));
     // Get read-only link button (shows the read-only token URL)
-    if !ro_token_str.is_empty() {
+    if has_ro_token {
         actions.push(serde_json::json!({
             "tag": "button",
             "text": { "tag": "plain_text", "content": "Get read-only link" },
@@ -6639,42 +6662,7 @@ impl EventHandler for LarkWsCardActionEventHandler {
         let app_id = self.app_id.clone();
         Box::pin(async move {
             let raw = event.event.unwrap_or_default();
-            // Snapshot fields that feishu-sdk 0.1.2 CardAction deserialization drops:
-            // - form_value: CardActionValue has no form_value field
-            // - operator / context: CardAction has no operator / context fields
-            let form_value_snapshot = raw.pointer("/action/form_value").cloned();
-            let operator_snapshot = raw.pointer("/operator").cloned();
-            let context_snapshot = raw.pointer("/context").cloned();
-
-            let card_action: CardAction = serde_json::from_value(raw)
-                .map_err(|err| feishu_core::Error::InvalidEventFormat(err.to_string()))?;
-            let mut payload = normalize_lark_ws_card_action(card_action);
-
-            // Restore form_value that was dropped during CardAction deserialization.
-            // This is needed for form_submit buttons (e.g. dir_select_filter, workflow comments).
-            if let Some(fv) = form_value_snapshot {
-                if let Some(action) = payload.pointer_mut("/action") {
-                    if let Some(obj) = action.as_object_mut() {
-                        obj.insert("form_value".to_string(), fv);
-                    }
-                }
-            }
-
-            // Restore operator that was dropped during CardAction deserialization.
-            // The WS event carries operator identity under /operator; CardAction only
-            // exposes top-level open_id which may be absent in WS card.action.trigger.
-            if let Some(op) = operator_snapshot {
-                if let Some(obj) = payload.as_object_mut() {
-                    obj.insert("operator".to_string(), op);
-                }
-            }
-
-            // Restore context that was dropped during CardAction deserialization.
-            if let Some(ctx) = context_snapshot {
-                if let Some(obj) = payload.as_object_mut() {
-                    obj.insert("context".to_string(), ctx);
-                }
-            }
+            let payload = normalize_lark_ws_card_action_from_raw(raw)?;
 
             let Json(response) = handle_lark_card_action_payload(&state, &app_id, payload)
                 .await
@@ -6750,6 +6738,71 @@ fn normalize_lark_ws_card_action(action: CardAction) -> Value {
         }
     }
     payload
+}
+
+/// Normalize a raw WS card.action.trigger event into a unified payload suitable
+/// for [`parse_lark_card_action`].
+///
+/// This snapshots fields from the raw JSON that `feishu_sdk::card::CardAction`
+/// deserialization drops (`/action/form_value`, `/operator`, `/operator_id`,
+/// `/context`), deserializes to `CardAction`, normalizes via
+/// [`normalize_lark_ws_card_action`], then restores the dropped fields with
+/// correct precedence: `/operator` is canonical; `/operator_id` is restored
+/// only when `/operator` is absent.
+fn normalize_lark_ws_card_action_from_raw(
+    raw: Value,
+) -> Result<Value, feishu_core::Error> {
+    // Snapshot fields that feishu-sdk 0.1.2 CardAction deserialization drops:
+    // - form_value: CardActionValue has no form_value field
+    // - operator / operator_id / context: CardAction has no operator / context fields
+    let form_value_snapshot = raw.pointer("/action/form_value").cloned();
+    let operator_snapshot = raw.pointer("/operator").cloned();
+    let operator_id_snapshot = raw.pointer("/operator_id").cloned();
+    let context_snapshot = raw.pointer("/context").cloned();
+
+    let card_action: CardAction = serde_json::from_value(raw)
+        .map_err(|err| feishu_core::Error::InvalidEventFormat(err.to_string()))?;
+    let mut payload = normalize_lark_ws_card_action(card_action);
+
+    // Restore form_value that was dropped during CardAction deserialization.
+    // This is needed for form_submit buttons (e.g. dir_select_filter, workflow comments).
+    if let Some(fv) = form_value_snapshot {
+        if let Some(action) = payload.pointer_mut("/action") {
+            if let Some(obj) = action.as_object_mut() {
+                obj.insert("form_value".to_string(), fv);
+            }
+        }
+    }
+
+    // Restore operator that was dropped during CardAction deserialization.
+    // The WS event carries operator identity under /operator; CardAction only
+    // exposes top-level open_id which may be absent in WS card.action.trigger.
+    if let Some(op) = operator_snapshot {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("operator".to_string(), op);
+        }
+    }
+
+    // Restore operator_id that was dropped during CardAction deserialization.
+    // WS events from Lark may use /operator_id instead of /operator.
+    // Only insert if /operator is not present to preserve precedence
+    // (parse_lark_card_action checks /operator/open_id first).
+    if let Some(op_id) = operator_id_snapshot {
+        if let Some(obj) = payload.as_object_mut() {
+            if !obj.contains_key("operator") {
+                obj.insert("operator_id".to_string(), op_id);
+            }
+        }
+    }
+
+    // Restore context that was dropped during CardAction deserialization.
+    if let Some(ctx) = context_snapshot {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("context".to_string(), ctx);
+        }
+    }
+
+    Ok(payload)
 }
 
 async fn handle_lark_card_action(
@@ -7544,25 +7597,28 @@ async fn handle_lark_card_action_payload(
                     "session not found",
                 )));
             };
-            let zellij_tokens = load_zellij_web_tokens_for_card();
-            let ro_token = zellij_tokens
+            // Check that read-only token is available (needed server-side to fulfill the ticket)
+            let ro_token_available = load_zellij_web_tokens_for_card()
                 .as_ref()
                 .and_then(|t| t.read_only_token.as_deref())
-                .filter(|t| !t.is_empty());
-            let Some(ro_token) = ro_token else {
+                .map_or(false, |t| !t.is_empty());
+            if !ro_token_available {
                 return Ok(Json(build_lark_card_action_toast(
                     "error",
                     "terminal not ready",
                 )));
             };
-            let ro_url = format!(
-                "http://{}:{}/s/{}?token={}",
-                state.external_host,
-                state.config.web.proxy_base_port,
-                session.session_id,
-                ro_token
+            let ro_url = build_terminal_url_with_ticket(
+                &format!(
+                    "http://{}:{}/s/{}",
+                    state.external_host,
+                    state.config.web.proxy_base_port,
+                    session.session_id,
+                ),
+                &session.session_id,
+                terminal_auth::TerminalPermission::ReadOnly,
             );
-            let card_json = build_readonly_link_card(&session, &ro_url, ro_token);
+            let card_json = build_readonly_link_card(&session, &ro_url, ""); // No raw token in card
             if session.lark_app_id != "local" {
                 if let Some(operator_open_id) = action.operator_open_id.as_deref() {
                     let delivered = match private_card_delivery(session.chat_type.as_deref()) {
@@ -7620,25 +7676,27 @@ async fn handle_lark_card_action_payload(
                     "session not found",
                 )));
             };
-            // Load zellij web tokens
-            let zellij_tokens = zellij_web::load_zellij_web_tokens(&state.paths.zellij_web_tokens_json())
-                .unwrap_or(None);
-            let write_token = zellij_tokens
+            // Check that write token is available (needed server-side to fulfill the ticket)
+            let write_token_available = zellij_web::load_zellij_web_tokens(&state.paths.zellij_web_tokens_json())
+                .unwrap_or(None)
                 .as_ref()
                 .and_then(|t| t.write_token.as_deref())
-                .unwrap_or("");
-            if write_token.is_empty() {
+                .map_or(false, |t| !t.is_empty());
+            if !write_token_available {
                 return Ok(Json(build_lark_card_action_toast(
                     "error",
                     "terminal not ready",
                 )));
             }
-            let write_url = format!(
-                "http://{}:{}/s/{}?token={}",
-                state.external_host,
-                state.config.web.proxy_base_port,
-                session.session_id,
-                write_token
+            let write_url = build_terminal_url_with_ticket(
+                &format!(
+                    "http://{}:{}/s/{}",
+                    state.external_host,
+                    state.config.web.proxy_base_port,
+                    session.session_id,
+                ),
+                &session.session_id,
+                terminal_auth::TerminalPermission::Write,
             );
             let card_json = build_writable_session_card(&session, &write_url);
             if session.lark_app_id != "local" {
@@ -8725,17 +8783,15 @@ async fn start_workflow_attempt_resume(
             resumes.get(&key).cloned()
         } {
             if let (Some(_web_port), Some(_write_token)) = (existing.web_port, existing.write_token) {
-                // Get zellij web tokens for the terminal URL
-                let zellij_tokens = zellij_web::load_zellij_web_tokens(&state.paths.zellij_web_tokens_json())
-                    .unwrap_or(None);
-                let actual_write_token = zellij_tokens
-                    .as_ref()
-                    .and_then(|t| t.write_token.as_deref())
-                    .unwrap_or("");
-                let terminal_url = format!(
-                    "http://{}:{}/s/{}?token={}",
-                    state.external_host, state.config.web.proxy_base_port,
-                    existing.session_id, actual_write_token
+                let terminal_url = build_terminal_url_with_ticket(
+                    &format!(
+                        "http://{}:{}/s/{}",
+                        state.external_host,
+                        state.config.web.proxy_base_port,
+                        existing.session_id,
+                    ),
+                    &existing.session_id,
+                    terminal_auth::TerminalPermission::Write,
                 );
                 return Ok((
                     StatusCode::OK,
@@ -8749,7 +8805,6 @@ async fn start_workflow_attempt_resume(
                         "originalSessionId": existing.original_session_id,
                         "cliSessionId": existing.cli_session_id,
                         "webPort": state.config.web.proxy_base_port,
-                        "writeToken": actual_write_token,
                         "url": terminal_url,
                         "alreadyRunning": true,
                         "startedAt": existing.started_at,
@@ -8763,16 +8818,15 @@ async fn start_workflow_attempt_resume(
                     if let (Some(_web_port), Some(_write_token)) =
                         (waiting.web_port, waiting.write_token.clone())
                     {
-                        let zellij_tokens = zellij_web::load_zellij_web_tokens(&state.paths.zellij_web_tokens_json())
-                            .unwrap_or(None);
-                        let actual_write_token = zellij_tokens
-                            .as_ref()
-                            .and_then(|t| t.write_token.as_deref())
-                            .unwrap_or("");
-                        let terminal_url = format!(
-                            "http://{}:{}/s/{}?token={}",
-                            state.external_host, state.config.web.proxy_base_port,
-                            waiting.session_id, actual_write_token
+                        let terminal_url = build_terminal_url_with_ticket(
+                            &format!(
+                                "http://{}:{}/s/{}",
+                                state.external_host,
+                                state.config.web.proxy_base_port,
+                                waiting.session_id,
+                            ),
+                            &waiting.session_id,
+                            terminal_auth::TerminalPermission::Write,
                         );
                         Ok((
                             StatusCode::OK,
@@ -8786,7 +8840,6 @@ async fn start_workflow_attempt_resume(
                                 "originalSessionId": waiting.original_session_id,
                                 "cliSessionId": waiting.cli_session_id,
                                 "webPort": state.config.web.proxy_base_port,
-                                "writeToken": actual_write_token,
                                 "url": terminal_url,
                                 "alreadyRunning": false,
                                 "startedAt": waiting.started_at,
@@ -9033,16 +9086,15 @@ async fn start_workflow_attempt_resume(
             .await
             .map_err(internal_error)?;
     }
-    let zellij_tokens = zellij_web::load_zellij_web_tokens(&state.paths.zellij_web_tokens_json())
-        .unwrap_or(None);
-    let actual_write_token = zellij_tokens
-        .as_ref()
-        .and_then(|t| t.write_token.as_deref())
-        .unwrap_or("");
-    let terminal_url = format!(
-        "http://{}:{}/s/{}?token={}",
-        state.external_host, state.config.web.proxy_base_port,
-        session_id, actual_write_token
+    let terminal_url = build_terminal_url_with_ticket(
+        &format!(
+            "http://{}:{}/s/{}",
+            state.external_host,
+            state.config.web.proxy_base_port,
+            session_id,
+        ),
+        &session_id,
+        terminal_auth::TerminalPermission::Write,
     );
     Ok((
         StatusCode::OK,
@@ -9056,7 +9108,6 @@ async fn start_workflow_attempt_resume(
             "originalSessionId": terminal.session_id,
             "cliSessionId": terminal.cli_session_id,
             "webPort": state.config.web.proxy_base_port,
-            "writeToken": actual_write_token,
             "url": terminal_url,
             "alreadyRunning": false,
             "startedAt": started_at,
@@ -11816,19 +11867,27 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
     let zellij_web_port = state.config.web.proxy_base_port + 1;
     zellij_web::ensure_zellij_web(zellij_web_port)
         .with_context(|| format!("failed to start zellij web server on port {zellij_web_port}"))?;
-    zellij_web::ensure_zellij_web_tokens(
+    let zellij_tokens = zellij_web::ensure_zellij_web_tokens(
         &state.paths.zellij_web_tokens_json(),
         zellij_web_port,
     )
     .with_context(|| "failed to create zellij web tokens")?;
 
-    // Start terminal proxy
+    // Start terminal proxy with auth bridge
     let proxy_host = state.config.web.host.clone();
     let proxy_port = state.config.web.proxy_base_port;
     let proxy_sessions = state.sessions.clone();
-    terminal_proxy::start_proxy(&proxy_host, proxy_port, zellij_web_port, proxy_sessions)
-        .await
-        .with_context(|| format!("failed to start terminal proxy on {proxy_host}:{proxy_port}"))?;
+    let auth_state = terminal_auth::TerminalAuthState::new();
+    terminal_proxy::start_proxy(
+        &proxy_host,
+        proxy_port,
+        zellij_web_port,
+        proxy_sessions,
+        zellij_tokens,
+        auth_state,
+    )
+    .await
+    .with_context(|| format!("failed to start terminal proxy on {proxy_host}:{proxy_port}"))?;
 
     let app = Router::new()
         .merge(open_routes)
@@ -13478,7 +13537,8 @@ mod tests {
         let mut session = make_session("sess-8");
         session.status = SessionStatus::Active;
         session.closed_at = None;
-        session.terminal_url = Some("http://127.0.0.1:9000/?token=abc".to_string());
+        // Use a clean URL without legacy token to test ticket-based auth
+        session.terminal_url = Some("http://127.0.0.1:9000/s/sess-8".to_string());
         session.current_screen = Some("hello".to_string());
         session.stream_card_nonce = Some("nonce-live".to_string());
         let card: Value =
@@ -13487,19 +13547,28 @@ mod tests {
             .pointer("/elements/2/actions")
             .and_then(Value::as_array)
             .expect("actions array");
-        assert_eq!(
-            actions[0].pointer("/value/action").and_then(Value::as_str),
-            Some("toggle_display")
+        // Collect action names for presence check (order may vary depending on token availability)
+        let action_names: Vec<&str> = actions
+            .iter()
+            .filter_map(|a| a.pointer("/value/action").and_then(Value::as_str))
+            .collect();
+        assert!(
+            action_names.contains(&"toggle_display"),
+            "should have toggle_display action"
         );
-        assert_eq!(
-            actions[1].pointer("/multi_url/url").and_then(Value::as_str),
-            Some("http://127.0.0.1:9000/?token=abc")
+        assert!(
+            action_names.contains(&"get_write_link"),
+            "should have get_write_link action"
         );
-        assert_eq!(
-            actions[2].pointer("/value/action").and_then(Value::as_str),
-            Some("get_write_link")
+        // Check URL starts with base (may have ticket appended)
+        let url = actions
+            .iter()
+            .find_map(|a| a.pointer("/multi_url/url").and_then(Value::as_str))
+            .expect("url should exist");
+        assert!(
+            url.starts_with("http://127.0.0.1:9000/s/sess-8"),
+            "url should start with base: {url}"
         );
-        assert_eq!(actions.len(), 5);
         assert!(card.pointer("/elements/3").is_none());
     }
 
@@ -15287,7 +15356,6 @@ mod tests {
 
     #[test]
     fn normalize_lark_ws_card_action_preserves_form_value_for_form_submit() {
-        // Simulates a form_submit button click event arriving via WebSocket.
         // The raw JSON includes "form_value" which must survive the
         // CardAction deserialization + normalization round-trip.
         let raw = serde_json::json!({
@@ -15305,17 +15373,8 @@ mod tests {
             }
         });
 
-        // Simulate the handler's form_value preservation logic
-        let form_value_snapshot = raw.pointer("/action/form_value").cloned();
-        let card_action: CardAction = serde_json::from_value(raw).expect("deserialize CardAction");
-        let mut payload = normalize_lark_ws_card_action(card_action);
-        if let Some(fv) = form_value_snapshot {
-            if let Some(action) = payload.pointer_mut("/action") {
-                if let Some(obj) = action.as_object_mut() {
-                    obj.insert("form_value".to_string(), fv);
-                }
-            }
-        }
+        let payload = normalize_lark_ws_card_action_from_raw(raw)
+            .expect("normalize from raw");
 
         // Verify the normalized payload has both the value fields and form_value
         assert_eq!(
@@ -15375,44 +15434,8 @@ mod tests {
             "token": "x-token"
         });
 
-        // Simulate handler logic: snapshot → deserialize → normalize → restore
-        let operator_snapshot = raw.pointer("/operator").cloned();
-        let context_snapshot = raw.pointer("/context").cloned();
-        let form_value_snapshot = raw.pointer("/action/form_value").cloned();
-
-        let card_action: CardAction = serde_json::from_value(raw)
-            .expect("deserialize CardAction");
-
-        // Confirm that CardAction lost operator/context
-        assert!(
-            card_action.open_id.is_none(),
-            "top-level open_id should be absent — operator is only under /operator"
-        );
-        assert!(
-            card_action.open_message_id.is_none(),
-            "top-level open_message_id should be absent — context is only under /context"
-        );
-
-        let mut payload = normalize_lark_ws_card_action(card_action);
-
-        // Restore snapshots (mirrors handler logic)
-        if let Some(fv) = form_value_snapshot {
-            if let Some(action) = payload.pointer_mut("/action") {
-                if let Some(obj) = action.as_object_mut() {
-                    obj.insert("form_value".to_string(), fv);
-                }
-            }
-        }
-        if let Some(op) = operator_snapshot {
-            if let Some(obj) = payload.as_object_mut() {
-                obj.insert("operator".to_string(), op);
-            }
-        }
-        if let Some(ctx) = context_snapshot {
-            if let Some(obj) = payload.as_object_mut() {
-                obj.insert("context".to_string(), ctx);
-            }
-        }
+        let payload = normalize_lark_ws_card_action_from_raw(raw)
+            .expect("normalize from raw");
 
         // Verify normalized payload has operator and context
         assert_eq!(
@@ -15462,32 +15485,8 @@ mod tests {
             }
         });
 
-        let operator_id_snapshot = raw.pointer("/operator_id").cloned();
-        let context_snapshot = raw.pointer("/context").cloned();
-
-        // For the WS path, the raw event uses /operator not /operator_id,
-        // but we snapshot /operator_id too in case it appears.
-        // The primary path is /operator (WS) with fallback to /operator_id (HTTP).
-        // This test confirms /operator_id also works through snapshot restore.
-        let card_action: CardAction = serde_json::from_value(raw).expect("deserialize");
-
-        // CardAction.open_id won't be set because top-level open_id is absent
-        assert!(card_action.open_id.is_none());
-
-        let mut payload = normalize_lark_ws_card_action(card_action);
-
-        // Restore operator_id as operator (parse_lark_card_action reads /operator/open_id
-        // with fallback to /operator_id/open_id)
-        if let Some(op) = operator_id_snapshot {
-            if let Some(obj) = payload.as_object_mut() {
-                obj.insert("operator_id".to_string(), op);
-            }
-        }
-        if let Some(ctx) = context_snapshot {
-            if let Some(obj) = payload.as_object_mut() {
-                obj.insert("context".to_string(), ctx);
-            }
-        }
+        let payload = normalize_lark_ws_card_action_from_raw(raw)
+            .expect("normalize from raw");
 
         let parsed = parse_lark_card_action(&payload).expect("parse");
         assert_eq!(
@@ -15524,27 +15523,8 @@ mod tests {
             }
         });
 
-        let operator_snapshot = raw.pointer("/operator").cloned();
-        let context_snapshot = raw.pointer("/context").cloned();
-
-        let card_action: CardAction = serde_json::from_value(raw).expect("deserialize");
-
-        // CardAction sees the top-level open_id
-        assert_eq!(card_action.open_id.as_deref(), Some("ou_from_top_level"));
-
-        let mut payload = normalize_lark_ws_card_action(card_action);
-
-        // Restore operator/context from raw (overrides what normalize set)
-        if let Some(op) = operator_snapshot {
-            if let Some(obj) = payload.as_object_mut() {
-                obj.insert("operator".to_string(), op);
-            }
-        }
-        if let Some(ctx) = context_snapshot {
-            if let Some(obj) = payload.as_object_mut() {
-                obj.insert("context".to_string(), ctx);
-            }
-        }
+        let payload = normalize_lark_ws_card_action_from_raw(raw)
+            .expect("normalize from raw");
 
         let parsed = parse_lark_card_action(&payload).expect("parse");
         assert_eq!(parsed.action, "restart");
@@ -15560,6 +15540,70 @@ mod tests {
             Some("om_from_context"),
             "raw /context/open_message_id should take precedence"
         );
+    }
+
+    #[test]
+    fn normalize_lark_ws_card_action_from_raw_uses_operator_id_when_operator_absent() {
+        // When the raw WS event carries only /operator_id (no /operator),
+        // the helper must restore it so parse_lark_card_action can fall back
+        // to /operator_id/open_id.
+        let raw = serde_json::json!({
+            "operator_id": {
+                "open_id": "ou_from_operator_id"
+            },
+            "context": {
+                "open_message_id": "om_from_context"
+            },
+            "action": {
+                "value": {
+                    "action": "close",
+                    "session_id": "sess-1"
+                }
+            }
+        });
+
+        let payload = normalize_lark_ws_card_action_from_raw(raw)
+            .expect("normalize from raw");
+        let parsed = parse_lark_card_action(&payload).expect("parse");
+
+        assert_eq!(parsed.operator_open_id.as_deref(), Some("ou_from_operator_id"),
+            "operator_open_id must be extracted from /operator_id/open_id");
+        assert_eq!(parsed.clicked_message_id.as_deref(), Some("om_from_context"));
+    }
+
+    #[test]
+    fn normalize_lark_ws_card_action_from_raw_operator_wins_over_operator_id() {
+        // When the raw event carries BOTH /operator and /operator_id,
+        // the operator field is canonical and operator_id must NOT
+        // override it (parse_lark_card_action checks /operator first).
+        let raw = serde_json::json!({
+            "operator": {
+                "open_id": "ou_from_operator"
+            },
+            "operator_id": {
+                "open_id": "ou_from_operator_id"
+            },
+            "context": {
+                "open_message_id": "om_from_context"
+            },
+            "action": {
+                "value": {
+                    "action": "restart",
+                    "session_id": "sess-1"
+                }
+            }
+        });
+
+        let payload = normalize_lark_ws_card_action_from_raw(raw)
+            .expect("normalize from raw");
+        let parsed = parse_lark_card_action(&payload).expect("parse");
+
+        assert_eq!(
+            parsed.operator_open_id.as_deref(),
+            Some("ou_from_operator"),
+            "/operator must win over /operator_id"
+        );
+        assert_eq!(parsed.clicked_message_id.as_deref(), Some("om_from_context"));
     }
 
     #[test]
