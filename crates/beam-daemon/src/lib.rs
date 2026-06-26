@@ -120,6 +120,20 @@ struct AdoptZellijSessionRequest {
     cwd: String,
     pane_cols: Option<u16>,
     pane_rows: Option<u16>,
+    #[serde(default)]
+    lark_app_id: Option<String>,
+    #[serde(default)]
+    chat_id: Option<String>,
+    #[serde(default)]
+    chat_type: Option<String>,
+    #[serde(default)]
+    root_message_id: Option<String>,
+    #[serde(default)]
+    scope: Option<SessionScope>,
+    #[serde(default)]
+    thread_id: Option<String>,
+    #[serde(default)]
+    owner_open_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -2117,7 +2131,7 @@ fn is_operate_command(text: &str) -> bool {
     matches!(
         text,
         "/close" | "/restart" | "/card" | "/adopt" | "/adopt list"
-    ) || text.starts_with("/adopt zellij ")
+    ) || text.starts_with("/adopt ")
 }
 
 async fn lark_tenant_token(state: &AppState, bot: &BotConfig) -> Result<String> {
@@ -3719,20 +3733,25 @@ fn build_writable_session_card(session: &Session, write_url: &str) -> String {
                 "card_nonce": card_nonce,
             }
         }));
-        actions.push(serde_json::json!({
-            "tag": "button",
-            "text": { "tag": "plain_text", "content": "Close session" },
-            "type": "danger",
-            "value": {
-                "action": "close",
-                "root_id": session.root_message_id,
-                "session_id": session.session_id,
-                "cli_id": session.cli_id.clone().unwrap_or_else(|| "cli".to_string()),
-                "visibility": "private",
-                "card_nonce": session.stream_card_nonce.clone().unwrap_or_default(),
-            }
-        }));
     }
+    let close_label = if session.adopted_from.is_some() {
+        "Disconnect"
+    } else {
+        "Close session"
+    };
+    actions.push(serde_json::json!({
+        "tag": "button",
+        "text": { "tag": "plain_text", "content": close_label },
+        "type": "danger",
+        "value": {
+            "action": "close",
+            "root_id": session.root_message_id,
+            "session_id": session.session_id,
+            "cli_id": session.cli_id.clone().unwrap_or_else(|| "cli".to_string()),
+            "visibility": "private",
+            "card_nonce": session.stream_card_nonce.clone().unwrap_or_default(),
+        }
+    }));
     serde_json::json!({
         "config": { "wide_screen_mode": true },
         "header": {
@@ -3964,15 +3983,10 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
     };
     let display_mode = session.display_mode.unwrap_or(DisplayMode::Hidden);
     let card_nonce = session.stream_card_nonce.clone();
-    let token_hint = String::new(); // No raw token in hint — tickets are self-contained
     let mut elements = vec![
         serde_json::json!({
             "tag": "markdown",
-            "content": if terminal.is_empty() {
-                format!("session `{}`", session.session_id)
-            } else {
-                format!("session `{}`\n[Open terminal]({}){}", session.session_id, terminal, token_hint)
-            }
+            "content": format!("session `{}`", session.session_id)
         }),
         serde_json::json!({ "tag": "hr" }),
     ];
@@ -4036,7 +4050,7 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
     }));
     actions.push(serde_json::json!({
         "tag": "button",
-        "text": { "tag": "plain_text", "content": "Open terminal" },
+        "text": { "tag": "plain_text", "content": "Open read-only terminal" },
         "type": "primary",
         "multi_url": {
             "url": terminal,
@@ -4045,24 +4059,10 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
             "ios_url": terminal,
         },
     }));
-    // Get read-only link button (shows the read-only token URL)
-    if has_ro_token {
-        actions.push(serde_json::json!({
-            "tag": "button",
-            "text": { "tag": "plain_text", "content": "Get read-only link" },
-            "type": "default",
-            "value": {
-                "action": "get_read_only_link",
-                "root_id": session.root_message_id,
-                "session_id": session.session_id,
-                "cli_id": session.cli_id.clone().unwrap_or_else(|| "cli".to_string()),
-                "card_nonce": action_nonce.clone(),
-            }
-        }));
-    }
+
     actions.push(serde_json::json!({
         "tag": "button",
-        "text": { "tag": "plain_text", "content": "Get write link" },
+        "text": { "tag": "plain_text", "content": "Send write link privately" },
         "type": "default",
         "value": {
             "action": "get_write_link",
@@ -4104,19 +4104,24 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
                 "card_nonce": card_nonce.clone(),
             }
         }));
-        actions.push(serde_json::json!({
-            "tag": "button",
-            "text": { "tag": "plain_text", "content": "Close session" },
-            "type": "danger",
-            "value": {
-                "action": "close",
-                "root_id": session.root_message_id,
-                "session_id": session.session_id,
-                "cli_id": session.cli_id.clone().unwrap_or_else(|| "cli".to_string()),
-                "card_nonce": card_nonce.clone(),
-            }
-        }));
     }
+    let close_label = if session.adopted_from.is_some() {
+        "Disconnect"
+    } else {
+        "Close session"
+    };
+    actions.push(serde_json::json!({
+        "tag": "button",
+        "text": { "tag": "plain_text", "content": close_label },
+        "type": "danger",
+        "value": {
+            "action": "close",
+            "root_id": session.root_message_id,
+            "session_id": session.session_id,
+            "cli_id": session.cli_id.clone().unwrap_or_else(|| "cli".to_string()),
+            "card_nonce": card_nonce.clone(),
+        }
+    }));
     elements.push(serde_json::json!({
         "tag": "action",
         "actions": actions
@@ -4562,10 +4567,14 @@ fn classify_lark_text_action(text: &str, has_existing_session: bool) -> LarkText
     if text == "/card" {
         return LarkTextAction::Card;
     }
-    if let Some(rest) = text.strip_prefix("/adopt zellij ") {
-        return LarkTextAction::AdoptZellij(rest.trim().to_string());
+    if let Some(rest) = text.strip_prefix("/adopt ") {
+        let rest = rest.trim();
+        if rest.is_empty() || rest == "list" {
+            return LarkTextAction::AdoptList;
+        }
+        return LarkTextAction::AdoptZellij(rest.to_string());
     }
-    if text == "/adopt" || text == "/adopt list" {
+    if text == "/adopt" {
         return LarkTextAction::AdoptList;
     }
     if text.starts_with('/') {
@@ -4620,7 +4629,7 @@ fn build_zellij_adopt_list_reply(items: &[ZellijAdoptCandidate]) -> String {
             item.zellij_session, item.zellij_pane_id, item.title, item.cwd
         ));
     }
-    out.push_str("\n/adopt zellij <session>:<pane_id>");
+    out.push_str("\n/adopt <session>:<pane_id>");
     out
 }
 
@@ -6325,17 +6334,39 @@ async fn handle_lark_event_payload(
                     cwd: String::new(),
                     pane_cols: None,
                     pane_rows: None,
+                    lark_app_id: Some(app_id.clone()),
+                    chat_id: Some(chat_id.to_string()),
+                    chat_type: parsed.chat_type.clone(),
+                    root_message_id: Some(message_id.to_string()),
+                    scope: Some(scope),
+                    thread_id: parsed.thread_id.clone(),
+                    owner_open_id: sender_open_id.clone(),
                 }),
             )
             .await;
+            let reply_in_thread = scope == SessionScope::Thread;
             match result {
                 Ok((_, Json(session))) => {
                     let reply = build_adopt_zellij_result_reply(Ok(&session));
-                    let _ = lark_reply_message(&state, &bot, message_id, &reply).await;
+                    let _ = lark_reply_message_with_opts(
+                        &state,
+                        &bot,
+                        message_id,
+                        &reply,
+                        reply_in_thread,
+                    )
+                    .await;
                 }
                 Err((_, err)) => {
                     let reply = build_adopt_zellij_result_reply(Err(err.as_str()));
-                    let _ = lark_reply_message(&state, &bot, message_id, &reply).await;
+                    let _ = lark_reply_message_with_opts(
+                        &state,
+                        &bot,
+                        message_id,
+                        &reply,
+                        reply_in_thread,
+                    )
+                    .await;
                 }
             }
             return Ok(Json(serde_json::json!({ "ok": true })));
@@ -9735,20 +9766,30 @@ async fn adopt_zellij_session(
         .title
         .clone()
         .unwrap_or_else(|| format!("adopt {}", req.zellij_session));
+    let lark_app_id = req.lark_app_id.unwrap_or_else(|| "local".to_string());
+    let chat_id = req.chat_id.unwrap_or_else(|| "local".to_string());
+    let chat_type = req.chat_type.or_else(|| Some("local".to_string()));
+    let root_message_id = req.root_message_id.unwrap_or_else(|| session_id.clone());
+    let scope = req.scope.unwrap_or(SessionScope::Thread);
+    let lark_app_secret = state
+        .bots
+        .get(&lark_app_id)
+        .map(|bot| bot.lark_app_secret.clone())
+        .unwrap_or_default();
     let session = Session {
         session_id: session_id.clone(),
         title,
-        chat_id: "local".to_string(),
-        chat_type: Some("local".to_string()),
-        root_message_id: session_id.clone(),
+        chat_id: chat_id.clone(),
+        chat_type: chat_type.clone(),
+        root_message_id: root_message_id.clone(),
         quote_target_id: None,
-        scope: SessionScope::Thread,
+        scope,
         status: SessionStatus::Active,
         created_at: Utc::now(),
         closed_at: None,
         working_dir: Some(adopted_from.cwd.clone()),
-        lark_app_id: "local".to_string(),
-        owner_open_id: None,
+        lark_app_id: lark_app_id.clone(),
+        owner_open_id: req.owner_open_id.clone(),
         worker_pid: None,
         cli_id: Some(req.cli_id.clone()),
         cli_bin: Some(req.cli_bin.clone()),
@@ -9780,7 +9821,7 @@ async fn adopt_zellij_session(
         model: None,
         locale: None,
         resume_session_id: None,
-        thread_id: None,
+        thread_id: req.thread_id.clone(),
     };
     {
         let snapshot = {
@@ -9805,10 +9846,10 @@ async fn adopt_zellij_session(
         prompt: String::new(),
         resume: false,
         cli_session_id: None,
-        lark_app_id: "local".to_string(),
-        lark_app_secret: String::new(),
+        lark_app_id,
+        lark_app_secret,
         prompt_turn_id: None,
-        owner_open_id: None,
+        owner_open_id: req.owner_open_id,
         adopted_from: Some(adopted_from),
         adopt_restored_from_metadata: false,
         screen_analyzer: state.config.screen_analyzer.clone(),
@@ -12764,10 +12805,22 @@ mod tests {
         );
         assert_eq!(
             classify_lark_text_action("/adopt zellij  0:1.0  ", false),
-            LarkTextAction::AdoptZellij("0:1.0".to_string())
+            LarkTextAction::AdoptZellij("zellij  0:1.0".to_string())
+        );
+        assert_eq!(
+            classify_lark_text_action("/adopt mysession:0.1", false),
+            LarkTextAction::AdoptZellij("mysession:0.1".to_string())
+        );
+        assert_eq!(
+            classify_lark_text_action("/adopt mysession", false),
+            LarkTextAction::AdoptZellij("mysession".to_string())
         );
         assert_eq!(
             classify_lark_text_action("/adopt", false),
+            LarkTextAction::AdoptList
+        );
+        assert_eq!(
+            classify_lark_text_action("/adopt list", false),
             LarkTextAction::AdoptList
         );
         assert_eq!(
@@ -13391,6 +13444,26 @@ mod tests {
     }
 
     #[test]
+    fn is_operate_command_recognizes_adopt_variants() {
+        // Exact commands
+        assert!(is_operate_command("/close"));
+        assert!(is_operate_command("/restart"));
+        assert!(is_operate_command("/card"));
+        assert!(is_operate_command("/adopt"));
+        assert!(is_operate_command("/adopt list"));
+        // /adopt <target> variants
+        assert!(is_operate_command("/adopt foo:bar"));
+        assert!(is_operate_command("/adopt mysession"));
+        assert!(is_operate_command("/adopt mysession:0.1"));
+        assert!(is_operate_command("/adopt zellij foo:bar"));
+        // Non-operate commands
+        assert!(!is_operate_command("/adoption"));
+        assert!(!is_operate_command("/adoptz"));
+        assert!(!is_operate_command("hello"));
+        assert!(!is_operate_command("/workflow run x"));
+    }
+
+    #[test]
     fn decide_lark_card_delivery_distinguishes_not_ready_post_and_patch() {
         let mut session = make_session("sess-1");
         assert_eq!(
@@ -13540,6 +13613,48 @@ mod tests {
     }
 
     #[test]
+    fn build_writable_session_card_adopted_shows_disconnect_without_restart() {
+        let mut session = make_session("sess-7-adopted");
+        session.status = SessionStatus::Active;
+        session.closed_at = None;
+        session.title = "Adopted".to_string();
+        session.adopted_from = Some(AdoptedFrom {
+            zellij_session: Some("my-session".to_string()),
+            zellij_pane_id: Some("pane-1".to_string()),
+            original_cli_pid: 9999,
+            cwd: "/home/user".to_string(),
+            ..Default::default()
+        });
+        let write_url = "http://proxy.example.com/s/sess-7-adopted?token=abc";
+        let card: Value = serde_json::from_str(&build_writable_session_card(&session, write_url))
+            .expect("valid card json");
+        let actions = card
+            .pointer("/elements/0/actions")
+            .and_then(Value::as_array)
+            .expect("actions array");
+        // Adopted: 2 actions — "Open writable terminal" + "Disconnect" (no restart)
+        assert_eq!(actions.len(), 2);
+        assert_eq!(
+            actions[0].pointer("/multi_url/url").and_then(Value::as_str),
+            Some("http://proxy.example.com/s/sess-7-adopted?token=abc")
+        );
+        assert_eq!(
+            actions[1].pointer("/value/action").and_then(Value::as_str),
+            Some("close")
+        );
+        assert_eq!(
+            actions[1].pointer("/text/content").and_then(Value::as_str),
+            Some("Disconnect")
+        );
+        // No restart action present
+        let action_names: Vec<&str> = actions
+            .iter()
+            .filter_map(|a| a.pointer("/value/action").and_then(Value::as_str))
+            .collect();
+        assert!(!action_names.contains(&"restart"));
+    }
+
+    #[test]
     fn build_streaming_card_keeps_hidden_mode_actions_minimal() {
         let mut session = make_session("sess-8");
         session.status = SessionStatus::Active;
@@ -13550,6 +13665,14 @@ mod tests {
         session.stream_card_nonce = Some("nonce-live".to_string());
         let card: Value =
             serde_json::from_str(&build_streaming_card(&session, "idle")).expect("valid card json");
+        let body = card
+            .pointer("/elements/0/content")
+            .and_then(Value::as_str)
+            .expect("markdown body");
+        assert!(
+            !body.contains("Open read-only terminal"),
+            "markdown should not contain Open read-only terminal link"
+        );
         let actions = card
             .pointer("/elements/2/actions")
             .and_then(Value::as_array)
@@ -13564,6 +13687,10 @@ mod tests {
             "should have toggle_display action"
         );
         assert!(
+            !action_names.contains(&"get_read_only_link"),
+            "should not have get_read_only_link action"
+        );
+        assert!(
             action_names.contains(&"get_write_link"),
             "should have get_write_link action"
         );
@@ -13572,6 +13699,16 @@ mod tests {
             .iter()
             .find_map(|a| a.pointer("/multi_url/url").and_then(Value::as_str))
             .expect("url should exist");
+        let terminal_action = actions
+            .iter()
+            .find(|a| a.pointer("/multi_url/url").and_then(Value::as_str) == Some(url))
+            .expect("terminal action should exist");
+        assert_eq!(
+            terminal_action
+                .pointer("/text/content")
+                .and_then(Value::as_str),
+            Some("Open read-only terminal")
+        );
         assert!(
             url.starts_with("http://127.0.0.1:9000/s/sess-8"),
             "url should start with base: {url}"
@@ -13896,6 +14033,53 @@ mod tests {
             card.pointer("/elements/2/img_key").and_then(Value::as_str),
             Some("img_v2_abc")
         );
+    }
+
+    #[test]
+    fn build_streaming_card_adopted_shows_disconnect_without_restart() {
+        let mut session = make_session("sess-adopted-stream");
+        session.status = SessionStatus::Active;
+        session.closed_at = None;
+        session.adopted_from = Some(AdoptedFrom {
+            zellij_session: Some("my-session".to_string()),
+            zellij_pane_id: Some("pane-1".to_string()),
+            original_cli_pid: 9999,
+            cwd: "/home/user".to_string(),
+            ..Default::default()
+        });
+        let card: Value =
+            serde_json::from_str(&build_streaming_card(&session, "idle")).expect("valid card json");
+        // Collect action names for presence check (order may vary depending on token availability)
+        let action_names: Vec<&str> = card
+            .get("elements")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|element| element.get("actions").and_then(Value::as_array))
+            .flatten()
+            .filter_map(|a| a.pointer("/value/action").and_then(Value::as_str))
+            .collect();
+        // Restart must NOT appear for adopted sessions
+        assert!(
+            !action_names.contains(&"restart"),
+            "restart should not appear for adopted session"
+        );
+        // Close action must appear (via Disconnect label)
+        assert!(
+            action_names.contains(&"close"),
+            "close action should be present: {action_names:?}"
+        );
+        // Verify the close action shows "Disconnect" text
+        let close_text = card
+            .get("elements")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|element| element.get("actions").and_then(Value::as_array))
+            .flatten()
+            .find(|a| a.pointer("/value/action").and_then(Value::as_str) == Some("close"))
+            .and_then(|a| a.pointer("/text/content").and_then(Value::as_str));
+        assert_eq!(close_text, Some("Disconnect"));
     }
 
     #[test]
@@ -17248,7 +17432,15 @@ mod tests {
         );
         assert_eq!(
             classify_lark_text_action("/adopt zellij mysession:0.1", false),
+            LarkTextAction::AdoptZellij("zellij mysession:0.1".into())
+        );
+        assert_eq!(
+            classify_lark_text_action("/adopt mysession:0.1", false),
             LarkTextAction::AdoptZellij("mysession:0.1".into())
+        );
+        assert_eq!(
+            classify_lark_text_action("/adopt mysession", false),
+            LarkTextAction::AdoptZellij("mysession".into())
         );
         assert_eq!(
             classify_lark_text_action("hello world", false),
