@@ -2,6 +2,7 @@ use anyhow::Result;
 use beam_core::BeamPaths;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::LevelFilter;
 
 #[derive(Debug, Parser)]
 struct DaemonArgs {
@@ -12,7 +13,11 @@ struct DaemonArgs {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(
+            EnvFilter::builder()
+                .with_default_directive(LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
         .with_target(false)
         .compact()
         .init();

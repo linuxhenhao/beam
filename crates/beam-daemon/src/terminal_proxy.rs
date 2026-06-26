@@ -267,10 +267,11 @@ fn rewrite_asset_paths(data: &mut Vec<u8>, session_id: Option<&str>) {
         // Override base href last so JS API/WS calls go through
         // authenticated session-scoped proxy paths.
         if let Some(sid) = session_id {
-            rewritten = rewritten.replace(
-                "<base href=\"/s/_zellij/\">",
-                &format!("<base href=\"/s/{sid}/\">"),
-            );
+            // Replace both formats: <base href="/s/_zellij/" /> and <base href="/s/_zellij/">
+            let session_base = format!("<base href=\"/s/{sid}/\"");
+            rewritten = rewritten
+                .replace("<base href=\"/s/_zellij/\" />", &format!("{session_base} />"))
+                .replace("<base href=\"/s/_zellij/\">", &format!("{session_base}>"));
         }
         *data = rewritten.into_bytes();
     }
@@ -346,19 +347,24 @@ async fn try_ticket_login(
     // Determine auth token and permission
     let (auth_token, permission): (String, TerminalPermission) = if let Some(ticket) = ticket {
         // New flow: verify ticket
+        info!("terminal proxy: verifying beam ticket for session {session_id}");
         let payload = state
             .auth_state
             .verify_and_consume_ticket(ticket, session_id)
             .await
             .ok_or_else(|| {
+                warn!("terminal proxy: ticket verification failed for session {session_id}");
                 (
                     StatusCode::UNAUTHORIZED,
                     "invalid or expired terminal ticket",
                 )
                     .into_response()
             })?;
+        info!("terminal proxy: ticket verified for session {session_id} permission={:?}", payload.permission);
         let token = zellij_token_for_permission(&state.zellij_tokens, payload.permission)
             .ok_or_else(|| {
+                warn!("terminal proxy: {} unavailable for session {session_id}",
+                    unavailable_token_message(payload.permission));
                 (
                     StatusCode::SERVICE_UNAVAILABLE,
                     unavailable_token_message(payload.permission),
@@ -400,9 +406,14 @@ async fn try_ticket_login(
     };
 
     // Call zellij web login
+    info!("terminal proxy: calling zellij web login for session {session_id} permission={permission:?}");
     let zellij_cookie = zellij_web_login(&state.http_client, state.zellij_web_port, &auth_token)
         .await
-        .map_err(|(status, msg)| (status, msg).into_response())?;
+        .map_err(|(status, msg)| {
+            warn!("terminal proxy: zellij web login failed for session {session_id}: {status} {msg}");
+            (status, msg).into_response()
+        })?;
+    info!("terminal proxy: zellij web login OK for session {session_id}");
 
     // Store in server-side cookie jar and get Beam cookie
     let beam_cookie = state
@@ -412,6 +423,7 @@ async fn try_ticket_login(
 
     // Build redirect to clean URL (no query params)
     let redirect_url = format!("/s/{session_id}");
+    info!("terminal proxy: redirecting {session_id} to {redirect_url}");
     let mut response = Redirect::to(&redirect_url).into_response();
     if let Ok(header_value) = build_beam_set_cookie(&beam_cookie).parse() {
         response
@@ -432,7 +444,13 @@ async fn authenticate_via_beam_cookie(
         .get("cookie")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let beam_cookie = terminal_auth::extract_beam_cookie(cookie_header)?;
+    let beam_cookie = match terminal_auth::extract_beam_cookie(cookie_header) {
+        Some(c) => c,
+        None => {
+            info!("terminal proxy: no beam cookie in request for session {session_id}");
+            return None;
+        }
+    };
     let (zellij_cookie, stored_session_id, _permission) =
         state.auth_state.lookup(&beam_cookie).await?;
     // Verify the cookie is for the requested session
@@ -443,6 +461,7 @@ async fn authenticate_via_beam_cookie(
         );
         return None;
     }
+    info!("terminal proxy: beam cookie OK for session {session_id}");
     Some(zellij_cookie)
 }
 
@@ -466,6 +485,7 @@ async fn handle_session_terminal(
         .await
         .is_none()
     {
+        warn!("terminal proxy: session {session_id} not found");
         return (StatusCode::NOT_FOUND, "session not found").into_response();
     }
 
@@ -473,12 +493,18 @@ async fn handle_session_terminal(
     let ticket = params.get(TICKET_QUERY_PARAM).map(|s| s.as_str());
     let legacy_token = params.get(LEGACY_TOKEN_QUERY_PARAM).map(|s| s.as_str());
 
+    let path = req.uri().path().to_string();
+    let has_cookie = headers.get("cookie").is_some();
+    info!("terminal proxy: GET {path} session={session_id} ticket={} legacy_token={} has_cookie={has_cookie}",
+        ticket.is_some(), legacy_token.is_some());
+
     // Step 1: Try beam cookie auth (only when no auth query params)
     if ticket.is_none() && legacy_token.is_none() {
         if let Some(zellij_cookie) =
             authenticate_via_beam_cookie(&state, &session_id, &headers).await
         {
             // Authenticated via cookie — proxy with injected zellij cookie
+            info!("terminal proxy: cookie auth OK for session {session_id}, proxying to zellij");
             let zellij_session = resolve_zellij_session(&state.sessions, &session_id)
                 .await
                 .unwrap();
@@ -492,18 +518,28 @@ async fn handle_session_terminal(
                 Some(&session_id), // rewrite base href for this session
             )
             .await;
+        } else {
+            info!("terminal proxy: no valid beam cookie for session {session_id}");
         }
     }
 
     // Step 2-3: Try ticket or legacy token login
     if ticket.is_some() || legacy_token.is_some() {
+        info!("terminal proxy: trying ticket/login for session {session_id}");
         match try_ticket_login(&state, &session_id, ticket, legacy_token).await {
-            Ok(response) => return response,
-            Err(error_response) => return error_response,
+            Ok(response) => {
+                info!("terminal proxy: ticket/login OK for session {session_id}, redirecting with cookie");
+                return response;
+            }
+            Err(error_response) => {
+                warn!("terminal proxy: ticket/login failed for session {session_id}");
+                return error_response;
+            }
         }
     }
 
     // Step 4: No auth
+    warn!("terminal proxy: no auth for session {session_id}, returning 401");
     (
         StatusCode::UNAUTHORIZED,
         "terminal authentication required — provide ?beam_terminal_ticket= or login first",
@@ -521,12 +557,15 @@ async fn handle_session_ws(
     req: axum::extract::Request,
 ) -> impl IntoResponse {
     let Some(zellij_session) = resolve_zellij_session(&state.sessions, &session_id).await else {
+        warn!("terminal proxy: WS session {session_id} not found");
         return Err((StatusCode::NOT_FOUND, "session not found"));
     };
 
     // WS auth: check Beam cookie (browsers send cookies on WS upgrade)
+    info!("terminal proxy: WS upgrade for session {session_id} zellij={zellij_session}");
     let headers = req.headers().clone();
     let zellij_cookie_opt = authenticate_via_beam_cookie(&state, &session_id, &headers).await;
+    info!("terminal proxy: WS cookie auth result for {session_id}: {}", zellij_cookie_opt.is_some());
 
     // Also check if query param contains legacy token (backward compat for WS)
     let legacy_token = params.get(LEGACY_TOKEN_QUERY_PARAM).cloned();
@@ -629,14 +668,17 @@ async fn handle_session_root_ws(
 ) -> std::result::Result<impl IntoResponse, (StatusCode, &'static str)> {
     // Resolve actual zellij session name
     let Some(zellij_session) = resolve_zellij_session(&state.sessions, &session_id).await else {
+        warn!("terminal proxy: root WS session {session_id} not found");
         return Err((StatusCode::NOT_FOUND, "session not found"));
     };
 
     // Authenticate via Beam cookie (required — no unauthenticated WS)
+    info!("terminal proxy: root WS upgrade for session {session_id} rest={rest}");
     let headers = req.headers().clone();
     let zellij_cookie = authenticate_via_beam_cookie(&state, &session_id, &headers)
         .await
         .ok_or((StatusCode::UNAUTHORIZED, "terminal authentication required"))?;
+    info!("terminal proxy: root WS cookie auth OK for session {session_id}");
 
     // Translate the WS path: replace terminal name with actual zellij session
     let translated_path = terminal_auth::translate_root_ws_path(&rest, &zellij_session);
@@ -664,6 +706,8 @@ async fn handle_session_root_ws(
 }
 
 /// Connect to a WebSocket URL with an optional Cookie header.
+/// Uses tungstenite's `IntoClientRequest` to properly parse the ws:// URL,
+/// then injects the Cookie header — the recommended approach per tokio-tungstenite docs.
 async fn connect_ws_with_cookie(
     url: &str,
     cookie: Option<&str>,
@@ -671,13 +715,26 @@ async fn connect_ws_with_cookie(
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tokio_tungstenite::tungstenite::Error,
 > {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
     if let Some(cookie) = cookie {
-        let req = tokio_tungstenite::tungstenite::http::Request::builder()
-            .uri(url)
-            .header("Cookie", cookie)
-            .body(())
-            .unwrap();
-        connect_async(req).await.map(|(ws, _)| ws)
+        info!("terminal proxy: connecting WS to {url}");
+        let mut req = url.into_client_request()?;
+        req.headers_mut().insert(
+            "Cookie",
+            cookie.parse().map_err(|_| {
+                tokio_tungstenite::tungstenite::Error::Url(
+                    tokio_tungstenite::tungstenite::error::UrlError::UnableToConnect("invalid cookie".into())
+                )
+            })?,
+        );
+        let result = connect_async(req).await.map(|(ws, _)| ws);
+        if let Err(ref e) = result {
+            warn!("terminal proxy: WS connect to {url} failed: {e}");
+        } else {
+            info!("terminal proxy: WS connect to {url} OK");
+        }
+        result
     } else {
         connect_async(url).await.map(|(ws, _)| ws)
     }
@@ -696,6 +753,7 @@ async fn handle_session_path(
 ) -> Response {
     // Handle legacy _zellij prefix (no auth required — global fallback)
     if session_id == "_zellij" {
+        info!("terminal proxy: path={} (global fallback, no auth)", path);
         return proxy_request_raw(
             &state.http_client,
             state.zellij_web_port,
@@ -710,11 +768,14 @@ async fn handle_session_path(
 
     // All session-scoped paths require Beam cookie authentication.
     // Static assets, APIs, commands — everything needs a valid session cookie.
+    info!("terminal proxy: path={} session={session_id} (session-scoped, checking cookie)", path);
     let Some(zellij_cookie) =
         authenticate_via_beam_cookie(&state, &session_id, req.headers()).await
     else {
+        warn!("terminal proxy: path={} session={session_id} missing cookie, returning 401", path);
         return (StatusCode::UNAUTHORIZED, "terminal authentication required").into_response();
     };
+    info!("terminal proxy: path={} session={session_id} cookie OK, proxying", path);
 
     if terminal_auth::is_zellij_root_path(&path) {
         // Proxy to zellij web root (e.g. /assets/..., /command/login, /session, /info, /api/...)

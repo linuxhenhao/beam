@@ -59,13 +59,35 @@ pub const TICKET_QUERY_PARAM: &str = "beam_terminal_ticket";
 /// Legacy query parameter for raw zellij tokens (deprecated, kept for compat).
 pub const LEGACY_TOKEN_QUERY_PARAM: &str = "token";
 
-/// Process-level random secret for HMAC-signing terminal tickets.
-/// Generated once on first use and shared across the process lifetime.
+/// Derive the ticket-secret file path from environment, matching BeamPaths convention.
+fn ticket_secret_path() -> std::path::PathBuf {
+    let root = std::env::var("BEAM_HOME").unwrap_or_else(|_| {
+        std::env::var("HOME").map(|h| format!("{}/.beam", h)).unwrap_or_default()
+    });
+    std::path::PathBuf::from(root).join("state/ticket-secret")
+}
+
+/// Process-level secret for HMAC-signing terminal tickets.
+/// Persisted to disk so tickets survive daemon restarts.
+/// Falls back to an in-memory random secret if disk I/O fails.
 fn ticket_secret() -> &'static [u8] {
     static SECRET: OnceLock<Vec<u8>> = OnceLock::new();
     SECRET.get_or_init(|| {
-        // Derive 32 random bytes from uuid v4
-        uuid::Uuid::new_v4().as_bytes().to_vec()
+        let path = ticket_secret_path();
+        // Try to load existing secret from disk (survives restart)
+        if let Ok(bytes) = std::fs::read(&path) {
+            if bytes.len() >= 16 {
+                return bytes;
+            }
+        }
+        // Generate new secret and persist
+        let secret = uuid::Uuid::new_v4().as_bytes().to_vec();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Best-effort write; fall back to in-memory if it fails
+        let _ = std::fs::write(&path, &secret);
+        secret
     })
 }
 
@@ -135,8 +157,9 @@ pub fn generate_terminal_ticket(session_id: &str, permission: TerminalPermission
 
 /// Verify a terminal ticket and extract its payload.
 ///
-/// Checks HMAC signature, expiry (TICKET_TTL), session_id match, and
-/// one-time use (via `used_tickets`).  Returns `None` on any failure.
+/// Checks HMAC signature, session_id match, and one-time use.
+/// TTL expiry is only enforced for write-permission tickets;
+/// read-only tickets (embedded in streaming cards) have no expiry.
 pub fn verify_terminal_ticket(
     ticket: &str,
     expected_session_id: &str,
@@ -170,12 +193,15 @@ pub fn verify_terminal_ticket(
         return None;
     }
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    if now.saturating_sub(created_at) > TICKET_TTL.as_secs() {
-        return None;
+    // Write tickets expire after TICKET_TTL; read-only tickets (cards) have no expiry
+    if permission == TerminalPermission::Write {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if now.saturating_sub(created_at) > TICKET_TTL.as_secs() {
+            return None;
+        }
     }
 
     // One-time use check
@@ -374,11 +400,20 @@ pub fn is_zellij_root_path(path: &str) -> bool {
 ///
 /// Returns the translated path for the upstream zellij connection.
 pub fn translate_root_ws_path(rest: &str, zellij_session: &str) -> String {
-    if rest.starts_with("ws/terminal/") {
-        // Replace the terminal name with the actual zellij session name
+    // axum strips the /ws/ route prefix, so rest may be:
+    //   "terminal"         → Zellij 0.44 WS endpoint: /ws/terminal (no session in path)
+    //   "control"          → Zellij control WS: /ws/control
+    //   "terminal/<name>"  → legacy path with session name
+    //   "ws/terminal/..."  → legacy path (starts with ws/)
+    if rest == "terminal" || rest == "control" {
+        format!("ws/{rest}")
+    } else if rest.starts_with("terminal/") {
         format!("ws/terminal/{zellij_session}")
+    } else if rest.starts_with("ws/terminal/") {
+        format!("ws/terminal/{zellij_session}")
+    } else if rest.starts_with("ws/control") {
+        rest.to_string()
     } else {
-        // ws/control, etc. — passthrough as-is
         rest.to_string()
     }
 }
@@ -439,8 +474,8 @@ mod tests {
     }
 
     #[test]
-    fn ticket_expired_rejected() {
-        // Create a ticket-like payload with epoch 0 timestamp
+    fn ticket_expired_write_rejected() {
+        // Create a write ticket with epoch 0 timestamp
         let old_payload = format!("session-x:write:0:{}", uuid::Uuid::new_v4().simple());
         let secret = ticket_secret();
         let mut mac = HmacSha256::new_from_slice(secret).unwrap();
@@ -449,7 +484,24 @@ mod tests {
         let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(old_payload.as_bytes());
         let ticket = format!("{}.{}", b64, sig);
         let mut used = UsedTickets::default();
+        // Write ticket must be rejected after TTL
         assert!(verify_terminal_ticket(&ticket, "session-x", &mut used).is_none());
+    }
+
+    #[test]
+    fn ticket_expired_read_only_accepted() {
+        // Create a read-only ticket with epoch 0 timestamp
+        let old_payload = format!("session-y:read_only:0:{}", uuid::Uuid::new_v4().simple());
+        let secret = ticket_secret();
+        let mut mac = HmacSha256::new_from_slice(secret).unwrap();
+        mac.update(old_payload.as_bytes());
+        let sig = hex_encode(&mac.finalize().into_bytes());
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(old_payload.as_bytes());
+        let ticket = format!("{}.{}", b64, sig);
+        let mut used = UsedTickets::default();
+        // Read-only ticket should be accepted regardless of age
+        let payload = verify_terminal_ticket(&ticket, "session-y", &mut used).unwrap();
+        assert_eq!(payload.permission, TerminalPermission::ReadOnly);
     }
 
     #[test]
@@ -611,6 +663,23 @@ mod tests {
     fn translate_terminal_ws_replaces_session_name() {
         let result = translate_root_ws_path("ws/terminal/beam-session-id-123", "bmx-beam-se");
         assert_eq!(result, "ws/terminal/bmx-beam-se");
+    }
+
+    #[test]
+    fn translate_terminal_without_ws_prefix() {
+        let result = translate_root_ws_path("terminal/beam-session-id-123", "bmx-beam-se");
+        assert_eq!(result, "ws/terminal/bmx-beam-se");
+    }
+
+    #[test]
+    fn translate_terminal_no_session() {
+        // Zellij 0.44: WS endpoint is just /ws/terminal (no session name in path)
+        assert_eq!(translate_root_ws_path("terminal", "bmx-any"), "ws/terminal");
+        assert_eq!(translate_root_ws_path("control", "bmx-any"), "ws/control");
+    }
+
+    fn translate_ws_control_no_prefix() {
+        assert_eq!(translate_root_ws_path("ws/control", "bmx-any"), "ws/control");
     }
 
     #[test]

@@ -12,6 +12,7 @@ use clap::{Args, Parser, Subcommand};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::LevelFilter;
 
 mod ask_hook;
 mod autostart;
@@ -1033,7 +1034,11 @@ async fn cmd_attach(client: &Client, base: &str, session_id: &str) -> Result<()>
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(
+            EnvFilter::builder()
+                .with_default_directive(LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
         .with_target(false)
         .compact()
         .init();
