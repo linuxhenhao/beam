@@ -696,13 +696,21 @@ pub fn build_dir_select_card(
             }));
         }
 
+        // Wrap select_static in an action module so it actually renders and
+        // dispatches events. A bare select_static as a top-level card element
+        // is not valid in the Feishu card schema and will be silently ignored.
         elements.push(serde_json::json!({
-            "tag": "select_static",
-            "placeholder": {
-                "tag": "plain_text",
-                "content": "请选择目录..."
-            },
-            "options": options
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "select_static",
+                    "placeholder": {
+                        "tag": "plain_text",
+                        "content": "请选择目录..."
+                    },
+                    "options": options
+                }
+            ]
         }));
     }
 
@@ -711,11 +719,13 @@ pub fn build_dir_select_card(
 
     // Search hint: must be a standalone div outside the form.
     // Feishu card forms only accept input + button; div is not allowed inside form.
+    // Use plain instructional text (not a bold title) so users don't mistake
+    // the label for a clickable element.
     elements.push(serde_json::json!({
         "tag": "div",
         "text": {
             "tag": "lark_md",
-            "content": "🔍 **搜索目录：** 输入关键词后点击「筛选」"
+            "content": "🔍 在下方输入关键词，点击「筛选」过滤目录，或点击「使用最优匹配启动」自动选择最佳目录"
         }
     }));
 
@@ -944,6 +954,23 @@ fn truncate_str_tail(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Helper: find a select_static element nested inside an action.actions array.
+    /// Since select_static must be wrapped in an action component to render
+    /// in Feishu cards, callers should not search for bare select_static at
+    /// the top level of card elements.
+    fn find_select_static_in_elements(elements: &[Value]) -> Option<&Value> {
+        elements
+            .iter()
+            .filter(|e| e["tag"].as_str() == Some("action"))
+            .find_map(|e| {
+                e["actions"].as_array().and_then(|actions| {
+                    actions
+                        .iter()
+                        .find(|a| a["tag"].as_str() == Some("select_static"))
+                })
+            })
+    }
 
     #[test]
     fn test_expand_tilde_home() {
@@ -1283,11 +1310,37 @@ mod tests {
             Some("pending-1")
         );
 
-        // Card should contain select_static dropdown for directory picking
-        let select_static = elements
+        // Card should contain select_static dropdown inside an action.actions array.
+        // A bare select_static as a top-level card element is not valid in the
+        // Feishu card schema.
+        let select_action = elements
             .iter()
-            .find(|e| e["tag"].as_str() == Some("select_static"))
-            .expect("card should contain select_static dropdown");
+            .filter(|e| e["tag"].as_str() == Some("action"))
+            .find(|e| {
+                e["actions"]
+                    .as_array()
+                    .map(|actions| {
+                        actions
+                            .iter()
+                            .any(|a| a["tag"].as_str() == Some("select_static"))
+                    })
+                    .unwrap_or(false)
+            })
+            .expect("card should contain an action wrapping select_static dropdown");
+        let select_static = select_action["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["tag"].as_str() == Some("select_static"))
+            .expect("action.actions should contain select_static");
+        // Verify no bare select_static as a top-level element
+        let top_level_select = elements
+            .iter()
+            .find(|e| e["tag"].as_str() == Some("select_static"));
+        assert!(
+            top_level_select.is_none(),
+            "select_static must NOT be a bare top-level element; it must be inside action.actions"
+        );
         let options = select_static["options"]
             .as_array()
             .expect("select_static should have options");
@@ -1466,13 +1519,9 @@ mod tests {
             pick_button_count, 40,
             "directory buttons should be capped at MAX_BUTTON_DIRS"
         );
-        // select_static should contain up to MAX_SELECT_DIRS options
-        let select_static = v["elements"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|e| e["tag"].as_str() == Some("select_static"))
-            .expect("card should have select_static");
+        // select_static should be inside action.actions and contain up to MAX_SELECT_DIRS options
+        let select_static = find_select_static_in_elements(v["elements"].as_array().unwrap())
+            .expect("card should have select_static inside action.actions");
         let option_count = select_static["options"].as_array().unwrap().len();
         assert_eq!(
             option_count, 150,
@@ -1511,22 +1560,26 @@ mod tests {
             "select_static label should show dropdown limit"
         );
         let v: Value = serde_json::from_str(&card).expect("valid card JSON");
-        let result_row_count = v["elements"]
+        // Count only button action rows (not the select_static action wrapper)
+        let button_row_count = v["elements"]
             .as_array()
             .unwrap()
             .iter()
             .filter(|e| e["tag"].as_str() == Some("action"))
+            .filter(|e| {
+                e["actions"]
+                    .as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|first| first["tag"].as_str())
+                    == Some("button")
+            })
             .count();
         assert_eq!(
-            result_row_count, 40,
+            button_row_count, 40,
             "filtered result button rows capped at MAX_BUTTON_DIRS"
         );
-        let select_opts = v["elements"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|e| e["tag"].as_str() == Some("select_static"))
-            .expect("should have select_static")["options"]
+        let select_opts = find_select_static_in_elements(v["elements"].as_array().unwrap())
+            .expect("should have select_static inside action.actions")["options"]
             .as_array()
             .unwrap()
             .len();
@@ -1557,20 +1610,24 @@ mod tests {
             "no truncation label when under button limit"
         );
         let v: Value = serde_json::from_str(&card).expect("valid card JSON");
+        // Count only button action rows (not the select_static action wrapper)
         let result_row_count = v["elements"]
             .as_array()
             .unwrap()
             .iter()
             .filter(|e| e["tag"].as_str() == Some("action"))
+            .filter(|e| {
+                e["actions"]
+                    .as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|first| first["tag"].as_str())
+                    == Some("button")
+            })
             .count();
         assert_eq!(result_row_count, 10, "all 10 result rows should be present");
-        // select_static should exist (showing all results as dropdown)
+        // select_static should exist inside action.actions (showing all results as dropdown)
         assert!(
-            v["elements"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|e| e["tag"].as_str() == Some("select_static")),
+            find_select_static_in_elements(v["elements"].as_array().unwrap()).is_some(),
             "select_static should be present even with few results"
         );
     }
@@ -1591,11 +1648,19 @@ mod tests {
             None,
         );
         let v: Value = serde_json::from_str(&card).expect("valid card JSON");
+        // Filter only action elements that contain buttons (exclude select_static wrapper)
         let actions: Vec<&Value> = v["elements"]
             .as_array()
             .unwrap()
             .iter()
-            .filter(|e| e["tag"].as_str() == Some("action"))
+            .filter(|e| {
+                e["tag"].as_str() == Some("action")
+                    && e["actions"]
+                        .as_array()
+                        .and_then(|a| a.first())
+                        .and_then(|first| first["tag"].as_str())
+                        == Some("button")
+            })
             .collect();
         // Each dir → exactly 1 action row
         assert_eq!(actions.len(), 2, "should have 2 action rows");
@@ -1674,11 +1739,19 @@ mod tests {
             None,
         );
         let v: Value = serde_json::from_str(&card).expect("valid card JSON");
+        // Filter only action elements that contain buttons (exclude select_static wrapper)
         let actions: Vec<&Value> = v["elements"]
             .as_array()
             .unwrap()
             .iter()
-            .filter(|e| e["tag"].as_str() == Some("action"))
+            .filter(|e| {
+                e["tag"].as_str() == Some("action")
+                    && e["actions"]
+                        .as_array()
+                        .and_then(|a| a.first())
+                        .and_then(|first| first["tag"].as_str())
+                        == Some("button")
+            })
             .collect();
         assert_eq!(actions.len(), 3, "should have 3 action rows");
 
@@ -1742,6 +1815,7 @@ mod tests {
             .iter()
             .filter(|e| e["tag"].as_str() == Some("action"))
             .flat_map(|e| e["actions"].as_array().into_iter().flatten())
+            .filter(|child| child["tag"].as_str() == Some("button"))
             .collect();
 
         // Both buttons should show "project" (short name), not the full rel path
@@ -1782,11 +1856,19 @@ mod tests {
             None,
         );
         let v: Value = serde_json::from_str(&card).expect("valid card JSON");
+        // Filter only action elements that contain buttons (exclude select_static wrapper)
         let actions: Vec<&Value> = v["elements"]
             .as_array()
             .unwrap()
             .iter()
-            .filter(|e| e["tag"].as_str() == Some("action"))
+            .filter(|e| {
+                e["tag"].as_str() == Some("action")
+                    && e["actions"]
+                        .as_array()
+                        .and_then(|a| a.first())
+                        .and_then(|first| first["tag"].as_str())
+                        == Some("button")
+            })
             .collect();
 
         let mut found_dirs: Vec<String> = Vec::new();
@@ -1942,5 +2024,175 @@ mod tests {
         let pruned = prune_expired_pending_creates(&mut map, 1_700_000_000_000);
         assert_eq!(pruned, 0);
         assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_select_static_is_inside_action_actions_not_top_level() {
+        // Verify that the "more directories" select_static dropdown is placed
+        // inside an action.actions array, NOT as a bare top-level element.
+        // A bare select_static would not render in Feishu cards.
+        let dirs: Vec<String> = (0..10).map(|i| format!("project-{:03}", i)).collect();
+        let card = build_dir_select_card(
+            "pid", "/root", "test", &dirs, &dirs, None, None, None,
+        );
+        let v: Value = serde_json::from_str(&card).expect("valid card JSON");
+        let elements = v["elements"].as_array().unwrap();
+
+        // Must NOT have select_static as a bare top-level element
+        let bare_select = elements
+            .iter()
+            .find(|e| e["tag"].as_str() == Some("select_static"));
+        assert!(
+            bare_select.is_none(),
+            "select_static must NOT be a bare top-level card element"
+        );
+
+        // Must have select_static inside action.actions
+        let found = find_select_static_in_elements(elements);
+        assert!(
+            found.is_some(),
+            "select_static must be wrapped inside action.actions"
+        );
+
+        // Verify the select_static has the correct content
+        let select = found.unwrap();
+        let placeholder = select["placeholder"]["content"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            placeholder.contains("选择"),
+            "select_static should have a meaningful placeholder"
+        );
+        let options = select["options"].as_array().unwrap();
+        assert!(!options.is_empty(), "select_static must have options");
+
+        // Each option value must be valid JSON with action/pending_id/working_dir
+        for opt in options {
+            let val_str = opt["value"].as_str().expect("option value must be a string");
+            let parsed: Value =
+                serde_json::from_str(val_str).expect("option value must be valid JSON");
+            assert_eq!(
+                parsed["action"].as_str(),
+                Some("dir_select_pick"),
+                "each select option must have action=dir_select_pick"
+            );
+            assert_eq!(
+                parsed["pending_id"].as_str(),
+                Some("pid"),
+                "each select option must have pending_id"
+            );
+            assert!(
+                parsed["working_dir"].as_str().is_some(),
+                "each select option must have working_dir"
+            );
+        }
+    }
+
+    #[test]
+    fn test_search_area_has_interactive_input_and_button() {
+        // Verify the search area is interactive: it has a form with an input
+        // and at least one button. The standalone div before the form is purely
+        // instructional text — it should NOT look like a clickable title.
+        let dirs = vec!["project-a".to_string(), "project-b".to_string()];
+        let card = build_dir_select_card(
+            "pid", "/root", "test", &dirs, &dirs, None, Some("test"), None,
+        );
+        let v: Value = serde_json::from_str(&card).expect("valid card JSON");
+        let elements = v["elements"].as_array().unwrap();
+
+        // Find the form element (must exist and be interactive)
+        let form = elements
+            .iter()
+            .find(|e| e["tag"].as_str() == Some("form"))
+            .expect("card must contain a form element for search");
+        assert_eq!(form["name"].as_str(), Some("dir_search_form"));
+
+        let form_els = form["elements"]
+            .as_array()
+            .expect("form must have elements");
+
+        // Must have an input element
+        let input = form_els
+            .iter()
+            .find(|e| e["tag"].as_str() == Some("input"))
+            .expect("search form must have an input element");
+        assert_eq!(
+            input["name"].as_str(),
+            Some("dir_search_keyword"),
+            "input name should be dir_search_keyword"
+        );
+        // Input should have a default_value reflecting the search keyword
+        assert_eq!(
+            input["default_value"].as_str(),
+            Some("test"),
+            "input default_value should reflect the search keyword"
+        );
+        // Placeholder should be instructive
+        let placeholder = input["placeholder"]["content"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            placeholder.contains("关键词"),
+            "input placeholder should mention keywords"
+        );
+
+        // Must have form_submit buttons
+        let buttons: Vec<&Value> = form_els
+            .iter()
+            .filter(|e| e["tag"].as_str() == Some("button"))
+            .collect();
+        assert!(!buttons.is_empty(), "form must have at least one button");
+
+        // One button must be the filter button with action=dir_select_filter
+        let filter_btn = buttons
+            .iter()
+            .find(|b| {
+                b.pointer("/value/action").and_then(Value::as_str) == Some("dir_select_filter")
+            })
+            .expect("must have a dir_select_filter button");
+        assert_eq!(
+            filter_btn["action_type"].as_str(),
+            Some("form_submit"),
+            "filter button must be form_submit"
+        );
+
+        // One button must be the best-match button with action=dir_select_best
+        let best_btn = buttons
+            .iter()
+            .find(|b| {
+                b.pointer("/value/action").and_then(Value::as_str) == Some("dir_select_best")
+            })
+            .expect("must have a dir_select_best button");
+        assert_eq!(
+            best_btn["action_type"].as_str(),
+            Some("form_submit"),
+            "best-match button must be form_submit"
+        );
+
+        // The instructional div before the form should be plain text,
+        // not a bold title that looks clickable
+        let instructional_div = elements
+            .iter()
+            .filter(|e| e["tag"].as_str() == Some("div"))
+            .find(|e| {
+                e.pointer("/text/content")
+                    .and_then(Value::as_str)
+                    .map(|s| s.contains("下方输入") && s.contains("筛选"))
+                    .unwrap_or(false)
+            })
+            .expect("card must have instructional text for the search area");
+        let div_content = instructional_div
+            .pointer("/text/content")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        // The text should be instructional, not a bold clickable-looking title
+        assert!(
+            !div_content.contains("**搜索目录：**"),
+            "instructional div should NOT use bold title '搜索目录：' that looks clickable"
+        );
+        assert!(
+            div_content.contains("输入关键词") || div_content.contains("筛选"),
+            "instructional div should explain how to search"
+        );
     }
 }
