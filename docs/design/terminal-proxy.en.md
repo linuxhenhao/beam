@@ -86,7 +86,7 @@ This anchor only gives the zellij read-only watcher a regular client to follow. 
 Beam treats terminal viewport and card viewport separately:
 
 - The terminal viewport is the interaction size of the real web viewer. After zellij web receives browser control WS resize events, it drives the pane size; the Beam proxy only relays that path, without intercepting or filtering. Resize/metrics from both read-only and write viewers are handled normally by zellij/web; Beam does not intervene.
-- Card text and screenshot sampling is done by the worker using full dumps (`dump-screen --full`), based on the complete zellij pane scrollback buffer. Beam does not crop or truncate content. If the Feishu platform itself has display limits, those are platform limits; Beam does not silently crop.
+- Card text and screenshot sampling is done by the worker using `dump-screen` (without `--full`) to capture the current visible viewport. Beam does not apply additional cropping or truncation. If the Feishu platform itself has display limits, those are platform limits; Beam does not silently crop.
 
 ## Ticket Lifecycle
 

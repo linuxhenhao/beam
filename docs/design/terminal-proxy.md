@@ -86,7 +86,7 @@ Beam 不 patch zellij 的 JS/assets，也不把 write token 或 zellij write coo
 Beam 把 terminal viewport 和 card viewport 分开处理：
 
 - terminal viewport 是真实 web viewer 的交互尺寸。zellij web 收到浏览器 control WS 的 resize 后驱动 pane 尺寸；Beam proxy 只透传这条路径，不做拦截或过滤。read-only viewer 和 write viewer 的 resize/metrics 都由 zellij/web 正常处理，Beam 不介入。
-- card 文本和截图采样由 worker 使用 full dump（`dump-screen --full`），基于 zellij pane 完整 scrollback buffer，不在 Beam 侧做裁剪或截断。如果飞书平台自身有展示限制，那是平台限制，不在 Beam 里做静默裁剪。
+- card 文本和截图采样由 worker 使用 `dump-screen`（不带 `--full`）捕获当前可见 viewport，不在 Beam 侧额外裁剪或截断。如果飞书平台自身有展示限制，那是平台限制，不在 Beam 里做静默裁剪。
 
 ## Ticket 生命周期
 
