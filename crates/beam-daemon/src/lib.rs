@@ -1989,7 +1989,7 @@ fn zellij_dump_layout_panes(session: &str) -> Vec<ZellijLayoutPane> {
 fn discover_zellij_adopt_candidates() -> Vec<ZellijAdoptCandidate> {
     let mut out = Vec::new();
     for session in zellij_live_sessions() {
-        if session.starts_with("bmx-") {
+        if session.starts_with("beam-") {
             continue;
         }
         let panes = zellij_list_panes(&session);
@@ -2080,7 +2080,7 @@ fn session_zellij_target(session: &Session) -> String {
         .and_then(|adopted| adopted.zellij_session.clone())
         .unwrap_or_else(|| {
             format!(
-                "bmx-{}",
+                "beam-{}",
                 &session.session_id[..8.min(session.session_id.len())]
             )
         })
@@ -18899,7 +18899,7 @@ mod tests {
 
     #[test]
     fn schedule_create_appends_to_file() {
-        let tmp = std::env::temp_dir().join(format!("bmx-sched-test-{}", uuid::Uuid::new_v4()));
+        let tmp = std::env::temp_dir().join(format!("beam-sched-test-{}", uuid::Uuid::new_v4()));
         let paths = BeamPaths::from_root(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 

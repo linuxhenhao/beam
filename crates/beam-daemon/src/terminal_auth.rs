@@ -476,7 +476,7 @@ pub fn is_zellij_root_path(path: &str) -> bool {
 }
 
 /// Translate a zellij root WS path so the terminal session name is replaced
-/// with the actual zellij session (e.g. `bmx-...`), not the beam session ID.
+/// with the actual zellij session (e.g. `beam-...`), not the beam session ID.
 ///
 /// `rest` is the captured wildcard path from `/s/{session_id}/ws/{*rest}`,
 /// e.g. `ws/terminal/<beam_session_id>` or `ws/control`.
@@ -815,21 +815,21 @@ mod tests {
 
     #[test]
     fn translate_terminal_ws_replaces_session_name() {
-        let result = translate_root_ws_path("terminal/beam-session-id-123", "bmx-beam-se");
-        assert_eq!(result, "ws/terminal/bmx-beam-se");
+        let result = translate_root_ws_path("terminal/beam-session-id-123", "beam-beam-se");
+        assert_eq!(result, "ws/terminal/beam-beam-se");
     }
 
     #[test]
     fn translate_terminal_without_ws_prefix() {
-        let result = translate_root_ws_path("terminal/beam-session-id-123", "bmx-beam-se");
-        assert_eq!(result, "ws/terminal/bmx-beam-se");
+        let result = translate_root_ws_path("terminal/beam-session-id-123", "beam-beam-se");
+        assert_eq!(result, "ws/terminal/beam-beam-se");
     }
 
     #[test]
     fn translate_terminal_no_session() {
         // Zellij 0.44: WS endpoint is just /ws/terminal (no session name in path)
-        assert_eq!(translate_root_ws_path("terminal", "bmx-any"), "ws/terminal");
-        assert_eq!(translate_root_ws_path("control", "bmx-any"), "ws/control");
+        assert_eq!(translate_root_ws_path("terminal", "beam-any"), "ws/terminal");
+        assert_eq!(translate_root_ws_path("control", "beam-any"), "ws/control");
     }
 
     #[test]

@@ -133,7 +133,7 @@ fn zellij_session_for_beam(session: &Session) -> String {
         .and_then(|a| a.zellij_session.clone())
         .unwrap_or_else(|| {
             format!(
-                "bmx-{}",
+                "beam-{}",
                 &session.session_id[..8.min(session.session_id.len())]
             )
         })
@@ -806,7 +806,7 @@ async fn handle_session_ws(
 /// zellij cookie and inject it into the upstream WS connection.
 ///
 /// For `ws/terminal/<name>`: translates the terminal name to the real zellij
-/// session name (e.g. `bmx-...`) since zellij JS picks up the beam session ID
+/// session name (e.g. `beam-...`) since zellij JS picks up the beam session ID
 /// from `location.pathname`.
 async fn handle_session_root_ws(
     ws: WebSocketUpgrade,
@@ -1465,13 +1465,13 @@ mod tests {
 
     #[test]
     fn ws_terminal_path_translated() {
-        let result = terminal_auth::translate_root_ws_path("terminal/beam-abc-123", "bmx-beam-ab");
-        assert_eq!(result, "ws/terminal/bmx-beam-ab");
+        let result = terminal_auth::translate_root_ws_path("terminal/beam-abc-123", "beam-beam-ab");
+        assert_eq!(result, "ws/terminal/beam-beam-ab");
     }
 
     #[test]
     fn ws_control_path_passthrough() {
-        let result = terminal_auth::translate_root_ws_path("control", "bmx-xyz");
+        let result = terminal_auth::translate_root_ws_path("control", "beam-xyz");
         assert_eq!(result, "ws/control");
     }
 

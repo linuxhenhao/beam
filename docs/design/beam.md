@@ -184,14 +184,14 @@ Rust 版的第一生产后端应复刻当前 `TmuxPipeBackend`：
 新 session：
 
 ```
-tmux new-session -d -s bmx-<sid8> -x <cols> -y <rows> -- <shell> ... <cli-bin> <args>
+tmux new-session -d -s beam-<sid8> -x <cols> -y <rows> -- <shell> ... <cli-bin> <args>
 ```
 
 观察输出：
 
 ```
 mkfifo /tmp/beam-pipe-xxxx
-tmux pipe-pane -O -t bmx-<sid8> 'cat > <fifo>'
+tmux pipe-pane -O -t beam-<sid8> 'cat > <fifo>'
 ```
 
 输入：

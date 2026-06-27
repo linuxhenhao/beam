@@ -1010,7 +1010,7 @@ async fn fetch_sessions(client: &Client, base: &str) -> Result<Vec<SessionSummar
 
 fn session_attach_target(session: &SessionSummary) -> String {
     let fallback = format!(
-        "bmx-{}",
+        "beam-{}",
         &session.session_id[..8.min(session.session_id.len())]
     );
     session

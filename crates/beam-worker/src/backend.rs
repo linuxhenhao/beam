@@ -136,7 +136,7 @@ impl ZellijBackend {
         bin_args: &[String],
         opts: &SpawnOpts,
     ) -> Result<(PathBuf, PathBuf, PathBuf)> {
-        let tmp = std::env::temp_dir().join(format!("bmx-zellij-{}", uuid::Uuid::new_v4()));
+        let tmp = std::env::temp_dir().join(format!("beam-zellij-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp)?;
         let config_path = tmp.join("config.kdl");
         let layout_path = tmp.join("layout.kdl");
