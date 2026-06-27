@@ -32,8 +32,16 @@ pub trait SessionBackend: Send + Sync {
     async fn paste_text(&self, text: &str) -> Result<()>;
     async fn write_raw(&self, text: &str) -> Result<()>;
     async fn raw_input(&self, text: &str) -> Result<()>;
+    /// Capture the visible viewport only (current pane dimensions).
     async fn capture_viewport(&self) -> Result<String>;
+    /// Capture the last visible screen (alias for capture_viewport by default).
     async fn capture_current_screen(&self) -> Result<String>;
+    /// Capture the full screen buffer including scrollback.
+    /// Defaults to `capture_viewport()`; backends with full-buffer support
+    /// (e.g. Zellij) override to use a full dump.
+    async fn capture_full_screen(&self) -> Result<String> {
+        self.capture_viewport().await
+    }
     async fn is_alive(&self) -> Result<bool>;
     async fn child_pid(&self) -> Result<Option<u32>>;
     async fn kill(&mut self) -> Result<()>;
@@ -125,6 +133,33 @@ impl ZellijBackend {
 
     pub fn send_zellij_action(session: &str, args: &[&str]) -> Result<()> {
         Self::run_zellij_action(session, args).map(|_| ())
+    }
+
+    /// Build `zellij action dump-screen` args.
+    /// When `full` is true, `--full` is included to capture the full
+    /// scrollback buffer instead of just the visible viewport.
+    pub fn dump_screen_args(pane_id_str: &str, full: bool) -> Vec<String> {
+        if full {
+            vec![
+                "dump-screen".to_string(),
+                "--full".to_string(),
+                "--pane-id".to_string(),
+                pane_id_str.to_string(),
+            ]
+        } else {
+            vec![
+                "dump-screen".to_string(),
+                "--pane-id".to_string(),
+                pane_id_str.to_string(),
+            ]
+        }
+    }
+
+    /// Run `dump-screen --full` for this session/pane.
+    fn dump_full_screen(&self) -> Result<String> {
+        let args = Self::dump_screen_args(self.pane_id_str(), true);
+        let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        Self::run_zellij_action(&self.session_name, &args_refs)
     }
 
     fn kdl_string(value: &str) -> String {
@@ -344,6 +379,10 @@ impl SessionBackend for ZellijBackend {
         self.capture_viewport().await
     }
 
+    async fn capture_full_screen(&self) -> Result<String> {
+        Ok(self.dump_full_screen()?.replace('\n', "\r\n"))
+    }
+
     async fn is_alive(&self) -> Result<bool> {
         Ok(Self::has_session(&self.session_name))
     }
@@ -447,6 +486,12 @@ impl ZellijObserveBackend {
             &["dump-screen", "--pane-id", self.pane_id.as_str()],
         )
     }
+
+    fn dump_full_screen(&self) -> Result<String> {
+        let args = ZellijBackend::dump_screen_args(&self.pane_id, true);
+        let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        ZellijBackend::run_zellij_action(&self.session_name, &args_refs)
+    }
 }
 
 #[async_trait]
@@ -511,6 +556,10 @@ impl SessionBackend for ZellijObserveBackend {
 
     async fn capture_current_screen(&self) -> Result<String> {
         self.capture_viewport().await
+    }
+
+    async fn capture_full_screen(&self) -> Result<String> {
+        Ok(self.dump_full_screen()?.replace('\n', "\r\n"))
     }
 
     async fn is_alive(&self) -> Result<bool> {
@@ -956,5 +1005,28 @@ mod tests {
             {"id":42,"cursor_coordinates_in_pane":{"x":5,"y":3}}
         ]"#;
         assert_eq!(parse_zellij_cursor_from_list_panes(json, 42), Some((5, 3)));
+    }
+
+    // ---- dump_screen_args tests ----
+
+    #[test]
+    fn dump_screen_args_viewport_no_full() {
+        let args = ZellijBackend::dump_screen_args("terminal_1", false);
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[0], "dump-screen");
+        assert_eq!(args[1], "--pane-id");
+        assert_eq!(args[2], "terminal_1");
+        // --full must NOT be present
+        assert!(!args.contains(&"--full".to_string()));
+    }
+
+    #[test]
+    fn dump_screen_args_full_includes_full_flag() {
+        let args = ZellijBackend::dump_screen_args("terminal_0", true);
+        assert_eq!(args.len(), 4);
+        assert_eq!(args[0], "dump-screen");
+        assert_eq!(args[1], "--full");
+        assert_eq!(args[2], "--pane-id");
+        assert_eq!(args[3], "terminal_0");
     }
 }

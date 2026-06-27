@@ -1122,7 +1122,7 @@ pub async fn run(init: InitConfig) -> Result<()> {
         loop {
             let (screen, alive) = {
                 let guard = sample_backend.lock().await;
-                let screen = guard.capture_viewport().await.unwrap_or_default();
+                let screen = guard.capture_full_screen().await.unwrap_or_default();
                 let alive = guard.is_alive().await.unwrap_or(false);
                 (screen, alive)
             };
@@ -1454,7 +1454,7 @@ pub async fn run(init: InitConfig) -> Result<()> {
             }
             DaemonToWorker::RefreshScreen => {
                 let guard = backend.lock().await;
-                let screen = guard.capture_viewport().await?;
+                let screen = guard.capture_full_screen().await?;
                 *latest_raw_screen.write().await = screen.clone();
                 let mode = *display_mode.read().await;
                 let rendered = render_screen_for_display_mode(&screen, mode);

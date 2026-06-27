@@ -83,13 +83,10 @@ Beam 不 patch zellij 的 JS/assets，也不把 write token 或 zellij write coo
 
 ### Viewport model
 
-Beam 把 terminal viewport、card viewport 和 fallback viewport 分开处理：
+Beam 把 terminal viewport 和 card viewport 分开处理：
 
-- terminal viewport 是真实 web viewer 的交互尺寸。zellij web 收到浏览器 control WS 的 resize 后驱动 pane 尺寸；Beam proxy 只透传这条路径。
-- card viewport 是飞书卡片截图展示尺寸。worker 上传截图前按 `120x36` 裁剪，避免卡片截图和卡片文本截断尺度不一致。
-- fallback viewport 是没有真实 viewer 可用时的临时尺寸。worker managed session 默认用 `120x36`。read-only anchor 不设置 fallback viewport，避免改变同一个 zellij pane 的尺寸并污染 `dump-screen` 截图。
-
-如果只有 read-only viewer，zellij web 应使用该 viewer 上报的实际尺寸；anchor 不应替真实 viewer 发送尺寸事件。未来如果飞书卡片模板支持更大图片，应只调整 card viewport，不反向影响真实 terminal viewport。
+- terminal viewport 是真实 web viewer 的交互尺寸。zellij web 收到浏览器 control WS 的 resize 后驱动 pane 尺寸；Beam proxy 只透传这条路径，不做拦截或过滤。read-only viewer 和 write viewer 的 resize/metrics 都由 zellij/web 正常处理，Beam 不介入。
+- card 文本和截图采样由 worker 使用 full dump（`dump-screen --full`），基于 zellij pane 完整 scrollback buffer，不在 Beam 侧做裁剪或截断。如果飞书平台自身有展示限制，那是平台限制，不在 Beam 里做静默裁剪。
 
 ## Ticket 生命周期
 
@@ -150,7 +147,7 @@ WS 转发：
 
 - 用 `ClientRequestBuilder` 构造上游 WS handshake。
 - 如认证成功，在上游 WS handshake 中注入 zellij cookie。
-- client 和 zellij web 之间只做 message relay。
+- client 和 zellij web 之间只做 pure message relay，不做任何消息过滤。
 - read-only 登录会额外确保 daemon 内部 anchor client 在线；anchor 的 WS 不接收浏览器输入，只丢弃 zellij frames。
 
 ## 不支持的入口
