@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.3.1...beam-daemon-v0.3.2) - 2026-06-27
+
+### Fixed
+
+- *(terminal-proxy)* 使用 dump-screen --full 替代 viewport capture，移除 card viewport 裁剪逻辑
+- *(daemon)* 修复目录选择下拉渲染
+- *(terminal-proxy)* 移除 anchor 多余 resize/metrics，截图不再裁剪到 card viewport
+
+### Other
+
+- Merge pull request #21 from linuxhenhao/fix/dump_screen
+
 ## [0.3.1](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.3.0...beam-daemon-v0.3.1) - 2026-06-27
 
 ### Fixed
