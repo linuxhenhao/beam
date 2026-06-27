@@ -31,40 +31,11 @@ use crate::backend::{SessionBackend, SpawnOpts, ZellijBackend, ZellijObserveBack
 
 const FALLBACK_TERMINAL_COLS: u16 = 120;
 const FALLBACK_TERMINAL_ROWS: u16 = 36;
-const CARD_VIEWPORT_COLS: usize = 120;
-const CARD_VIEWPORT_ROWS: usize = 36;
-
 fn render_screen_for_display_mode(screen: &str, mode: DisplayMode) -> String {
     match mode {
         DisplayMode::Hidden => "[screen hidden]".to_string(),
-        DisplayMode::Screenshot => card_viewport_text(screen),
+        DisplayMode::Screenshot => strip_ansi(screen).replace('\r', ""),
     }
-}
-
-fn crop_line_to_cells(line: &str, max_cols: usize) -> String {
-    let mut out = String::new();
-    let mut cols = 0usize;
-    for ch in line.chars() {
-        let width = if is_fullwidth(ch) { 2 } else { 1 };
-        if cols + width > max_cols {
-            break;
-        }
-        out.push(ch);
-        cols += width;
-    }
-    out
-}
-
-fn card_viewport_text(screen_raw: &str) -> String {
-    let clean = strip_ansi(screen_raw).replace('\r', "");
-    let mut out = String::new();
-    for (idx, line) in clean.lines().take(CARD_VIEWPORT_ROWS).enumerate() {
-        if idx > 0 {
-            out.push('\n');
-        }
-        out.push_str(&crop_line_to_cells(line, CARD_VIEWPORT_COLS));
-    }
-    out
 }
 
 const SCREEN_ANALYZER_SYSTEM_PROMPT: &str = "You are a terminal screen analyzer. Determine whether the CLI is showing a blocking interactive prompt. Return only JSON with fields needsInteraction, description, options, multiSelect, toggleKey, confirmKey, checkAgainWhen. checkAgainWhen must be one of content_changed, after_5s, after_10s, not_needed.";
@@ -685,8 +656,8 @@ fn render_text_screenshot_png(screen_raw: &str) -> Result<Vec<u8>> {
         .unwrap_or(1)
         .max(1);
 
-    let width = ((cols as f32 * CELL_W).ceil() as u32 + PADDING * 2).clamp(64, 2200);
-    let height = ((rows as f32 * CELL_H).ceil() as u32 + PADDING * 2).clamp(32, 2200);
+    let width = ((cols as f32 * CELL_W).ceil() as u32 + PADDING * 2).max(64);
+    let height = ((rows as f32 * CELL_H).ceil() as u32 + PADDING * 2).max(32);
 
     let mut image = ImageBuffer::from_pixel(width, height, BG_COLOR);
 
@@ -761,8 +732,8 @@ fn fallback_bitmap_png(screen: &str) -> Result<Vec<u8>> {
     let scale = 2u32;
     let glyph_w = 8u32 * scale;
     let glyph_h = 8u32 * scale;
-    let width = (cols as u32 * glyph_w + PADDING * 2).clamp(64, 2200);
-    let height = (rows as u32 * glyph_h + PADDING * 2).clamp(32, 2200);
+    let width = (cols as u32 * glyph_w + PADDING * 2).max(64);
+    let height = (rows as u32 * glyph_h + PADDING * 2).max(32);
     let bg = Rgba([15, 23, 42, 255]);
     let fg = Rgba([226, 232, 240, 255]);
     let mut image = ImageBuffer::from_pixel(width, height, bg);
@@ -865,15 +836,14 @@ async fn maybe_send_screenshot_upload(
     if app_id == "local" || app_secret.is_empty() {
         return;
     }
-    let card_screen = card_viewport_text(screen);
-    let hash = format!("{:x}", Sha256::digest(card_screen.as_bytes()));
+    let hash = format!("{:x}", Sha256::digest(strip_ansi(screen).as_bytes()));
     {
         let guard = last_uploaded_hash.lock().await;
         if guard.as_deref() == Some(hash.as_str()) {
             return;
         }
     }
-    let png = match render_text_screenshot_png(&card_screen) {
+    let png = match render_text_screenshot_png(screen) {
         Ok(png) => png,
         Err(err) => {
             warn!("failed to render terminal screenshot: {err:#}");
@@ -1616,29 +1586,18 @@ mod tests {
     }
 
     #[test]
-    fn card_viewport_text_crops_to_card_dimensions() {
-        let screen = (0..40)
+    fn render_screen_for_screenshot_mode_preserves_full_text() {
+        let screen = (0..80)
             .map(|idx| format!("{idx:02}:{}", "x".repeat(140)))
             .collect::<Vec<_>>()
             .join("\n");
-        let cropped = card_viewport_text(&screen);
-        let lines: Vec<&str> = cropped.lines().collect();
+        let rendered = render_screen_for_display_mode(&screen, DisplayMode::Screenshot);
+        let lines: Vec<&str> = rendered.lines().collect();
 
-        assert_eq!(lines.len(), CARD_VIEWPORT_ROWS);
-        assert!(
-            lines
-                .iter()
-                .all(|line| line.chars().count() <= CARD_VIEWPORT_COLS)
-        );
-    }
-
-    #[test]
-    fn card_viewport_text_strips_ansi_and_respects_fullwidth_cells() {
-        let screen = format!("\x1b[31m{}\x1b[0m", "好".repeat(80));
-        let cropped = card_viewport_text(&screen);
-
-        assert_eq!(cropped.chars().count(), CARD_VIEWPORT_COLS / 2);
-        assert!(!cropped.contains("\x1b[31m"));
+        assert_eq!(lines.len(), 80);
+        assert!(lines[0].starts_with("00:"));
+        assert!(lines[79].starts_with("79:"));
+        assert!(lines[0].chars().count() > 120);
     }
 
     #[test]
@@ -1690,19 +1649,15 @@ mod tests {
     }
 
     #[test]
-    fn render_text_screenshot_png_uses_card_viewport_input() {
-        let screen = card_viewport_text(
-            &(0..80)
-                .map(|_| "x".repeat(200))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
+    fn render_text_screenshot_png_uses_full_screenshot_input() {
+        let screen = (0..80)
+            .map(|_| "x".repeat(200))
+            .collect::<Vec<_>>()
+            .join("\n");
         let png = render_text_screenshot_png(&screen).expect("png rendered");
         let image = image::load_from_memory(&png).expect("png should decode");
-        let expected_width =
-            ((CARD_VIEWPORT_COLS as f32 * CELL_W).ceil() as u32 + PADDING * 2).clamp(64, 2200);
-        let expected_height =
-            ((CARD_VIEWPORT_ROWS as f32 * CELL_H).ceil() as u32 + PADDING * 2).clamp(32, 2200);
+        let expected_width = ((200f32 * CELL_W).ceil() as u32 + PADDING * 2).max(64);
+        let expected_height = ((80f32 * CELL_H).ceil() as u32 + PADDING * 2).max(32);
 
         assert_eq!(image.width(), expected_width);
         assert_eq!(image.height(), expected_height);

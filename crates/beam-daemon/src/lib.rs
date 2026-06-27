@@ -17479,6 +17479,7 @@ mod tests {
         let buttons: Vec<&Value> = action_elements
             .iter()
             .flat_map(|e| e["actions"].as_array().into_iter().flatten())
+            .filter(|child| child["tag"].as_str() == Some("button"))
             .collect();
         // 10 dirs ≤ MAX_BUTTON_DIRS(40), so all show as buttons
         assert_eq!(buttons.len(), 10, "should have one button per directory");
@@ -17496,11 +17497,29 @@ mod tests {
                 Some(format!("project-{}", i).as_str())
             );
         }
-        // Card now includes select_static as alternative entry point
+        // Card now includes select_static inside action.actions as alternative entry point.
+        // A bare select_static at the top level is not valid in Feishu card schema.
         let select_static = elements
             .iter()
-            .find(|e| e["tag"].as_str() == Some("select_static"))
-            .expect("card should contain select_static dropdown");
+            .filter(|e| e["tag"].as_str() == Some("action"))
+            .find_map(|e| {
+                e["actions"]
+                    .as_array()
+                    .and_then(|actions| {
+                        actions
+                            .iter()
+                            .find(|a| a["tag"].as_str() == Some("select_static"))
+                    })
+            })
+            .expect("card should contain select_static dropdown inside action.actions");
+        // Verify no bare select_static at the top level
+        assert!(
+            elements
+                .iter()
+                .find(|e| e["tag"].as_str() == Some("select_static"))
+                .is_none(),
+            "select_static must not be a bare top-level element"
+        );
         let options = select_static["options"].as_array().unwrap();
         assert_eq!(
             options.len(),

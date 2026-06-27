@@ -57,10 +57,6 @@ const STRIP_RESPONSE_HEADERS: &[&str] = &["set-cookie"];
 
 /// Avoid hot-spawning anchors if zellij rejects/fails quickly.
 const ANCHOR_RESTART_COOLDOWN: Duration = Duration::from_secs(5);
-const FALLBACK_TERMINAL_COLS: u16 = 120;
-const FALLBACK_TERMINAL_ROWS: u16 = 36;
-const TERMINAL_CELL_PIXEL_WIDTH: u16 = 9;
-const TERMINAL_CELL_PIXEL_HEIGHT: u16 = 18;
 
 fn is_hop_by_hop(name: &HeaderName) -> bool {
     HOP_BY_HOP.contains(&name.as_str().to_lowercase().as_str())
@@ -397,31 +393,6 @@ fn should_ensure_read_only_anchor(
             .is_some_and(|token| !token.is_empty())
 }
 
-fn build_anchor_control_messages(web_client_id: &str) -> [String; 2] {
-    [
-        serde_json::json!({
-            "web_client_id": web_client_id,
-            "payload": {
-                "type": "TerminalResize",
-                "rows": FALLBACK_TERMINAL_ROWS,
-                "cols": FALLBACK_TERMINAL_COLS,
-            },
-        })
-        .to_string(),
-        serde_json::json!({
-            "web_client_id": web_client_id,
-            "payload": {
-                "type": "TerminalMetrics",
-                "cell_pixel_width": TERMINAL_CELL_PIXEL_WIDTH,
-                "cell_pixel_height": TERMINAL_CELL_PIXEL_HEIGHT,
-                "text_area_pixel_width": FALLBACK_TERMINAL_COLS * TERMINAL_CELL_PIXEL_WIDTH,
-                "text_area_pixel_height": FALLBACK_TERMINAL_ROWS * TERMINAL_CELL_PIXEL_HEIGHT,
-            },
-        })
-        .to_string(),
-    ]
-}
-
 async fn ensure_read_only_anchor(state: &ProxyState, session_id: &str, zellij_session: &str) {
     if !should_ensure_read_only_anchor(TerminalPermission::ReadOnly, &state.zellij_tokens) {
         warn!("terminal proxy: read-only anchor skipped for {session_id}: write token unavailable");
@@ -506,12 +477,9 @@ async fn run_zellij_anchor_client(
         Some(&format!("web_client_id={web_client_id}")),
     );
 
+    // Keep the hidden client online without sending resize/metrics; those
+    // messages resize the shared zellij pane and pollute dump-screen screenshots.
     let mut control_ws = connect_ws_with_cookie(&control_url, Some(&zellij_cookie)).await?;
-    for message in build_anchor_control_messages(&web_client_id) {
-        control_ws
-            .send(TungsteniteMessage::Text(message.into()))
-            .await?;
-    }
     let mut terminal_ws = connect_ws_with_cookie(&terminal_url, Some(&zellij_cookie)).await?;
     info!("terminal proxy: zellij read-only anchor connected for {zellij_session}");
 
@@ -1422,25 +1390,6 @@ mod tests {
             TerminalPermission::ReadOnly,
             &tokens
         ));
-    }
-
-    #[test]
-    fn anchor_control_messages_match_zellij_wire_shape() {
-        let messages = build_anchor_control_messages("client-1");
-        let resize: serde_json::Value = serde_json::from_str(&messages[0]).unwrap();
-        let metrics: serde_json::Value = serde_json::from_str(&messages[1]).unwrap();
-
-        assert_eq!(resize["web_client_id"], "client-1");
-        assert_eq!(resize["payload"]["type"], "TerminalResize");
-        assert_eq!(resize["payload"]["rows"], 36);
-        assert_eq!(resize["payload"]["cols"], 120);
-
-        assert_eq!(metrics["web_client_id"], "client-1");
-        assert_eq!(metrics["payload"]["type"], "TerminalMetrics");
-        assert_eq!(metrics["payload"]["cell_pixel_width"], 9);
-        assert_eq!(metrics["payload"]["cell_pixel_height"], 18);
-        assert_eq!(metrics["payload"]["text_area_pixel_width"], 1080);
-        assert_eq!(metrics["payload"]["text_area_pixel_height"], 648);
     }
 
     #[test]

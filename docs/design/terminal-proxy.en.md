@@ -76,10 +76,10 @@ Beam does not patch zellij JS/assets and does not send the write token or zellij
 
 1. Calls `/command/login` with the zellij `write_token`; the cookie is stored only inside the daemon process.
 2. Calls zellij root `/session` to create a regular `web_client_id`.
-3. Connects to `/ws/control` and sends fixed `TerminalResize` and `TerminalMetrics`.
+3. Connects to `/ws/control` and keeps it open, but does not send `TerminalResize` or `TerminalMetrics`.
 4. Connects to `/ws/terminal/{zellij_session}?web_client_id=...` and discards received terminal frames.
 
-This anchor only gives the zellij read-only watcher a regular client to follow. It does not forward external input and does not leak internal cookies/tokens to the browser. Anchors are reused per zellij session. If anchor startup fails, the proxy only logs a warning and continues proxying the read-only request normally.
+This anchor only gives the zellij read-only watcher a regular client to follow. It does not forward external input, does not send resize/metrics, and does not leak internal cookies/tokens to the browser. Anchors are reused per zellij session. If anchor startup fails, the proxy only logs a warning and continues proxying the read-only request normally.
 
 ### Viewport Model
 
@@ -87,9 +87,9 @@ Beam treats terminal viewport, card viewport, and fallback viewport separately:
 
 - The terminal viewport is the interaction size of the real web viewer. After zellij web receives browser control WS resize events, it drives the pane size; the Beam proxy only relays that path.
 - The card viewport is the Feishu card screenshot display size. The worker crops screenshots to `120x36` before upload, keeping screenshot scale aligned with card text truncation.
-- The fallback viewport is the temporary size used when no real viewer is available. Worker-managed sessions default to `120x36`, and the read-only anchor also sends an initial `120x36` resize/metrics pair.
+- The fallback viewport is the temporary size used when no real viewer is available. Worker-managed sessions default to `120x36`. The read-only anchor does not set a fallback viewport, avoiding pane-size changes that would pollute `dump-screen` screenshots for the same zellij pane.
 
-If there is only a read-only viewer, zellij web should prefer that viewer's reported real size. The `120x36` fallback is used only when the read-only anchor is established first and the real viewer has not finished resize/control WS setup. If future Feishu card templates support larger images, adjust only the card viewport; do not let that change flow backward into the real terminal viewport.
+If there is only a read-only viewer, zellij web should use that viewer's reported real size; the anchor must not send size events on behalf of the real viewer. If future Feishu card templates support larger images, adjust only the card viewport; do not let that change flow backward into the real terminal viewport.
 
 ## Ticket Lifecycle
 
