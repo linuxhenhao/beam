@@ -36,6 +36,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tokio::sync::Mutex;
 
@@ -224,17 +225,76 @@ pub struct UsedTickets {
     entries: Vec<(String, Instant)>,
 }
 
+/// Serializable representation of used tickets for disk persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UsedTicketsPersisted {
+    /// List of (nonce, seen_at_epoch_secs) — the approximate
+    /// Unix epoch second when the nonce was first recorded.
+    entries: Vec<(String, u64)>,
+}
+
 impl UsedTickets {
     /// Returns true if the nonce is fresh (not used), inserting it.
     pub fn insert_and_check(&mut self, nonce: &str) -> bool {
         let now = Instant::now();
         self.entries
-            .retain(|(_, t)| now.duration_since(*t) < USED_TICKET_TTL);
+            .retain(|(_, t)| now.saturating_duration_since(*t) < USED_TICKET_TTL);
         if self.entries.iter().any(|(n, _)| n == nonce) {
             return false; // already used
         }
         self.entries.push((nonce.to_string(), now));
         true
+    }
+
+    /// Load used tickets from disk, pruning expired entries.
+    /// Approximates Instant from saved epoch timestamps (seen_at).
+    pub fn load_from(&mut self, path: &std::path::Path) {
+        if let Ok(Some(persisted)) = beam_core::persist::read_json::<UsedTicketsPersisted>(path) {
+            let now = Instant::now();
+            let now_epoch = Self::epoch_now();
+            for (nonce, seen_at_epoch) in persisted.entries {
+                // Compute elapsed since the entry was recorded
+                let elapsed_secs = now_epoch.saturating_sub(seen_at_epoch);
+                if elapsed_secs > USED_TICKET_TTL.as_secs() {
+                    continue; // already expired
+                }
+                // Reconstruct Instant in the past (now - elapsed)
+                let seen = now - Duration::from_secs(elapsed_secs);
+                self.entries.push((nonce, seen));
+            }
+        }
+    }
+
+    /// Save used tickets to disk (only non-expired entries).
+    /// Stores the approximate epoch time when each entry was first seen.
+    pub fn save_to(&self, path: &std::path::Path) {
+        let now_epoch = Self::epoch_now();
+        let entries: Vec<(String, u64)> = self
+            .entries
+            .iter()
+            .filter_map(|(nonce, instant)| {
+                let elapsed = instant.elapsed();
+                if elapsed < USED_TICKET_TTL {
+                    let seen_at_epoch = now_epoch.saturating_sub(elapsed.as_secs());
+                    Some((nonce.clone(), seen_at_epoch))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if entries.is_empty() {
+            let _ = std::fs::remove_file(path);
+            return;
+        }
+        let persisted = UsedTicketsPersisted { entries };
+        let _ = beam_core::persist::atomic_write_json(path, &persisted);
+    }
+
+    fn epoch_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
     }
 }
 
@@ -266,6 +326,30 @@ struct TerminalAuthInner {
 impl TerminalAuthState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Load persisted used tickets from the given path.
+    /// Best-effort; failures are silently ignored.
+    pub async fn load_used_tickets(&self, path: &std::path::Path) {
+        let path = path.to_path_buf();
+        let inner = self.inner.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let mut guard = inner.blocking_lock();
+            guard.used_tickets.load_from(&path);
+        })
+        .await;
+    }
+
+    /// Persist used tickets to the given path.
+    /// Best-effort; failures are silently ignored.
+    pub async fn save_used_tickets(&self, path: &std::path::Path) {
+        let path = path.to_path_buf();
+        let inner = self.inner.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let guard = inner.blocking_lock();
+            guard.used_tickets.save_to(&path);
+        })
+        .await;
     }
 
     /// Store a zellij cookie entry and return a new Beam cookie value.
@@ -649,6 +733,57 @@ mod tests {
     fn used_tickets_accepts_after_ttl() {
         // Can't easily test TTL in a unit test without sleep,
         // but the prune path is tested implicitly via the verify flow.
+    }
+
+    #[test]
+    fn used_tickets_save_and_load_preserves_dedupe() {
+        let tmp = std::env::temp_dir().join(format!(
+            "beam-used-tickets-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&tmp);
+        // Insert some nonces
+        let mut used = UsedTickets::default();
+        assert!(used.insert_and_check("nonce-a"));
+        assert!(used.insert_and_check("nonce-b"));
+        used.save_to(&tmp);
+        // Load into a new UsedTickets
+        let mut loaded = UsedTickets::default();
+        loaded.load_from(&tmp);
+        // Same nonces should be rejected
+        assert!(!loaded.insert_and_check("nonce-a"));
+        assert!(!loaded.insert_and_check("nonce-b"));
+        // New nonce should work
+        assert!(loaded.insert_and_check("nonce-c"));
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn used_tickets_load_preserves_ttl_approx() {
+        let tmp = std::env::temp_dir().join(format!(
+            "beam-used-tickets-ttl-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&tmp);
+        let mut used = UsedTickets::default();
+        assert!(used.insert_and_check("nonce-x"));
+        used.save_to(&tmp);
+        // Load: the entry should NOT be expired (just loaded)
+        let mut loaded = UsedTickets::default();
+        loaded.load_from(&tmp);
+        assert!(
+            !loaded.insert_and_check("nonce-x"),
+            "loaded entry should still block replay"
+        );
+        let _ = std::fs::remove_file(&tmp);
     }
 
     // ── Path classification ────────────────────────────────────────

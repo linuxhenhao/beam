@@ -5,15 +5,38 @@
 //! This module is extracted from `lib.rs` (Task 7.1) so that trigger, approval,
 //! cancel, cold attach, and dashboard resume all go through the same driver.
 
+use std::collections::HashMap;
+
 use beam_core::{
-    EventLog, RunChatBinding, RunStatus, WorkflowRuntimeContext, parse_workflow_definition,
-    read_run_snapshot, run_loop,
+    BeamPaths, EventLog, RunChatBinding, RunStatus, WorkflowRuntimeContext,
+    parse_workflow_definition, read_run_snapshot, run_loop,
 };
 use tracing::{info, warn};
 
 use crate::AppState;
 
 const MAX_TICKS: usize = 128;
+
+/// Load persisted workflow progress card mappings (run_id -> card_message_id).
+pub(crate) async fn load_workflow_progress_cards(paths: &BeamPaths) -> HashMap<String, String> {
+    match beam_core::persist::read_json::<HashMap<String, String>>(
+        &paths.workflow_progress_cards_json(),
+    ) {
+        Ok(Some(map)) => map,
+        _ => HashMap::new(),
+    }
+}
+
+/// Persist the workflow progress card mappings to disk.
+pub(crate) async fn save_workflow_progress_cards(paths: &BeamPaths, map: &HashMap<String, String>) {
+    let path = paths.workflow_progress_cards_json();
+    let _ = tokio::task::spawn_blocking({
+        let path = path.clone();
+        let map = map.clone();
+        move || beam_core::persist::atomic_write_json(&path, &map)
+    })
+    .await;
+}
 
 /// Main entry point: run (or resume) the workflow runtime for `run_id`.
 pub(crate) async fn run(state: &AppState, run_id: &str, workflow_json: &str) {
@@ -142,11 +165,37 @@ async fn send_progress_card(state: &AppState, run_id: &str, workflow_id: &str) {
 
     let card_json = card.to_string();
     let mut card_map = state.workflow_progress_cards.lock().await;
-    if let Some(card_msg_id) = card_map.get(run_id) {
-        let _ = crate::lark_update_card(state, &bot, card_msg_id, &card_json).await;
+    if let Some(card_msg_id) = card_map.get(run_id).cloned() {
+        match crate::lark_update_card(state, &bot, &card_msg_id, &card_json).await {
+            Ok(()) => {}
+            Err(err) => {
+                warn!(
+                    "workflow progress card update failed for run {} card {}: {}",
+                    run_id, card_msg_id, err
+                );
+                // If the card no longer exists (e.g. deleted manually), try creating a new one
+                let is_card_gone = err.to_string().contains("230001")
+                    || err.to_string().contains("not found")
+                    || err.to_string().contains("message not exist");
+                if is_card_gone {
+                    if let Ok(msg_id) =
+                        crate::send_lark_card_in_chat(state, &bot, &chat_id, &card_json).await
+                    {
+                        card_map.insert(run_id.to_string(), msg_id);
+                        let snapshot = card_map.clone();
+                        drop(card_map);
+                        save_workflow_progress_cards(&state.paths, &snapshot).await;
+                    }
+                }
+            }
+        }
     } else {
         if let Ok(msg_id) = crate::send_lark_card_in_chat(state, &bot, &chat_id, &card_json).await {
             card_map.insert(run_id.to_string(), msg_id);
+            // Persist the mapping so cold-attach / restart can update existing card
+            let snapshot = card_map.clone();
+            drop(card_map);
+            save_workflow_progress_cards(&state.paths, &snapshot).await;
         }
     }
 }

@@ -5,6 +5,7 @@ pub mod i18n;
 pub mod ipc;
 pub mod paths;
 pub mod permissions;
+pub mod persist;
 pub mod schedule_parser;
 pub mod schedule_store;
 pub mod session;

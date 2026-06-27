@@ -1,5 +1,9 @@
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// TTL for grant pending entries: 10 minutes in milliseconds.
+pub const GRANT_PENDING_TTL_MS: i64 = 10 * 60 * 1000;
 
 #[derive(Debug, Clone)]
 pub struct GrantContext {
@@ -330,14 +334,14 @@ pub fn consume_quota(
     })
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum GrantPendingState {
     Pending,
     Denied { denied_at: u64 },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct GrantPendingEntry {
     pub nonce: String,
@@ -441,6 +445,81 @@ pub struct QuotaResult {
     pub exhausted: bool,
 }
 
+/// Serializable grant pending entry with its map key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GrantPendingPersisted {
+    key: String,
+    nonce: String,
+    targets: Vec<String>,
+    quota: Option<u32>,
+    ts: u64,
+    state: GrantPendingState,
+}
+
+/// Load grant pending entries from disk, pruning expired ones.
+pub(crate) fn load_grant_pending(
+    paths: &beam_core::BeamPaths,
+) -> std::collections::HashMap<String, GrantPendingEntry> {
+    let path = paths.grant_pending_json();
+    let entries: Vec<GrantPendingPersisted> = match beam_core::persist::read_json(&path) {
+        Ok(Some(entries)) => entries,
+        _ => return Default::default(),
+    };
+    let total_loaded = entries.len();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut map = std::collections::HashMap::new();
+    let mut retained = Vec::new();
+    for entry in &entries {
+        if now_ms - entry.ts as i64 > GRANT_PENDING_TTL_MS {
+            continue;
+        }
+        retained.push(entry.clone());
+        map.insert(
+            entry.key.clone(),
+            GrantPendingEntry {
+                nonce: entry.nonce.clone(),
+                targets: entry.targets.clone(),
+                quota: entry.quota,
+                ts: entry.ts,
+                state: entry.state.clone(),
+            },
+        );
+    }
+    // Prune expired entries
+    if retained.len() < total_loaded {
+        if retained.is_empty() {
+            let _ = std::fs::remove_file(&path);
+        } else {
+            let _ = beam_core::persist::atomic_write_json(&path, &retained);
+        }
+    }
+    map
+}
+
+/// Save grant pending entries to disk with their map keys preserved.
+pub(crate) fn save_grant_pending(
+    paths: &beam_core::BeamPaths,
+    map: &std::collections::HashMap<String, GrantPendingEntry>,
+) {
+    let entries: Vec<GrantPendingPersisted> = map
+        .iter()
+        .map(|(key, entry)| GrantPendingPersisted {
+            key: key.clone(),
+            nonce: entry.nonce.clone(),
+            targets: entry.targets.clone(),
+            quota: entry.quota,
+            ts: entry.ts,
+            state: entry.state.clone(),
+        })
+        .collect();
+    let path = paths.grant_pending_json();
+    if entries.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    let _ = beam_core::persist::atomic_write_json(&path, &entries);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,5 +582,54 @@ mod tests {
         assert!(!entry.is_pending());
         assert!(entry.is_throttled(1_000 + 1));
         assert!(!entry.is_throttled(1_000 + 10 * 60 * 1000));
+    }
+
+    #[test]
+    fn grant_pending_persistence_preserves_key() {
+        let tmp = std::env::temp_dir().join(format!(
+            "beam-grant-pending-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&tmp);
+        // We need grant_pending_json to return our temp file path.
+        // Since we can't override BeamPaths easily, let's test directly.
+        let mut map = std::collections::HashMap::new();
+        let key = "app1:chat1:user1".to_string();
+        map.insert(
+            key.clone(),
+            GrantPendingEntry {
+                nonce: "n1".to_string(),
+                targets: vec!["user1".to_string()],
+                quota: Some(5),
+                ts: chrono::Utc::now().timestamp_millis() as u64,
+                state: GrantPendingState::Pending,
+            },
+        );
+        let _ = beam_core::persist::atomic_write_json(
+            &tmp,
+            &map.iter()
+                .map(|(k, v)| GrantPendingPersisted {
+                    key: k.clone(),
+                    nonce: v.nonce.clone(),
+                    targets: v.targets.clone(),
+                    quota: v.quota,
+                    ts: v.ts,
+                    state: v.state.clone(),
+                })
+                .collect::<Vec<_>>(),
+        );
+        // Load through the standard load function (simulate)
+        let loaded: Option<Vec<GrantPendingPersisted>> =
+            beam_core::persist::read_json(&tmp).unwrap();
+        assert!(loaded.is_some());
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].key, "app1:chat1:user1");
+        assert_eq!(loaded[0].nonce, "n1");
+        let _ = std::fs::remove_file(&tmp);
     }
 }

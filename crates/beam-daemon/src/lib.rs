@@ -51,10 +51,10 @@ use beam_core::{
     CliUsageLimitState, ColdWorkflowRun, Config, CreateSessionRequest, DaemonOverview,
     DaemonRuntimeState, DaemonToWorker, DisplayMode, EventDraft, EventLog, EventWindowOpts,
     FinalOutputKind, FinalOutputRequest, InitConfig, PendingResponseCardState,
-    RestartSessionRequest, ResumeSessionRequest, RunChatBinding, RunStatus, ScreenStatus, Session,
-    SessionGroup, SessionInputRequest, SessionLocateInfo, SessionScope, SessionStatus,
-    SessionSummary, TalkEvaluation, TermActionKey, TuiPromptOption, WaitResolution, WorkerToDaemon,
-    WorkflowActor, WorkflowOutputRef, can_operate, evaluate_talk, grant_restricted,
+    RestartSessionRequest, ResumeSessionRequest, RunChatBinding, RunStatus, ScheduleChatType,
+    ScreenStatus, Session, SessionGroup, SessionInputRequest, SessionLocateInfo, SessionScope,
+    SessionStatus, SessionSummary, TalkEvaluation, TermActionKey, TuiPromptOption, WaitResolution,
+    WorkerToDaemon, WorkflowActor, WorkflowOutputRef, can_operate, evaluate_talk, grant_restricted,
     parse_workflow_definition, read_event_window, read_run_events_pure, read_run_snapshot,
     scan_cold_workflow_runs,
 };
@@ -916,6 +916,161 @@ async fn load_sessions(paths: &BeamPaths) -> Result<HashMap<String, Session>> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
         Err(err) => Err(err.into()),
     }
+}
+
+/// Load persisted recent Lark events dedupe state from disk.
+/// Returns a HashMap of event_key -> Instant for deduplication.
+async fn load_recent_lark_events(paths: &BeamPaths) -> HashMap<String, std::time::Instant> {
+    let path = paths.recent_lark_events_json();
+    let entries: Vec<(String, u64)> = match beam_core::persist::read_json(&path) {
+        Ok(Some(entries)) => entries,
+        _ => return HashMap::new(),
+    };
+    let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+    let ttl_ms = 300_000u64; // 5 minutes
+    let mut map = HashMap::new();
+    for (key, ts_ms) in entries {
+        if now_ms.saturating_sub(ts_ms) < ttl_ms {
+            // Approximate Instant from epoch millis
+            let elapsed = now_ms.saturating_sub(ts_ms);
+            map.insert(
+                key,
+                std::time::Instant::now() - std::time::Duration::from_millis(elapsed),
+            );
+        }
+    }
+    map
+}
+
+/// Save recent Lark events dedupe state to disk.
+async fn save_recent_lark_events(paths: &BeamPaths, events: &HashMap<String, std::time::Instant>) {
+    let now = std::time::Instant::now();
+    let now_epoch_ms = chrono::Utc::now().timestamp_millis() as u64;
+    let ttl_ms = 300_000u64; // 5 minutes
+    let entries: Vec<(String, u64)> = events
+        .iter()
+        .filter_map(|(key, instant)| {
+            let elapsed = now.duration_since(*instant);
+            if elapsed.as_millis() as u64 > ttl_ms {
+                return None;
+            }
+            // Persist "seen_at" epoch ms = current epoch ms minus elapsed since seen.
+            let seen_at_ms = now_epoch_ms.saturating_sub(elapsed.as_millis() as u64);
+            Some((key.clone(), seen_at_ms))
+        })
+        .collect();
+    let path = paths.recent_lark_events_json();
+    if entries.is_empty() {
+        let _ = tokio::fs::remove_file(&path).await;
+        return;
+    }
+    let _ =
+        tokio::task::spawn_blocking(move || beam_core::persist::atomic_write_json(&path, &entries))
+            .await;
+}
+
+/// Execute a schedule task: create a session and send the prompt as a message.
+async fn execute_schedule_task(
+    state: &AppState,
+    task_id: &str,
+    prompt: &str,
+    working_dir: &str,
+    chat_id: &str,
+    lark_app_id: Option<&str>,
+    root_message_id: Option<&str>,
+    scope: Option<&str>,
+    chat_type: Option<&ScheduleChatType>,
+    _task_name: &str,
+) -> Result<()> {
+    use beam_core::{ScheduleChatType, SessionScope};
+    let lark_app_id = lark_app_id.unwrap_or("local");
+    let bot = state
+        .bots
+        .get(lark_app_id)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("bot not found for schedule task {}", task_id))?;
+
+    // Create session for this schedule execution
+    let session_id = Uuid::new_v4().to_string();
+    let scope = match scope.unwrap_or("chat") {
+        "thread" => SessionScope::Thread,
+        _ => SessionScope::Chat,
+    };
+    let chat_type_str = match chat_type {
+        Some(ScheduleChatType::Group) => Some("group"),
+        Some(ScheduleChatType::P2p) => Some("p2p"),
+        Some(ScheduleChatType::TopicGroup) => Some("topicGroup"),
+        None => None,
+    };
+    let session = Session {
+        session_id: session_id.clone(),
+        title: format!("schedule:{}", task_id),
+        chat_id: chat_id.to_string(),
+        root_message_id: root_message_id.unwrap_or(chat_id).to_string(),
+        chat_type: chat_type_str.map(|s| s.to_string()),
+        scope,
+        status: SessionStatus::Active,
+        created_at: Utc::now(),
+        working_dir: Some(working_dir.to_string()),
+        lark_app_id: lark_app_id.to_string(),
+        cli_id: Some(bot.cli_id.clone()),
+        cli_bin: bot.cli_bin.clone(),
+        owner_open_id: Some(String::new()),
+        bot_name: None,
+        bot_open_id: None,
+        cli_session_id: None,
+        last_cli_input: None,
+        stream_card_id: None,
+        stream_card_nonce: None,
+        display_mode: None,
+        current_screen: None,
+        current_image_key: None,
+        tui_prompt_card_id: None,
+        tui_prompt_options: Vec::new(),
+        tui_prompt_multi_select: None,
+        tui_toggled_indices: Vec::new(),
+        pending_response_card_id: None,
+        pending_response_card_state: None,
+        last_patched_response_card_id: None,
+        terminal_url: None,
+        last_final_output_turn_id: None,
+        last_final_output: None,
+        adopted_from: None,
+        model: None,
+        locale: None,
+        resume_session_id: None,
+        disable_cli_bypass: false,
+        initial_prompt: None,
+        thread_id: None,
+        usage_limit: None,
+        cli_args: Vec::new(),
+        quote_target_id: None,
+        worker_pid: None,
+        last_screen_status: None,
+        closed_at: None,
+    };
+
+    // Persist session
+    {
+        let mut sessions = state.sessions.lock().await;
+        sessions.insert(session_id.clone(), session.clone());
+        let snapshot = sessions.clone();
+        drop(sessions);
+        persist_sessions(&state.paths, &snapshot).await?;
+    }
+
+    // Build init config and spawn worker
+    let init = build_init_from_session(&session, &state.config, &state.bots)?;
+    spawn_worker(state.clone(), session.clone(), init).await?;
+
+    // Send the schedule prompt as input
+    let msg = DaemonToWorker::Message {
+        content: prompt.to_string(),
+        turn_id: Uuid::new_v4().to_string(),
+    };
+    send_worker_message(&state.workers, &session_id, &msg).await?;
+
+    Ok(())
 }
 
 async fn load_frozen_cards(
@@ -3353,6 +3508,81 @@ fn next_final_output_retry_delay_ms(attempt: usize) -> Option<u64> {
     FINAL_OUTPUT_RETRY_BACKOFF_MS.get(attempt).copied()
 }
 
+/// Serializable marker for a pending final output delivery retry.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct FinalOutputRetryMarker {
+    session_id: String,
+    content: String,
+    turn_id: Option<String>,
+    kind: Option<FinalOutputKind>,
+    user_text: Option<String>,
+    attempt: usize,
+    created_at: String,
+}
+
+/// Load all pending final output retry markers from disk.
+fn load_final_output_retry_markers(paths: &BeamPaths) -> Vec<FinalOutputRetryMarker> {
+    match beam_core::persist::read_json::<Vec<FinalOutputRetryMarker>>(
+        &paths.final_output_retries_json(),
+    ) {
+        Ok(Some(markers)) => markers,
+        _ => Vec::new(),
+    }
+}
+
+/// Save final output retry markers to disk.
+fn save_final_output_retry_markers(paths: &BeamPaths, markers: &[FinalOutputRetryMarker]) {
+    let path = paths.final_output_retries_json();
+    if markers.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    let _ = beam_core::persist::atomic_write_json(&path, &markers.to_vec());
+}
+
+/// Persist a retry marker for the current delivery attempt.
+/// Each marker is keyed by (session_id, turn_id) to allow multiple
+/// concurrent turns per session.
+fn persist_final_output_retry_marker(
+    state: &AppState,
+    session_id: &str,
+    content: &str,
+    turn_id: Option<&str>,
+    kind: Option<FinalOutputKind>,
+    user_text: Option<&str>,
+    attempt: usize,
+) {
+    let mut markers = load_final_output_retry_markers(&state.paths);
+    // Replace existing marker for this (session_id, turn_id) pair
+    let turn_id_str = turn_id.unwrap_or("");
+    markers.retain(|m| {
+        !(m.session_id == session_id && m.turn_id.as_deref().unwrap_or("") == turn_id_str)
+    });
+    markers.push(FinalOutputRetryMarker {
+        session_id: session_id.to_string(),
+        content: content.to_string(),
+        turn_id: turn_id.map(|s| s.to_string()),
+        kind,
+        user_text: user_text.map(|s| s.to_string()),
+        attempt,
+        created_at: Utc::now().to_rfc3339(),
+    });
+    save_final_output_retry_markers(&state.paths, &markers);
+}
+
+/// Clear retry markers for a specific (session_id, turn_id) pair.
+fn clear_final_output_retry(state: &AppState, session_id: &str, turn_id: Option<&str>) {
+    let mut markers = load_final_output_retry_markers(&state.paths);
+    let before = markers.len();
+    let turn_id_str = turn_id.unwrap_or("");
+    markers.retain(|m| {
+        !(m.session_id == session_id && m.turn_id.as_deref().unwrap_or("") == turn_id_str)
+    });
+    if markers.len() != before {
+        save_final_output_retry_markers(&state.paths, &markers);
+    }
+}
+
 fn next_session_turn_id() -> String {
     Uuid::new_v4().to_string()
 }
@@ -3548,6 +3778,16 @@ fn schedule_final_output_delivery(
     let Some(delay_ms) = next_final_output_retry_delay_ms(attempt) else {
         return;
     };
+    // Persist retry marker so daemon restart can resume delivery
+    persist_final_output_retry_marker(
+        &state,
+        &session_id,
+        &content,
+        turn_id.as_deref(),
+        kind,
+        user_text.as_deref(),
+        attempt,
+    );
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         let turn_key = turn_id
@@ -3580,6 +3820,7 @@ fn schedule_final_output_delivery(
         .await
         {
             Ok(()) => {
+                clear_final_output_retry(&state, &session_id, turn_id.as_deref());
                 if let Some(turn_key) = turn_key.as_deref() {
                     state
                         .inflight_final_output_turns
@@ -3606,6 +3847,7 @@ fn schedule_final_output_delivery(
                 }
                 let next = attempt + 1;
                 let Some(next_delay_ms) = next_final_output_retry_delay_ms(next) else {
+                    clear_final_output_retry(&state, &session_id, turn_id.as_deref());
                     if let Some(turn_key) = turn_key.as_deref() {
                         state
                             .inflight_final_output_turns
@@ -6076,7 +6318,14 @@ async fn handle_lark_event_payload(
                         },
                     );
                 }
-                drop(pending);
+                {
+                    let snapshot: HashMap<String, grant::GrantPendingEntry> = pending
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    drop(pending);
+                    grant::save_grant_pending(&state.paths, &snapshot);
+                }
                 let card_str = card.to_string();
                 if let Err(e) = lark_reply_card(state, bot, message_id, &card_str).await {
                     warn!("failed to send grant card: {}", e);
@@ -6650,6 +6899,17 @@ async fn handle_lark_event_payload(
                 let mut entry = pending;
                 entry.card_message_id = Some(card_message_id);
                 pending_map.insert(pending_id, entry);
+                let snapshot: Vec<_> = pending_map.values().cloned().collect();
+                drop(pending_map);
+                let paths = state.paths.clone();
+                tokio::task::spawn_blocking(move || {
+                    let _ = beam_core::persist::atomic_write_json(
+                        &paths.pending_creates_json(),
+                        &snapshot,
+                    );
+                })
+                .await
+                .ok();
             }
 
             return Ok(Json(serde_json::json!({ "ok": true, "dir_select": true })));
@@ -6945,10 +7205,22 @@ async fn handle_lark_card_action_payload(
                     )));
                 }
 
-                // Atomically remove pending to prevent double-create
+                // Atomically remove pending to prevent double-create (dir_select_pick)
                 let pending = {
                     let mut pending_map = state.pending_creates.lock().await;
-                    pending_map.remove(pending_id)
+                    let removed = pending_map.remove(pending_id);
+                    let snapshot: Vec<_> = pending_map.values().cloned().collect();
+                    drop(pending_map);
+                    let paths = state.paths.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let _ = beam_core::persist::atomic_write_json(
+                            &paths.pending_creates_json(),
+                            &snapshot,
+                        );
+                    })
+                    .await
+                    .ok();
+                    removed
                 };
                 let Some(pending) = pending else {
                     return Ok(Json(build_lark_card_action_toast(
@@ -7100,10 +7372,22 @@ async fn handle_lark_card_action_payload(
                             )));
                         }
 
-                        // Atomically remove pending to prevent double-create
+                        // Atomically remove pending to prevent double-create (dir_select_best)
                         let pending = {
                             let mut pending_map = state.pending_creates.lock().await;
-                            pending_map.remove(pending_id)
+                            let removed = pending_map.remove(pending_id);
+                            let snapshot: Vec<_> = pending_map.values().cloned().collect();
+                            drop(pending_map);
+                            let paths = state.paths.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let _ = beam_core::persist::atomic_write_json(
+                                    &paths.pending_creates_json(),
+                                    &snapshot,
+                                );
+                            })
+                            .await
+                            .ok();
+                            removed
                         };
                         let Some(pending) = pending else {
                             return Ok(Json(build_lark_card_action_toast(
@@ -7346,6 +7630,12 @@ async fn handle_lark_card_action_payload(
                     entry.mark_denied(now_ms);
                 }
             }
+            let snapshot: HashMap<String, grant::GrantPendingEntry> = pending
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            drop(pending);
+            grant::save_grant_pending(&state.paths, &snapshot);
             return Ok(Json(build_lark_card_action_toast(
                 "success",
                 &format!("grant denied for {} target(s)", targets.len()),
@@ -7417,7 +7707,12 @@ async fn handle_lark_card_action_payload(
         for target in &failed {
             pending.remove(&format!("{}:{}:{}", app_id, chat_id, target.0));
         }
+        let snapshot: HashMap<String, grant::GrantPendingEntry> = pending
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         drop(pending);
+        grant::save_grant_pending(&state.paths, &snapshot);
 
         if let Err(err) = record_observed_bots(&state.paths, app_id, chat_id, &observed, "grant") {
             warn!(
@@ -9949,6 +10244,39 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
     };
     persist_runtime_state(&paths, &runtime).await?;
 
+    // Load persisted in-memory state that should survive restarts.
+    let workflow_progress_cards =
+        workflow_runtime_driver::load_workflow_progress_cards(&paths).await;
+    info!(
+        "loaded {} persisted workflow progress cards",
+        workflow_progress_cards.len()
+    );
+
+    let ask_pending_map = ask::load_ask_pending(&paths).await;
+    info!(
+        "loaded {} persisted ask pending entries",
+        ask_pending_map.len()
+    );
+
+    let grant_pending_map = grant::load_grant_pending(&paths);
+    info!(
+        "loaded {} persisted grant pending entries",
+        grant_pending_map.len()
+    );
+
+    let pending_creates_map = dir_select::load_pending_creates(&paths).await;
+    info!(
+        "loaded {} persisted pending creates",
+        pending_creates_map.len()
+    );
+
+    // Load persisted recent Lark events (dedupe state).
+    let recent_lark_events = load_recent_lark_events(&paths).await;
+    info!(
+        "loaded {} persisted recent lark events",
+        recent_lark_events.len()
+    );
+
     let state = AppState {
         paths: paths.clone(),
         started_at,
@@ -9962,12 +10290,12 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         bots: Arc::new(bots),
         lark_tokens: Arc::new(Mutex::new(HashMap::new())),
         chat_mode_cache: Arc::new(Mutex::new(HashMap::new())),
-        recent_lark_events: Arc::new(Mutex::new(HashMap::new())),
+        recent_lark_events: Arc::new(Mutex::new(recent_lark_events)),
         inflight_final_output_turns: Arc::new(Mutex::new(HashSet::new())),
-        workflow_progress_cards: Arc::new(Mutex::new(HashMap::new())),
-        ask_pending: Arc::new(Mutex::new(HashMap::new())),
-        grant_pending: Arc::new(Mutex::new(HashMap::new())),
-        pending_creates: Arc::new(Mutex::new(HashMap::new())),
+        workflow_progress_cards: Arc::new(Mutex::new(workflow_progress_cards)),
+        ask_pending: Arc::new(Mutex::new(ask_pending_map)),
+        grant_pending: Arc::new(Mutex::new(grant_pending_map)),
+        pending_creates: Arc::new(Mutex::new(pending_creates_map)),
         dashboard_token: Arc::new(Mutex::new(None)),
         external_host,
     };
@@ -9977,6 +10305,33 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         "ws" | "websocket" | "stream"
     ) {
         spawn_lark_ws_clients(&state);
+    }
+
+    // Load replay nonces and rate buckets from disk into static stores.
+    {
+        let path = paths.replay_nonces_json();
+        if let Ok(Some(map)) = beam_core::persist::read_json::<HashMap<String, u64>>(&path) {
+            let now = now_ms();
+            let mut guard = replay_nonce_store()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            for (key, expiry) in map {
+                if expiry > now {
+                    guard.insert(key, expiry);
+                }
+            }
+            info!("loaded {} persisted replay nonces", guard.len());
+        }
+        let path = paths.rate_buckets_json();
+        if let Ok(Some(map)) = beam_core::persist::read_json::<HashMap<String, (u64, u64)>>(&path) {
+            let mut guard = rate_bucket_store()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            for (key, val) in map {
+                guard.insert(key, val);
+            }
+            info!("loaded {} persisted rate buckets", guard.len());
+        }
     }
 
     // Probe bot open_id / app_name from Lark API and persist to bots-info.json.
@@ -10020,6 +10375,63 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
             if let Some(usage_limit) = session.usage_limit.clone() {
                 arm_usage_limit_retry_timer(state.clone(), session.session_id.clone(), usage_limit);
             }
+        }
+    }
+    // Recover pending final output retries from before restart.
+    {
+        let markers = load_final_output_retry_markers(&state.paths);
+        if !markers.is_empty() {
+            let active_sessions: HashSet<String> = {
+                let sessions = state.sessions.lock().await;
+                sessions
+                    .values()
+                    .filter(|s| s.status == SessionStatus::Active)
+                    .map(|s| s.session_id.clone())
+                    .collect()
+            };
+            let mut recovered = 0usize;
+            let mut skipped = 0usize;
+            for marker in &markers {
+                if !active_sessions.contains(&marker.session_id) {
+                    skipped += 1;
+                    continue; // Session was closed during restart
+                }
+                // Check idempotency: resume only if this turn has NOT yet been delivered
+                let should_resume = {
+                    let sessions = state.sessions.lock().await;
+                    sessions
+                        .get(&marker.session_id)
+                        .map(|s| {
+                            marker.turn_id.as_deref().map_or(true, |tid| {
+                                // Resume if last_final_output_turn_id doesn't match this turn
+                                s.last_final_output_turn_id.as_deref() != Some(tid)
+                            })
+                        })
+                        .unwrap_or(false) // session not found → skip
+                };
+                if should_resume {
+                    info!(
+                        "final output retry: resuming delivery for session {} turn {:?} attempt {}",
+                        marker.session_id, marker.turn_id, marker.attempt
+                    );
+                    schedule_final_output_delivery(
+                        state.clone(),
+                        marker.session_id.clone(),
+                        marker.content.clone(),
+                        marker.turn_id.clone(),
+                        marker.kind,
+                        marker.user_text.clone(),
+                        marker.attempt,
+                    );
+                    recovered += 1;
+                } else {
+                    skipped += 1;
+                }
+            }
+            info!(
+                "final output retry: {} markers recovered, {} skipped (closed/duplicate)",
+                recovered, skipped
+            );
         }
     }
 
@@ -11927,16 +12339,134 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
     let proxy_port = state.config.web.proxy_base_port;
     let proxy_sessions = state.sessions.clone();
     let auth_state = terminal_auth::TerminalAuthState::new();
+    // Load persisted used tickets for terminal auth anti-replay.
+    auth_state
+        .load_used_tickets(&paths.used_tickets_json())
+        .await;
     terminal_proxy::start_proxy(
         &proxy_host,
         proxy_port,
         zellij_web_port,
         proxy_sessions,
         zellij_tokens,
-        auth_state,
+        auth_state.clone(),
     )
     .await
     .with_context(|| format!("failed to start terminal proxy on {proxy_host}:{proxy_port}"))?;
+
+    // Periodic state persistence for stores that are updated frequently.
+    let periodic_paths = paths.clone();
+    let periodic_auth = auth_state.clone();
+    let periodic_recent_events = state.recent_lark_events.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            // Save replay nonces
+            let replay_map: HashMap<String, u64> = {
+                let guard = replay_nonce_store()
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                guard.clone()
+            };
+            if !replay_map.is_empty() {
+                let path = periodic_paths.replay_nonces_json();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _ = beam_core::persist::atomic_write_json(&path, &replay_map);
+                })
+                .await;
+            } else {
+                let _ = tokio::fs::remove_file(periodic_paths.replay_nonces_json()).await;
+            }
+            // Save rate buckets
+            let rate_map: HashMap<String, (u64, u64)> = {
+                let guard = rate_bucket_store()
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                guard.clone()
+            };
+            if !rate_map.is_empty() {
+                let path = periodic_paths.rate_buckets_json();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _ = beam_core::persist::atomic_write_json(&path, &rate_map);
+                })
+                .await;
+            } else {
+                let _ = tokio::fs::remove_file(periodic_paths.rate_buckets_json()).await;
+            }
+            // Save used tickets
+            periodic_auth
+                .save_used_tickets(&periodic_paths.used_tickets_json())
+                .await;
+            // Save recent Lark events dedupe state
+            {
+                let events = periodic_recent_events.lock().await;
+                save_recent_lark_events(&periodic_paths, &events).await;
+            }
+        }
+    });
+
+    // Schedule loop: periodically check schedules and trigger due tasks.
+    let schedule_paths = paths.clone();
+    let schedule_state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let tasks = match beam_core::list_tasks(&schedule_paths) {
+                Ok(tasks) => tasks,
+                Err(_) => continue,
+            };
+            let now = chrono::Utc::now();
+            for task in &tasks {
+                if !task.enabled {
+                    continue;
+                }
+                let Some(next_run_at_str) = task.next_run_at.as_deref() else {
+                    continue;
+                };
+                let Ok(next_run_at) = chrono::DateTime::parse_from_rfc3339(next_run_at_str) else {
+                    continue;
+                };
+                let next_run_at = next_run_at.with_timezone(&chrono::Utc);
+                if next_run_at > now {
+                    continue;
+                }
+                // Task is due: execute it.
+                info!("schedule: triggering task {} ({})", task.id, task.name);
+                let state = schedule_state.clone();
+                let task_id = task.id.clone();
+                let task_prompt = task.prompt.clone();
+                let task_working_dir = task.working_dir.clone();
+                let task_chat_id = task.chat_id.clone();
+                let task_lark_app_id = task.lark_app_id.clone();
+                let task_root_message_id = task.root_message_id.clone();
+                let task_scope = task.scope.clone();
+                let task_chat_type = task.chat_type.clone();
+                let task_name = task.name.clone();
+                let paths = schedule_paths.clone();
+                tokio::spawn(async move {
+                    let result = execute_schedule_task(
+                        &state,
+                        &task_id,
+                        &task_prompt,
+                        &task_working_dir,
+                        &task_chat_id,
+                        task_lark_app_id.as_deref(),
+                        task_root_message_id.as_deref(),
+                        task_scope.as_deref(),
+                        task_chat_type.as_ref(),
+                        &task_name,
+                    )
+                    .await;
+                    let success = result.is_ok();
+                    let error = result.as_ref().err().map(|e| e.to_string());
+                    let _ = beam_core::mark_run(&paths, &task_id, success, error.as_deref(), None);
+                    if let Err(err) = result {
+                        warn!("schedule task {} failed: {}", task_id, err);
+                    }
+                });
+            }
+        }
+    });
 
     let app = Router::new()
         .merge(open_routes)
@@ -18946,6 +19476,47 @@ mod tests {
             sn_post.run.status
         );
 
+        maybe_remove_dir(&paths.root().to_path_buf());
+    }
+
+    #[tokio::test]
+    async fn recent_lark_events_save_load_roundtrip() {
+        let paths = temp_paths("recent-lark-events-roundtrip");
+        maybe_remove_dir(&paths.root().to_path_buf());
+
+        // Simulate a fresh event (just inserted)
+        let mut events = HashMap::new();
+        events.insert("evt-fresh".to_string(), std::time::Instant::now());
+        // Simulate an event that's 4 minutes old (still within 5 min TTL)
+        events.insert(
+            "evt-old".to_string(),
+            std::time::Instant::now() - std::time::Duration::from_secs(240),
+        );
+
+        save_recent_lark_events(&paths, &events).await;
+        let loaded = load_recent_lark_events(&paths).await;
+
+        // Both events should survive roundtrip (they're within the 5-min TTL)
+        assert!(
+            loaded.contains_key("evt-fresh"),
+            "fresh event should survive roundtrip"
+        );
+        assert!(
+            loaded.contains_key("evt-old"),
+            "4-min-old event should survive roundtrip"
+        );
+
+        // The "old" event's Instant should approximate the original (within a few seconds)
+        let loaded_instant = loaded.get("evt-old").unwrap();
+        let elapsed = loaded_instant.elapsed();
+        assert!(
+            elapsed >= std::time::Duration::from_secs(239)
+                && elapsed <= std::time::Duration::from_secs(242),
+            "old event elapsed should be ~240s, got {:?}",
+            elapsed
+        );
+
+        let _ = std::fs::remove_file(paths.recent_lark_events_json());
         maybe_remove_dir(&paths.root().to_path_buf());
     }
 }

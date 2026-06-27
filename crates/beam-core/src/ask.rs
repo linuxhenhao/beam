@@ -63,7 +63,7 @@ pub fn legacy_selected(result: &AskResult) -> Option<String> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AskRequest {
     pub session_id: String,
     pub chat_id: String,

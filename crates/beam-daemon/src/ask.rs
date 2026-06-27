@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use axum::{Json, extract::State, http::StatusCode};
 use beam_core::{AskQuestion, AskRequest, AskResult};
+use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -18,6 +19,93 @@ pub(crate) struct AskPendingEntry {
     selections: Vec<HashSet<String>>,
     card_message_id: Option<String>,
     tx: Option<oneshot::Sender<AskResult>>,
+    pub created_at_ms: i64,
+}
+
+/// Serializable snapshot of an ask pending entry (without the oneshot channel).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AskPendingSnapshot {
+    pub ask_id: String,
+    pub request: AskRequest,
+    pub nonce: String,
+    pub selections: Vec<HashSet<String>>,
+    pub card_message_id: Option<String>,
+    pub created_at_ms: i64,
+}
+
+/// TTL for ask pending entries (30 minutes in milliseconds).
+pub const ASK_PENDING_TTL_MS: i64 = 30 * 60 * 1000;
+
+/// Load ask pending entries from disk, pruning expired ones.
+pub(crate) async fn load_ask_pending(
+    paths: &beam_core::BeamPaths,
+) -> std::collections::HashMap<String, AskPendingEntry> {
+    let path = paths.ask_pending_json();
+    let snapshots: Vec<AskPendingSnapshot> = match beam_core::persist::read_json(&path) {
+        Ok(Some(snaps)) => snaps,
+        _ => return Default::default(),
+    };
+    let total_loaded = snapshots.len();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut map = std::collections::HashMap::new();
+    let mut retained = Vec::new();
+    for snap in &snapshots {
+        if now_ms - snap.created_at_ms > ASK_PENDING_TTL_MS {
+            continue;
+        }
+        retained.push(snap.clone());
+        map.insert(
+            snap.ask_id.clone(),
+            AskPendingEntry {
+                request: snap.request.clone(),
+                nonce: snap.nonce.clone(),
+                selections: snap.selections.clone(),
+                card_message_id: snap.card_message_id.clone(),
+                tx: None, // oneshot channels can't survive restarts
+                created_at_ms: snap.created_at_ms,
+            },
+        );
+    }
+    // Prune expired entries by rewriting the file
+    if retained.len() < total_loaded {
+        if retained.is_empty() {
+            let _ = tokio::fs::remove_file(&path).await;
+        } else {
+            let path_clone = path.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                beam_core::persist::atomic_write_json(&path_clone, &retained)
+            })
+            .await;
+        }
+    }
+    map
+}
+
+/// Save ask pending entries to disk (from a reference, without cloning).
+async fn persist_ask_pending_now(
+    paths: &beam_core::BeamPaths,
+    map: &std::collections::HashMap<String, AskPendingEntry>,
+) {
+    let snapshots: Vec<AskPendingSnapshot> = map
+        .iter()
+        .map(|(ask_id, entry)| AskPendingSnapshot {
+            ask_id: ask_id.clone(),
+            request: entry.request.clone(),
+            nonce: entry.nonce.clone(),
+            selections: entry.selections.clone(),
+            card_message_id: entry.card_message_id.clone(),
+            created_at_ms: entry.created_at_ms,
+        })
+        .collect();
+    let path = paths.ask_pending_json();
+    if snapshots.is_empty() {
+        let _ = tokio::fs::remove_file(&path).await;
+        return;
+    }
+    let _ = tokio::task::spawn_blocking(move || {
+        beam_core::persist::atomic_write_json(&path, &snapshots)
+    })
+    .await;
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -74,10 +162,14 @@ pub async fn create_ask(
         selections,
         card_message_id: None,
         tx: Some(tx),
+        created_at_ms: chrono::Utc::now().timestamp_millis(),
     };
     {
         let mut pending = state.ask_pending.lock().await;
         pending.insert(ask_id.clone(), entry);
+        drop(pending);
+        let pending = state.ask_pending.lock().await;
+        persist_ask_pending_now(&state.paths, &pending).await;
     }
 
     let card = build_ask_card(&ask_id, &nonce, &request.questions, &[], false, None);
@@ -116,6 +208,9 @@ pub async fn create_ask(
         _ => {
             let mut pending = state.ask_pending.lock().await;
             pending.remove(&ask_id);
+            drop(pending);
+            let pending = state.ask_pending.lock().await;
+            persist_ask_pending_now(&state.paths, &pending).await;
             AskResult::TimedOut {
                 selected: None,
                 by: None,
@@ -276,6 +371,17 @@ pub async fn handle_ask_card_action(
     let Some(entry) = pending.get_mut(&ask_id) else {
         return Ok(Json(build_lark_card_action_toast("info", "ask expired")));
     };
+    // If entry was restored from disk, the oneshot channel is gone.
+    if entry.tx.is_none() {
+        pending.remove(&ask_id);
+        drop(pending);
+        let pending = state.ask_pending.lock().await;
+        persist_ask_pending_now(&state.paths, &pending).await;
+        return Ok(Json(build_lark_card_action_toast(
+            "info",
+            "ask expired (daemon restarted)",
+        )));
+    }
     if entry.nonce != nonce {
         return Ok(Json(build_lark_card_action_toast("info", "ask expired")));
     }
@@ -322,6 +428,9 @@ pub async fn handle_ask_card_action(
             Some("Answer submitted"),
         );
         pending.remove(&ask_id);
+        drop(pending);
+        let pending = state.ask_pending.lock().await;
+        persist_ask_pending_now(&state.paths, &pending).await;
         return Ok(Json(serde_json::json!({
             "toast": { "type": "success", "content": "ask submitted" },
             "card": { "type": "raw", "data": serde_json::from_str::<serde_json::Value>(&card).unwrap_or_else(|_| serde_json::json!({})) }
@@ -375,6 +484,12 @@ pub async fn handle_ask_card_action(
     );
     let card_json =
         serde_json::from_str::<serde_json::Value>(&card).unwrap_or_else(|_| serde_json::json!({}));
+    // Persist updated selections after toggle: drop lock, then re-acquire read-only to save
+    drop(pending);
+    {
+        let pending = state.ask_pending.lock().await;
+        persist_ask_pending_now(&state.paths, &pending).await;
+    }
     Ok(Json(serde_json::json!({
         "toast": { "type": "success", "content": "selection updated" },
         "card": { "type": "raw", "data": card_json }

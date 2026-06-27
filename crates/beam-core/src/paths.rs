@@ -173,4 +173,44 @@ impl BeamPaths {
     pub fn zellij_web_tokens_json(&self) -> PathBuf {
         self.state_dir().join("zellij-web-tokens.json")
     }
+
+    pub fn workflow_progress_cards_json(&self) -> PathBuf {
+        self.state_dir().join("workflow-progress-cards.json")
+    }
+
+    pub fn used_tickets_json(&self) -> PathBuf {
+        self.state_dir().join("used-tickets.json")
+    }
+
+    pub fn ask_pending_json(&self) -> PathBuf {
+        self.state_dir().join("ask-pending.json")
+    }
+
+    pub fn grant_pending_json(&self) -> PathBuf {
+        self.state_dir().join("grant-pending.json")
+    }
+
+    pub fn pending_creates_json(&self) -> PathBuf {
+        self.state_dir().join("pending-creates.json")
+    }
+
+    pub fn replay_nonces_json(&self) -> PathBuf {
+        self.state_dir().join("replay-nonces.json")
+    }
+
+    pub fn rate_buckets_json(&self) -> PathBuf {
+        self.state_dir().join("rate-buckets.json")
+    }
+
+    pub fn recent_lark_events_json(&self) -> PathBuf {
+        self.state_dir().join("recent-lark-events.json")
+    }
+
+    pub fn final_output_retries_json(&self) -> PathBuf {
+        self.state_dir().join("final-output-retries.json")
+    }
+
+    pub fn recent_dirs_json(&self) -> PathBuf {
+        self.state_dir().join("recent-dirs.json")
+    }
 }
