@@ -83,13 +83,10 @@ This anchor only gives the zellij read-only watcher a regular client to follow. 
 
 ### Viewport Model
 
-Beam treats terminal viewport, card viewport, and fallback viewport separately:
+Beam treats terminal viewport and card viewport separately:
 
-- The terminal viewport is the interaction size of the real web viewer. After zellij web receives browser control WS resize events, it drives the pane size; the Beam proxy only relays that path.
-- The card viewport is the Feishu card screenshot display size. The worker crops screenshots to `120x36` before upload, keeping screenshot scale aligned with card text truncation.
-- The fallback viewport is the temporary size used when no real viewer is available. Worker-managed sessions default to `120x36`. The read-only anchor does not set a fallback viewport, avoiding pane-size changes that would pollute `dump-screen` screenshots for the same zellij pane.
-
-If there is only a read-only viewer, zellij web should use that viewer's reported real size; the anchor must not send size events on behalf of the real viewer. If future Feishu card templates support larger images, adjust only the card viewport; do not let that change flow backward into the real terminal viewport.
+- The terminal viewport is the interaction size of the real web viewer. After zellij web receives browser control WS resize events, it drives the pane size; the Beam proxy only relays that path, without intercepting or filtering. Resize/metrics from both read-only and write viewers are handled normally by zellij/web; Beam does not intervene.
+- Card text and screenshot sampling is done by the worker using `dump-screen` (without `--full`) to capture the current visible viewport. Beam does not apply additional cropping or truncation. If the Feishu platform itself has display limits, those are platform limits; Beam does not silently crop.
 
 ## Ticket Lifecycle
 
@@ -150,7 +147,7 @@ WS forwarding:
 
 - Use `ClientRequestBuilder` to build the upstream WS handshake.
 - If authenticated, inject the zellij cookie into the upstream WS handshake.
-- Relay messages between the client and zellij web.
+- Pure message relay between the client and zellij web — no message filtering.
 - Read-only login additionally ensures that the daemon-internal anchor client is online. The anchor WS does not receive browser input and only discards zellij frames.
 
 ## Unsupported Entrypoints

@@ -32,7 +32,9 @@ pub trait SessionBackend: Send + Sync {
     async fn paste_text(&self, text: &str) -> Result<()>;
     async fn write_raw(&self, text: &str) -> Result<()>;
     async fn raw_input(&self, text: &str) -> Result<()>;
+    /// Capture the visible viewport only (current pane dimensions).
     async fn capture_viewport(&self) -> Result<String>;
+    /// Capture the last visible screen (alias for capture_viewport by default).
     async fn capture_current_screen(&self) -> Result<String>;
     async fn is_alive(&self) -> Result<bool>;
     async fn child_pid(&self) -> Result<Option<u32>>;
@@ -125,6 +127,15 @@ impl ZellijBackend {
 
     pub fn send_zellij_action(session: &str, args: &[&str]) -> Result<()> {
         Self::run_zellij_action(session, args).map(|_| ())
+    }
+
+    /// Build `dump-screen` args for visible viewport only (no `--full`).
+    pub(crate) fn dump_screen_viewport_args(pane_id: &str) -> Vec<String> {
+        vec![
+            "dump-screen".to_string(),
+            "--pane-id".to_string(),
+            pane_id.to_string(),
+        ]
     }
 
     fn kdl_string(value: &str) -> String {
@@ -333,10 +344,9 @@ impl SessionBackend for ZellijBackend {
     }
 
     async fn capture_viewport(&self) -> Result<String> {
-        let out = Self::run_zellij_action(
-            &self.session_name,
-            &["dump-screen", "--pane-id", self.pane_id_str()],
-        )?;
+        let args = Self::dump_screen_viewport_args(&self.pane_id_str());
+        let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let out = Self::run_zellij_action(&self.session_name, &args_refs)?;
         Ok(out.replace('\n', "\r\n"))
     }
 
@@ -442,11 +452,11 @@ impl ZellijObserveBackend {
     }
 
     fn dump_screen(&self) -> Result<String> {
-        ZellijBackend::run_zellij_action(
-            &self.session_name,
-            &["dump-screen", "--pane-id", self.pane_id.as_str()],
-        )
+        let args = ZellijBackend::dump_screen_viewport_args(&self.pane_id);
+        let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        ZellijBackend::run_zellij_action(&self.session_name, &args_refs)
     }
+
 }
 
 #[async_trait]
@@ -957,4 +967,41 @@ mod tests {
         ]"#;
         assert_eq!(parse_zellij_cursor_from_list_panes(json, 42), Some((5, 3)));
     }
+
+    // ---- dump_screen_viewport_args tests ----
+
+    /// ZellijBackend viewport dump args contain exactly `dump-screen --pane-id <id>`,
+    /// and MUST NOT include `--full`.
+    #[test]
+    fn dump_screen_viewport_args_no_full_flag() {
+        let args = ZellijBackend::dump_screen_viewport_args("pane_1");
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[0], "dump-screen");
+        assert_eq!(args[1], "--pane-id");
+        assert_eq!(args[2], "pane_1");
+        assert!(!args.contains(&"--full".to_string()));
+    }
+
+    /// The helper preserves the caller-provided pane id as-is.
+    #[test]
+    fn dump_screen_viewport_args_different_pane_ids() {
+        let args = ZellijBackend::dump_screen_viewport_args("terminal_99");
+        assert_eq!(args[2], "terminal_99");
+        assert!(!args.contains(&"--full".to_string()));
+    }
+
+    /// Observing backend's `dump_screen` reuses the same viewport args helper
+    /// and therefore also never passes `--full`.
+    #[test]
+    fn dump_screen_viewport_args_no_full_through_observe_path() {
+        // The observe backend calls ZellijBackend::dump_screen_viewport_args internally.
+        // Verify the helper it reuses produces the correct viewport-only args.
+        let args = ZellijBackend::dump_screen_viewport_args("observe_pane");
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[0], "dump-screen");
+        assert_eq!(args[1], "--pane-id");
+        assert_eq!(args[2], "observe_pane");
+        assert!(!args.contains(&"--full".to_string()));
+    }
+
 }

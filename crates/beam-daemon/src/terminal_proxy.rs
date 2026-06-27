@@ -750,7 +750,7 @@ async fn handle_session_ws(
             query.as_deref(),
         );
 
-        // Connect to zellij WS with optional cookie
+        // Connect to zellij WS with optional cookie.
         match connect_ws_with_cookie(&ws_url, Some(&auth.zellij_cookie)).await {
             Ok(zellij_ws) => {
                 relay_ws(client_socket, zellij_ws).await;
@@ -1090,6 +1090,11 @@ async fn proxy_request_raw(
 }
 
 /// Relay WebSocket messages between client and zellij web.
+///
+/// Pure relay — no message filtering.  All client messages (including
+/// `TerminalResize` / `TerminalMetrics`) are forwarded to zellij web as-is.
+/// The real terminal viewport is driven by the browser that owns the
+/// connection; Beam does not intercept viewer resize/metrics.
 async fn relay_ws(
     client: WebSocket,
     zellij: tokio_tungstenite::WebSocketStream<
