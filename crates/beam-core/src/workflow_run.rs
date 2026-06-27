@@ -520,7 +520,8 @@ fn coerce_param_value(name: &str, def: &ParamDef, value: &Value) -> Result<Value
                 "false" => Ok(Value::Bool(false)),
                 _ => anyhow::bail!(
                     "workflow parameter '{}' expects type 'boolean', got string '{}' (only 'true' or 'false' are accepted)",
-                    name, trimmed
+                    name,
+                    trimmed
                 ),
             }
         }
@@ -541,7 +542,9 @@ fn coerce_param_value(name: &str, def: &ParamDef, value: &Value) -> Result<Value
             if !v.is_number() {
                 anyhow::bail!(
                     "workflow parameter '{}' expects type 'number', but string '{}' parsed to {}",
-                    name, trimmed, describe_value_kind(&v)
+                    name,
+                    trimmed,
+                    describe_value_kind(&v)
                 );
             }
             Ok(v)
@@ -557,21 +560,19 @@ fn coerce_param_value(name: &str, def: &ParamDef, value: &Value) -> Result<Value
 
             // Only accept decimal integer strings: optional leading '-', then
             // only ASCII digits. Reject floats, scientific notation, etc.
-            let is_decimal_integer = trimmed
-                .chars()
-                .enumerate()
-                .all(|(i, c)| {
-                    if i == 0 && c == '-' {
-                        trimmed.len() > 1 // "-" alone is not valid
-                    } else {
-                        c.is_ascii_digit()
-                    }
-                });
+            let is_decimal_integer = trimmed.chars().enumerate().all(|(i, c)| {
+                if i == 0 && c == '-' {
+                    trimmed.len() > 1 // "-" alone is not valid
+                } else {
+                    c.is_ascii_digit()
+                }
+            });
 
             if !is_decimal_integer {
                 anyhow::bail!(
                     "workflow parameter '{}' expects type 'integer', got string '{}' (only decimal integer strings like '42' or '-1' are accepted)",
-                    name, trimmed
+                    name,
+                    trimmed
                 );
             }
 
@@ -579,13 +580,15 @@ fn coerce_param_value(name: &str, def: &ParamDef, value: &Value) -> Result<Value
             let n: i128 = trimmed.parse().map_err(|_| {
                 anyhow::anyhow!(
                     "workflow parameter '{}' expects type 'integer', failed to parse '{}'",
-                    name, trimmed
+                    name,
+                    trimmed
                 )
             })?;
             let num = serde_json::Number::from_i128(n).ok_or_else(|| {
                 anyhow::anyhow!(
                     "workflow parameter '{}' expects type 'integer', number out of range: '{}'",
-                    name, trimmed
+                    name,
+                    trimmed
                 )
             })?;
             Ok(Value::Number(num))
@@ -607,7 +610,8 @@ fn coerce_param_value(name: &str, def: &ParamDef, value: &Value) -> Result<Value
             if !v.is_object() {
                 anyhow::bail!(
                     "workflow parameter '{}' expects type 'object', but string value parsed to {} (must be a JSON object like '{{\"a\":1}}')",
-                    name, describe_value_kind(&v)
+                    name,
+                    describe_value_kind(&v)
                 );
             }
             Ok(v)
@@ -629,7 +633,8 @@ fn coerce_param_value(name: &str, def: &ParamDef, value: &Value) -> Result<Value
             if !v.is_array() {
                 anyhow::bail!(
                     "workflow parameter '{}' expects type 'array', but string value parsed to {} (must be a JSON array like '[\"a\",\"b\"]')",
-                    name, describe_value_kind(&v)
+                    name,
+                    describe_value_kind(&v)
                 );
             }
             Ok(v)
@@ -995,7 +1000,10 @@ mod tests {
             "expected 'target' in error, got: {msg}"
         );
         let run_dir = paths.workflow_run_dir("run-multi");
-        assert!(!run_dir.exists(), "run directory should NOT exist on failure");
+        assert!(
+            !run_dir.exists(),
+            "run directory should NOT exist on failure"
+        );
         let _ = std::fs::remove_dir_all(paths.root());
     }
 
@@ -1028,10 +1036,7 @@ mod tests {
         let input: BTreeMap<String, Value> = BTreeMap::new();
         let normalized = normalize_workflow_params(&def, &input).expect("should succeed");
         assert_eq!(normalized.get("verbose"), Some(&Value::Bool(false)));
-        assert_eq!(
-            normalized.get("level"),
-            Some(&serde_json::json!(3))
-        );
+        assert_eq!(normalized.get("level"), Some(&serde_json::json!(3)));
         // Not-required, no default: should not be written
         assert!(!normalized.contains_key("unknown_key"));
     }
@@ -1061,14 +1066,8 @@ mod tests {
             (String::from("count"), serde_json::json!(42)),
             (String::from("ratio"), serde_json::json!(3.14)),
             (String::from("enabled"), Value::Bool(true)),
-            (
-                String::from("tags"),
-                serde_json::json!(["a", "b"]),
-            ),
-            (
-                String::from("meta"),
-                serde_json::json!({"key": "val"}),
-            ),
+            (String::from("tags"), serde_json::json!(["a", "b"])),
+            (String::from("meta"), serde_json::json!({"key": "val"})),
         ]);
         let _ = normalize_workflow_params(&def, &input).expect("all types valid");
     }
@@ -1119,7 +1118,10 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("unknown workflow parameter"), "got: {msg}");
         assert!(msg.contains("extra"), "got: {msg}");
-        assert!(msg.contains("task"), "expected available params list, got: {msg}");
+        assert!(
+            msg.contains("task"),
+            "expected available params list, got: {msg}"
+        );
     }
 
     #[test]
@@ -1140,16 +1142,10 @@ mod tests {
         ]);
         let err = normalize_workflow_params(&def, &input).unwrap_err();
         let msg = err.to_string();
-        assert!(
-            msg.contains("unknown workflow parameter"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("unknown workflow parameter"), "got: {msg}");
         assert!(msg.contains("anything"), "got: {msg}");
         assert!(msg.contains("extra"), "got: {msg}");
-        assert!(
-            msg.contains("No parameters are declared"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("No parameters are declared"), "got: {msg}");
     }
 
     #[test]
@@ -1165,7 +1161,8 @@ mod tests {
         )
         .unwrap();
         let input: BTreeMap<String, Value> = BTreeMap::new();
-        let normalized = normalize_workflow_params(&def, &input).expect("empty params with no schema should succeed");
+        let normalized = normalize_workflow_params(&def, &input)
+            .expect("empty params with no schema should succeed");
         assert!(normalized.is_empty());
     }
 
@@ -1354,10 +1351,8 @@ mod tests {
     #[test]
     fn bootstrap_integration_default_written_to_params_blob() {
         let paths = temp_paths("bootstrap-default");
-        let params: BTreeMap<String, Value> = BTreeMap::from([(
-            String::from("task"),
-            Value::String("build".to_string()),
-        )]);
+        let params: BTreeMap<String, Value> =
+            BTreeMap::from([(String::from("task"), Value::String("build".to_string()))]);
         let workflow_json = r#"{
             "workflowId": "flow-def",
             "version": 1,
@@ -1752,8 +1747,7 @@ mod tests {
         // "false" → bool false
         let input2: BTreeMap<String, Value> =
             BTreeMap::from([(String::from("enabled"), Value::String("false".to_string()))]);
-        let normalized2 =
-            normalize_workflow_params(&def, &input2).expect("false coerces to bool");
+        let normalized2 = normalize_workflow_params(&def, &input2).expect("false coerces to bool");
         assert_eq!(normalized2.get("enabled"), Some(&Value::Bool(false)));
     }
 
@@ -1781,12 +1775,14 @@ mod tests {
             assert!(
                 msg.contains("boolean"),
                 "expected 'boolean' in error for input '{}', got: {}",
-                bad, msg
+                bad,
+                msg
             );
             assert!(
                 msg.contains("enabled"),
                 "expected 'enabled' in error for input '{}', got: {}",
-                bad, msg
+                bad,
+                msg
             );
         }
     }
@@ -1810,8 +1806,7 @@ mod tests {
         // Already bool → passes through
         let input: BTreeMap<String, Value> =
             BTreeMap::from([(String::from("enabled"), Value::Bool(true))]);
-        let normalized =
-            normalize_workflow_params(&def, &input).expect("bool passthrough");
+        let normalized = normalize_workflow_params(&def, &input).expect("bool passthrough");
         assert_eq!(normalized.get("enabled"), Some(&Value::Bool(true)));
     }
 
@@ -1867,7 +1862,15 @@ mod tests {
         )
         .unwrap();
 
-        for bad in &["NaN", "Infinity", "-Infinity", "not-a-number", "true", "\"hi\"", "[]"] {
+        for bad in &[
+            "NaN",
+            "Infinity",
+            "-Infinity",
+            "not-a-number",
+            "true",
+            "\"hi\"",
+            "[]",
+        ] {
             let input: BTreeMap<String, Value> =
                 BTreeMap::from([(String::from("ratio"), Value::String(bad.to_string()))]);
             let err = normalize_workflow_params(&def, &input).unwrap_err();
@@ -1875,7 +1878,8 @@ mod tests {
             assert!(
                 msg.contains("number") || msg.contains("number"),
                 "expected 'number' in error for input '{}', got: {}",
-                bad, msg
+                bad,
+                msg
             );
         }
     }
@@ -1963,7 +1967,8 @@ mod tests {
             assert!(
                 msg.contains("integer"),
                 "expected 'integer' in error for input '{}', got: {}",
-                bad, msg
+                bad,
+                msg
             );
         }
     }
@@ -1987,8 +1992,7 @@ mod tests {
         // Already a JSON number → passes through
         let input: BTreeMap<String, Value> =
             BTreeMap::from([(String::from("count"), serde_json::json!(42))]);
-        let normalized =
-            normalize_workflow_params(&def, &input).expect("integer passthrough");
+        let normalized = normalize_workflow_params(&def, &input).expect("integer passthrough");
         assert_eq!(normalized.get("count"), Some(&serde_json::json!(42)));
     }
 
@@ -2042,10 +2046,7 @@ mod tests {
         )]);
         let normalized =
             normalize_workflow_params(&def, &input).expect("array string should coerce");
-        assert_eq!(
-            normalized.get("tags"),
-            Some(&serde_json::json!(["a", "b"]))
-        );
+        assert_eq!(normalized.get("tags"), Some(&serde_json::json!(["a", "b"])));
     }
 
     #[test]
@@ -2093,10 +2094,8 @@ mod tests {
         .unwrap();
 
         // Number string for array type → error
-        let input: BTreeMap<String, Value> = BTreeMap::from([(
-            String::from("tags"),
-            Value::String("1".to_string()),
-        )]);
+        let input: BTreeMap<String, Value> =
+            BTreeMap::from([(String::from("tags"), Value::String("1".to_string()))]);
         let err = normalize_workflow_params(&def, &input).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("array"), "got: {msg}");
@@ -2180,8 +2179,8 @@ mod tests {
 
         let input: BTreeMap<String, Value> =
             BTreeMap::from([(String::from("name"), Value::String("true".to_string()))]);
-        let normalized = normalize_workflow_params(&def, &input)
-            .expect("string param should not be coerced");
+        let normalized =
+            normalize_workflow_params(&def, &input).expect("string param should not be coerced");
         // Should remain a string "true", not bool true
         assert_eq!(
             normalized.get("name"),
@@ -2206,8 +2205,10 @@ mod tests {
         .unwrap();
 
         // "  true  " → bool true (trimmed before matching)
-        let input: BTreeMap<String, Value> =
-            BTreeMap::from([(String::from("enabled"), Value::String("  true  ".to_string()))]);
+        let input: BTreeMap<String, Value> = BTreeMap::from([(
+            String::from("enabled"),
+            Value::String("  true  ".to_string()),
+        )]);
         let normalized =
             normalize_workflow_params(&def, &input).expect("padded true coerces to bool");
         assert_eq!(normalized.get("enabled"), Some(&Value::Bool(true)));

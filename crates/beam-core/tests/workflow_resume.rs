@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use beam_core::{
-    BeamPaths, EventLog, RequestCancelInput, RunChatBinding, RunLoopStopReason,
-    RunStatus, WorkflowActor, WorkflowDispatchOutcome, WorkflowDispatchRun, WorkflowExecutionHooks,
+    BeamPaths, EventLog, RequestCancelInput, RunChatBinding, RunLoopStopReason, RunStatus,
+    WorkflowActor, WorkflowDispatchOutcome, WorkflowDispatchRun, WorkflowExecutionHooks,
     WorkflowRuntimeContext, bootstrap_workflow_run, read_run_snapshot, request_cancel, run_loop,
     run_tick,
     workflow_definition::{

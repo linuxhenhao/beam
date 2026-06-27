@@ -4,14 +4,15 @@ use std::{os::unix::process::CommandExt, process::Command as StdCommand};
 
 use anyhow::{Context, Result, bail};
 use beam_core::{
-    AdoptCandidate, AdoptTmuxSessionRequest, ApiHealth, BackendType, BotConfig, BeamPaths,
-    CreateSessionRequest, DaemonRuntimeState, FinalOutputRequest, RestartSessionRequest,
-    ResumeSessionRequest, Session, SessionInputRequest, SessionStatus, SessionSummary,
+    ApiHealth, BeamPaths, BotConfig, CreateSessionRequest, DaemonRuntimeState, FinalOutputRequest,
+    RestartSessionRequest, ResumeSessionRequest, Session, SessionInputRequest, SessionStatus,
+    SessionSummary,
 };
 use clap::{Args, Parser, Subcommand};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::LevelFilter;
 
 mod ask_hook;
 mod autostart;
@@ -49,6 +50,8 @@ enum Command {
     Send {
         content: Option<String>,
     },
+    History(HistoryArgs),
+    Quoted(QuotedArgs),
     Bots {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -115,8 +118,8 @@ enum SessionCommand {
         #[arg(long, default_value = "")]
         prompt: String,
     },
-    AdoptTmux(SessionAdoptTmuxArgs),
-    DiscoverTmux,
+    Adopt(SessionAdoptArgs),
+    Discover,
     Close {
         session_id: String,
     },
@@ -137,16 +140,14 @@ struct SessionCreateArgs {
     working_dir: String,
     #[arg(long, default_value = "")]
     prompt: String,
-    #[arg(long, default_value = "tmux")]
-    backend_type: String,
     #[arg(trailing_var_arg = true)]
     cli_args: Vec<String>,
 }
 
 #[derive(Debug, Args)]
-struct SessionAdoptTmuxArgs {
+struct SessionAdoptArgs {
     #[arg(long)]
-    tmux_target: String,
+    target: String,
     #[arg(long)]
     cli_id: String,
     #[arg(long)]
@@ -161,6 +162,23 @@ struct SessionInputArgs {
     content: String,
     #[arg(long)]
     raw: bool,
+}
+
+#[derive(Debug, Args)]
+struct HistoryArgs {
+    #[arg(long, default_value_t = 50)]
+    limit: usize,
+    #[arg(long, default_value = "session")]
+    scope: String,
+    #[arg(long)]
+    session_id: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct QuotedArgs {
+    message_id: String,
+    #[arg(long)]
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -203,6 +221,17 @@ fn discover_session_id(paths: &BeamPaths) -> Result<String> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     discover_session_id_from_pid(paths, std::process::id(), env_session_id.as_deref())
+}
+
+fn resolve_cli_session_id(paths: &BeamPaths, explicit: Option<String>) -> Result<String> {
+    match explicit {
+        Some(value) if !value.trim().is_empty() => Ok(value.trim().to_string()),
+        _ => discover_session_id(paths).map_err(|_| {
+            anyhow::anyhow!(
+                "无法推断 session-id。请在 beam 会话里的 CLI 中运行，或传 --session-id <id>。"
+            )
+        }),
+    }
 }
 
 fn discover_session_id_from_pid(
@@ -326,11 +355,10 @@ fn cmd_schedule(args: Vec<String>, paths: &BeamPaths) -> Result<()> {
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(" ");
-            let parsed = beam_core::parse_schedule(&raw_schedule)
-                .map_err(|err| anyhow::anyhow!(err))?;
+            let parsed =
+                beam_core::parse_schedule(&raw_schedule).map_err(|err| anyhow::anyhow!(err))?;
             let content = if prompt.is_empty() {
-                if let Some(natural) = beam_core::parse_natural_schedule(&positional.join(" "))
-                {
+                if let Some(natural) = beam_core::parse_natural_schedule(&positional.join(" ")) {
                     natural.prompt
                 } else {
                     raw_schedule.clone()
@@ -623,10 +651,9 @@ fn spawn_background_daemon(exe: &Path, paths: &BeamPaths) -> Result<()> {
 mod tests {
     use super::{
         BotInfoEntry, Cli, Command, SessionCommand, active_sessions, discover_session_id_from_pid,
-        format_bot_info_entries_for_cli, format_duration, parse_backend_type, parse_migrate_flags,
-        setup_backup_file,
+        format_bot_info_entries_for_cli, format_duration, parse_migrate_flags, setup_backup_file,
     };
-    use beam_core::{BackendType, BeamPaths, SessionStatus, SessionSummary};
+    use beam_core::{BeamPaths, SessionStatus, SessionSummary};
     use chrono::Utc;
     use clap::Parser;
     use std::fs;
@@ -638,30 +665,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("time before unix epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!(
-            "beam-cli-{label}-{nanos}-{}",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("beam-cli-{label}-{nanos}-{}", std::process::id()))
     }
 
     fn paths_for(root: &Path) -> BeamPaths {
         BeamPaths::from_root(root)
-    }
-
-    #[test]
-    fn parse_backend_type_accepts_supported_values() {
-        assert_eq!(
-            parse_backend_type("tmux").expect("tmux backend"),
-            beam_core::BackendType::Tmux
-        );
-        assert_eq!(
-            parse_backend_type("pty").expect("pty backend"),
-            beam_core::BackendType::Pty
-        );
-        assert_eq!(
-            parse_backend_type("zellij").expect("zellij backend"),
-            beam_core::BackendType::Zellij
-        );
     }
 
     #[test]
@@ -809,10 +817,11 @@ mod tests {
             cli_id: Some("test-cli".to_string()),
             cli_bin: Some("test-bin".to_string()),
             cli_args: vec![],
-            backend_type: BackendType::Pty,
             working_dir: Some("/home/user/project".to_string()),
             worker_pid: Some(12345),
             terminal_url: None,
+            read_only_token: None,
+            write_token: None,
             created_at: ts,
             stream_card_nonce: None,
             current_screen: None,
@@ -1004,19 +1013,11 @@ fn session_attach_target(session: &SessionSummary) -> String {
         "bmx-{}",
         &session.session_id[..8.min(session.session_id.len())]
     );
-    match session.backend_type {
-        BackendType::Tmux => session
-            .adopted_from
-            .as_ref()
-            .and_then(|adopted| adopted.tmux_target.clone())
-            .unwrap_or(fallback),
-        BackendType::Zellij => session
-            .adopted_from
-            .as_ref()
-            .and_then(|adopted| adopted.zellij_session.clone())
-            .unwrap_or(fallback),
-        BackendType::Pty => fallback,
-    }
+    session
+        .adopted_from
+        .as_ref()
+        .and_then(|adopted| adopted.zellij_session.clone())
+        .unwrap_or(fallback)
 }
 
 fn resolve_session_prefix(items: &[SessionSummary], prefix: &str) -> Result<SessionSummary> {
@@ -1044,26 +1045,12 @@ fn resolve_session_prefix(items: &[SessionSummary], prefix: &str) -> Result<Sess
 
 fn attach_session(session: &SessionSummary) -> Result<()> {
     let target = session_attach_target(session);
-    match session.backend_type {
-        BackendType::Tmux => {
-            let status = StdCommand::new("tmux")
-                .args(["attach-session", "-t", &target])
-                .status()
-                .context("failed to run tmux attach-session")?;
-            if !status.success() {
-                bail!("tmux attach-session failed for {}", target);
-            }
-        }
-        BackendType::Zellij => {
-            let status = StdCommand::new("zellij")
-                .args(["attach", &target])
-                .status()
-                .context("failed to run zellij attach")?;
-            if !status.success() {
-                bail!("zellij attach failed for {}", target);
-            }
-        }
-        BackendType::Pty => bail!("session {} 使用 pty 后端，不能 attach", session.session_id),
+    let status = StdCommand::new("zellij")
+        .args(["attach", &target])
+        .status()
+        .context("failed to run zellij attach")?;
+    if !status.success() {
+        bail!("zellij attach failed for {}", target);
     }
     Ok(())
 }
@@ -1074,28 +1061,14 @@ async fn cmd_attach(client: &Client, base: &str, session_id: &str) -> Result<()>
     attach_session(&session)
 }
 
-fn print_tmux_candidates(items: &[AdoptCandidate]) {
-    for item in items {
-        println!(
-            "{}  pid={}  cwd={}  {}",
-            item.tmux_target, item.pid, item.cwd, item.title
-        );
-    }
-}
-
-fn parse_backend_type(raw: &str) -> Result<BackendType> {
-    match raw {
-        "tmux" => Ok(BackendType::Tmux),
-        "pty" => Ok(BackendType::Pty),
-        "zellij" => Ok(BackendType::Zellij),
-        _ => bail!("unsupported backend_type: {}", raw),
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(
+            EnvFilter::builder()
+                .with_default_directive(LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
         .with_target(false)
         .compact()
         .init();
@@ -1255,12 +1228,44 @@ async fn main() -> Result<()> {
                     }
                     println!("final output accepted");
                 }
+                Command::History(args) => {
+                    let session_id = resolve_cli_session_id(&paths, args.session_id)?;
+                    let (client, base) = api_client(&paths).await?;
+                    let resp = client
+                        .get(format!("{}/sessions/{}/history", base, session_id))
+                        .query(&[
+                            ("limit", args.limit.to_string()),
+                            ("scope", args.scope.clone()),
+                        ])
+                        .send()
+                        .await?;
+                    if !resp.status().is_success() {
+                        bail!("{}", resp.text().await.unwrap_or_default());
+                    }
+                    let out: serde_json::Value = resp.json().await?;
+                    println!("{}", serde_json::to_string_pretty(&out)?);
+                }
+                Command::Quoted(args) => {
+                    let session_id = resolve_cli_session_id(&paths, args.session_id)?;
+                    let (client, base) = api_client(&paths).await?;
+                    let resp = client
+                        .get(format!(
+                            "{}/sessions/{}/quoted/{}",
+                            base, session_id, args.message_id
+                        ))
+                        .send()
+                        .await?;
+                    if !resp.status().is_success() {
+                        bail!("{}", resp.text().await.unwrap_or_default());
+                    }
+                    let out: serde_json::Value = resp.json().await?;
+                    println!("{}", serde_json::to_string_pretty(&out)?);
+                }
                 Command::Bots { args } => cmd_bots(args, &paths)?,
                 Command::Session { command } => {
                     let (client, base) = api_client(&paths).await?;
                     match command {
                         SessionCommand::Create(args) => {
-                            let backend_type = parse_backend_type(&args.backend_type)?;
                             let resp = client
                                 .post(format!("{}/sessions", base))
                                 .json(&CreateSessionRequest {
@@ -1270,7 +1275,6 @@ async fn main() -> Result<()> {
                                     cli_args: args.cli_args,
                                     working_dir: args.working_dir,
                                     prompt: args.prompt,
-                                    backend_type: Some(backend_type),
                                 })
                                 .send()
                                 .await?;
@@ -1334,15 +1338,23 @@ async fn main() -> Result<()> {
                             let session = resp.json::<SessionSummary>().await?;
                             println!("{}", serde_json::to_string_pretty(&session)?);
                         }
-                        SessionCommand::AdoptTmux(args) => {
+                        SessionCommand::Adopt(args) => {
+                            // Parse target as "session:pane_id" or "session"
+                            let (zellij_session, zellij_pane_id) = match args.target.split_once(':')
+                            {
+                                Some((session, pane)) => (session.to_string(), pane.to_string()),
+                                None => (args.target.clone(), "terminal_0".to_string()),
+                            };
                             let resp = client
-                                .post(format!("{}/adopt/tmux", base))
-                                .json(&AdoptTmuxSessionRequest {
-                                    title: args.title,
-                                    tmux_target: args.tmux_target,
-                                    cli_id: args.cli_id,
-                                    cli_bin: args.cli_bin,
-                                })
+                                .post(format!("{}/adopt/zellij", base))
+                                .json(&serde_json::json!({
+                                    "zellij_session": zellij_session,
+                                    "zellij_pane_id": zellij_pane_id,
+                                    "cli_id": args.cli_id,
+                                    "cli_bin": args.cli_bin,
+                                    "title": args.title,
+                                    "cwd": "",
+                                }))
                                 .send()
                                 .await?;
                             if !resp.status().is_success() {
@@ -1351,13 +1363,31 @@ async fn main() -> Result<()> {
                             let session = resp.json::<SessionSummary>().await?;
                             println!("{}", serde_json::to_string_pretty(&session)?);
                         }
-                        SessionCommand::DiscoverTmux => {
-                            let resp = client.get(format!("{}/adopt/tmux", base)).send().await?;
+                        SessionCommand::Discover => {
+                            let resp = client.get(format!("{}/adopt/zellij", base)).send().await?;
                             if !resp.status().is_success() {
                                 bail!("{}", resp.text().await.unwrap_or_default());
                             }
-                            let items = resp.json::<Vec<AdoptCandidate>>().await?;
-                            print_tmux_candidates(&items);
+                            let items = resp.json::<Vec<serde_json::Value>>().await?;
+                            for item in &items {
+                                let session = item
+                                    .get("zellij_session")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("-");
+                                let pane_id = item
+                                    .get("zellij_pane_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("-");
+                                let pid =
+                                    item.get("cli_pid").and_then(|v| v.as_i64()).unwrap_or(-1);
+                                let cwd = item.get("cwd").and_then(|v| v.as_str()).unwrap_or("-");
+                                let title =
+                                    item.get("title").and_then(|v| v.as_str()).unwrap_or("-");
+                                println!(
+                                    "{}:{}  pid={}  cwd={}  {}",
+                                    session, pane_id, pid, cwd, title
+                                );
+                            }
                         }
                         SessionCommand::Close { session_id } => {
                             let resp = client
@@ -1405,11 +1435,7 @@ fn setup_backup_file(path: &Path) -> Result<Option<PathBuf>> {
 }
 
 async fn validate_setup_credentials(app_id: &str, app_secret: &str) -> Result<()> {
-    if std::env::var("BEAM_SKIP_SETUP_VALIDATION")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
+    if std::env::var("BEAM_SKIP_SETUP_VALIDATION").ok().as_deref() == Some("1") {
         println!("⚠️  已跳过远程凭证校验（BEAM_SKIP_SETUP_VALIDATION=1）。");
         return Ok(());
     }
@@ -1435,16 +1461,6 @@ async fn validate_setup_credentials(app_id: &str, app_secret: &str) -> Result<()
             code,
             body.get("msg").and_then(|v| v.as_str()).unwrap_or("")
         ),
-    }
-}
-
-fn parse_backend_type_choice(input: &str) -> Option<BackendType> {
-    match input.trim().to_lowercase().as_str() {
-        "" | "-" | "default" => None,
-        "tmux" => Some(BackendType::Tmux),
-        "pty" => Some(BackendType::Pty),
-        "zellij" => Some(BackendType::Zellij),
-        _ => None,
     }
 }
 
@@ -1537,10 +1553,6 @@ async fn prompt_setup_bot() -> Result<BotConfig> {
             Some(value)
         }
     };
-    let backend_type = {
-        let value = ask_line("后端 [tmux/pty/zellij] [tmux]: ")?;
-        parse_backend_type_choice(&value).or(Some(BackendType::Tmux))
-    };
     let mut allowed_users = {
         let value = ask_line("允许用户（逗号分隔，留空=不限制）: ")?;
         value
@@ -1567,7 +1579,6 @@ async fn prompt_setup_bot() -> Result<BotConfig> {
         cli_bin: None,
         model: None,
         working_dir,
-        backend_type,
         lark_encrypt_key: None,
         lark_verification_token: None,
         allowed_users,
@@ -1601,24 +1612,11 @@ async fn cmd_setup(paths: &BeamPaths) -> Result<()> {
 
     let cfg = paths.config_toml();
     if !cfg.exists() {
-        let backend = ask_line("默认后端类型 [tmux/pty/zellij] [tmux]: ")?;
-        let backend_type = backend.trim().to_lowercase();
-        let backend_type = if backend_type.is_empty() || backend_type == "tmux" {
-            "tmux"
-        } else if backend_type == "zellij" {
-            "zellij"
-        } else if backend_type == "pty" {
-            "pty"
-        } else {
-            "tmux"
-        };
-        let defaults = format!(
-            "[daemon]\nbackend_type = \"{}\"\nworking_dirs = [\"~\"]\n\n\
-             [web]\nhost = \"0.0.0.0\"\nproxy_base_port = 8800\n\n\
-             [lark]\nevent_mode = \"http\"\n",
-            backend_type,
-        );
-        std::fs::write(&cfg, &defaults)?;
+        let defaults = "\
+[daemon]\nworking_dirs = [\"~\"]\n\n\
+[web]\nhost = \"0.0.0.0\"\nproxy_base_port = 8800\n\n\
+[lark]\nevent_mode = \"http\"\n";
+        std::fs::write(&cfg, defaults)?;
         println!("Wrote {}", cfg.display());
     } else {
         println!("Config exists: {}", cfg.display());
@@ -2110,7 +2108,6 @@ async fn cmd_migrate(paths: &BeamPaths, args: Vec<String>) -> Result<()> {
                 "cli_id": session.get("cliId").or_else(|| session.get("cli_id")),
                 "cli_bin": session.get("cliBin").or_else(|| session.get("cli_bin")),
                 "working_dir": session.get("workingDir").or_else(|| session.get("working_dir")),
-                "backend_type": session.get("backendType").or_else(|| session.get("backend_type")).unwrap_or(&serde_json::json!("tmux")),
             });
             tokio::fs::write(
                 &out_path,

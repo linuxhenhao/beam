@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use crate::config::BackendType;
 use crate::{config::ScreenAnalyzerConfig, session::AdoptedFrom};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -84,7 +83,6 @@ pub struct InitConfig {
     pub cli_bin: String,
     #[serde(default)]
     pub cli_args: Vec<String>,
-    pub backend_type: BackendType,
     pub prompt: String,
     #[serde(default)]
     pub resume: bool,
@@ -94,8 +92,6 @@ pub struct InitConfig {
     pub lark_app_secret: String,
     #[serde(default)]
     pub prompt_turn_id: Option<String>,
-    #[serde(default)]
-    pub web_port: Option<u16>,
     #[serde(default)]
     pub owner_open_id: Option<String>,
     #[serde(default)]
@@ -140,8 +136,7 @@ pub enum DaemonToWorker {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WorkerToDaemon {
     Ready {
-        port: u16,
-        token: String,
+        zellij_session: String,
     },
     PromptReady,
     ScreenUpdate {

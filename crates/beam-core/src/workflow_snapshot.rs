@@ -57,7 +57,7 @@ pub struct AttemptTerminalDTO {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub has_pty_log: Option<bool>,
+    pub has_terminal_log: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1499,7 +1499,7 @@ fn read_attempt_terminal(
             updated_at: 0,
             closed_at: None,
             error: Some("terminal sidecar is outside run directory".to_string()),
-            has_pty_log: None,
+            has_terminal_log: None,
         }));
     }
     let raw = match fs::read_to_string(&path) {
@@ -1520,7 +1520,7 @@ fn read_attempt_terminal(
                 updated_at: 0,
                 closed_at: None,
                 error: Some(err.to_string()),
-                has_pty_log: None,
+                has_terminal_log: None,
             }));
         }
     };
@@ -1541,7 +1541,7 @@ fn read_attempt_terminal(
                 updated_at: 0,
                 closed_at: None,
                 error: Some(format!("invalid terminal sidecar: {}", err)),
-                has_pty_log: None,
+                has_terminal_log: None,
             }));
         }
     };
@@ -1569,11 +1569,11 @@ fn read_attempt_terminal(
             updated_at: 0,
             closed_at: None,
             error: Some("invalid terminal sidecar".to_string()),
-            has_pty_log: None,
+            has_terminal_log: None,
         }));
     }
-    let pty_log = path.with_file_name("pty.log");
-    let has_pty_log = fs::metadata(&pty_log)
+    let terminal_log = path.with_file_name("terminal.log");
+    let has_terminal_log = fs::metadata(&terminal_log)
         .map(|meta| meta.is_file() && meta.len() > 0)
         .unwrap_or(false);
     Ok(Some(AttemptTerminalDTO {
@@ -1590,7 +1590,7 @@ fn read_attempt_terminal(
         updated_at: payload_u64(&parsed, "updatedAt").unwrap_or_default(),
         closed_at: payload_u64(&parsed, "closedAt"),
         error: None,
-        has_pty_log: Some(has_pty_log),
+        has_terminal_log: Some(has_terminal_log),
     }))
 }
 

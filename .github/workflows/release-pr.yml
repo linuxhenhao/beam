@@ -29,12 +29,16 @@ permissions:
   contents: write       # needed to create / update the Release PR branch
   pull-requests: write  # needed to create / update the Release PR
 
+concurrency:
+  group: release-pr
+  cancel-in-progress: false
+
 jobs:
   release-pr:
-    # Run on manual dispatch, or when Release Tag succeeded on main.
+    # Run on manual dispatch from main, or when Release Tag succeeded on main.
     # Skipping failed/cancelled runs avoids unnecessary runs on broken pushes.
     if: |
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_branch == 'main')

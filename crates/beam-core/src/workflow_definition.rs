@@ -182,9 +182,7 @@ pub fn validate_workflow_definition(def: &WorkflowDefinition) -> Result<()> {
     for node_id in def.nodes.keys() {
         // Node id must match ^[A-Za-z0-9_.-]+$ (non-empty)
         if node_id.is_empty() {
-            anyhow::bail!(
-                "nodeId '' rejected: must match ^[A-Za-z0-9_.-]+$"
-            );
+            anyhow::bail!("nodeId '' rejected: must match ^[A-Za-z0-9_.-]+$");
         }
         if !node_id
             .chars()
@@ -465,7 +463,7 @@ fn validate_loop_definitions(def: &WorkflowDefinition) -> Result<()> {
         }
         if matches!(node, WorkflowNode::Decision(_)) {
             continue; // Decision nodes not owned by a loop are already rejected by rule 3b;
-                      // owned Decision nodes are body nodes (skip above)
+            // owned Decision nodes are body nodes (skip above)
         }
         for dep in node_depends(node) {
             if body_owner.contains_key(dep) {
@@ -790,8 +788,7 @@ mod tests {
     // -- Task 9.2: subagent-approval-feishu-send example parses --
     #[test]
     fn accept_subagent_approval_feishu_send_workflow_json() {
-        let raw =
-            include_str!("../../../workflows/subagent-approval-feishu-send.workflow.json");
+        let raw = include_str!("../../../workflows/subagent-approval-feishu-send.workflow.json");
         let def = parse_workflow_definition(raw).expect("subagent-approval-feishu-send parsed");
         assert_eq!(def.workflow_id, "subagent-approval-feishu-send");
         assert_eq!(def.nodes.len(), 2);
@@ -803,9 +800,15 @@ mod tests {
             // send is a gated feishu-send: humanGate present, unsafeAllowUngated absent
             WorkflowNode::HostExecutor(n) => {
                 assert_eq!(n.executor, "feishu-send");
-                assert_eq!(n.base.depends.as_deref(), Some(vec!["draft".to_string()].as_slice()));
+                assert_eq!(
+                    n.base.depends.as_deref(),
+                    Some(vec!["draft".to_string()].as_slice())
+                );
                 assert!(n.base.human_gate.is_some(), "send must have humanGate");
-                assert!(!n.base.unsafe_allow_ungated.unwrap_or(false), "send must NOT use unsafeAllowUngated");
+                assert!(
+                    !n.base.unsafe_allow_ungated.unwrap_or(false),
+                    "send must NOT use unsafeAllowUngated"
+                );
             }
             _ => panic!("expected hostExecutor"),
         }

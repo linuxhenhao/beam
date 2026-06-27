@@ -4,8 +4,8 @@ use serde_json::Value;
 
 use crate::workflow_snapshot::{ActivityStatus, NodeStatus};
 use crate::{
-    ActivityState, HumanGate, LoopIterationStatus, LoopNode, LoopStatus, NodeState,
-    RunSnapshotDTO, WorkflowDefinition, WorkflowNode, WorkflowOutputRef,
+    ActivityState, HumanGate, LoopIterationStatus, LoopNode, LoopStatus, NodeState, RunSnapshotDTO,
+    WorkflowDefinition, WorkflowNode, WorkflowOutputRef,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -564,12 +564,11 @@ fn process_loop_iteration_body(
                     match gate.status {
                         ActivityStatus::Succeeded => {
                             // Approved → iteration + loop succeeded.
-                            let loop_output =
-                                loop_node.output.as_ref().and_then(|out| {
-                                    let source_work_id =
-                                        loop_work_activity_id(run_id, loop_id, iteration, &out.from);
-                                    snapshot.outputs.get(&source_work_id).cloned()
-                                });
+                            let loop_output = loop_node.output.as_ref().and_then(|out| {
+                                let source_work_id =
+                                    loop_work_activity_id(run_id, loop_id, iteration, &out.from);
+                                snapshot.outputs.get(&source_work_id).cloned()
+                            });
                             let (wait_resolved_event_id, by, comment, timed_out) =
                                 extract_wait_resolution_meta(snapshot, &gate_id);
                             return AdvanceDecision {
@@ -620,8 +619,7 @@ fn process_loop_iteration_body(
                                             final_iteration: iteration,
                                             resolution: "failed".to_string(),
                                             output_ref: None,
-                                            error_code: Some("MaxIterationsReached"
-                                                .to_string()),
+                                            error_code: Some("MaxIterationsReached".to_string()),
                                             error_class: Some("fatal".to_string()),
                                         },
                                     ],
@@ -1336,8 +1334,15 @@ mod tests {
             "expected StartLoop and StartLoopIteration, got {:?}",
             actions
         );
-        assert!(actions.iter().any(|a| matches!(a, OrchestratorAction::StartLoop { .. })));
-        assert!(actions.iter().any(|a| matches!(a, OrchestratorAction::StartLoopIteration { iteration: 1, .. })));
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, OrchestratorAction::StartLoop { .. }))
+        );
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            OrchestratorAction::StartLoopIteration { iteration: 1, .. }
+        )));
     }
 
     #[test]
@@ -1519,7 +1524,10 @@ mod tests {
             "expected FinishLoopIteration(rejected), got: {actions:?}"
         );
         assert!(
-            actions.iter().any(|a| matches!(a, OrchestratorAction::StartLoopIteration { iteration: 2, .. })),
+            actions.iter().any(|a| matches!(
+                a,
+                OrchestratorAction::StartLoopIteration { iteration: 2, .. }
+            )),
             "expected StartLoopIteration(2), got: {actions:?}"
         );
     }

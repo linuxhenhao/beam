@@ -91,11 +91,7 @@ impl WorkflowCancellationRegistry {
     /// node prefix) is called.  Callers **must** call
     /// [`unregister_activity`] after the dispatch completes to avoid
     /// leaking tokens.
-    pub fn register_activity(
-        &self,
-        run_id: &str,
-        activity_id: &str,
-    ) -> CancellationToken {
+    pub fn register_activity(&self, run_id: &str, activity_id: &str) -> CancellationToken {
         let mut runs = self.inner.runs.write().expect("registry lock poisoned");
         let entry = runs.entry(run_id.to_string()).or_default();
         let token = CancellationToken::new();
@@ -236,11 +232,7 @@ impl WorkflowCancellationRegistry {
     // -- Lookup / Snapshot --------------------------------------------------
 
     /// Look up the token for a specific activity, if registered.
-    pub fn lookup_activity(
-        &self,
-        run_id: &str,
-        activity_id: &str,
-    ) -> Option<CancellationToken> {
+    pub fn lookup_activity(&self, run_id: &str, activity_id: &str) -> Option<CancellationToken> {
         let runs = self.inner.runs.read().expect("registry lock poisoned");
         runs.get(run_id)?.activities.get(activity_id).cloned()
     }
@@ -248,8 +240,7 @@ impl WorkflowCancellationRegistry {
     /// Return a snapshot of currently-registered activity ids under `run_id`.
     pub fn active_activity_ids(&self, run_id: &str) -> Vec<String> {
         let runs = self.inner.runs.read().expect("registry lock poisoned");
-        runs
-            .get(run_id)
+        runs.get(run_id)
             .map(|e| e.activities.keys().cloned().collect())
             .unwrap_or_default()
     }
@@ -327,8 +318,7 @@ impl Drop for ActivityTokenGuard {
 /// initialised).  Tests that need isolation should use
 /// [`WorkflowCancellationRegistry::new`] instead.
 pub fn global_cancellation_registry() -> &'static WorkflowCancellationRegistry {
-    static REGISTRY: std::sync::OnceLock<WorkflowCancellationRegistry> =
-        std::sync::OnceLock::new();
+    static REGISTRY: std::sync::OnceLock<WorkflowCancellationRegistry> = std::sync::OnceLock::new();
     REGISTRY.get_or_init(WorkflowCancellationRegistry::new)
 }
 
@@ -433,10 +423,8 @@ mod tests {
         let reg = WorkflowCancellationRegistry::new();
         // Activity ids follow the convention: <runId>::<nodeId>::work::<bodyNodeId>
         let _node_tok = reg.register_node("run-1", "loop-1");
-        let child_a =
-            reg.register_activity("run-1", "run-1::loop-1::work::step-a");
-        let child_b =
-            reg.register_activity("run-1", "run-1::loop-1::work::step-b");
+        let child_a = reg.register_activity("run-1", "run-1::loop-1::work::step-a");
+        let child_b = reg.register_activity("run-1", "run-1::loop-1::work::step-b");
         let unrelated = reg.register_activity("run-1", "run-1::other-node");
 
         let cancelled = reg.cancel_node("run-1", "loop-1");
@@ -575,8 +563,7 @@ mod tests {
         let reg = WorkflowCancellationRegistry::new();
 
         // Phase 1: dispatch registers.
-        let token =
-            reg.register_activity("run-cancel-test", "run-cancel-test::work");
+        let token = reg.register_activity("run-cancel-test", "run-cancel-test::work");
         assert!(!token.is_cancelled());
         assert_eq!(reg.total_activities(), 1);
 
@@ -651,7 +638,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(result_a, "a_cancelled", "activity a should be cancelled");
-        assert_eq!(result_b, "b_completed", "activity b should complete normally");
+        assert_eq!(
+            result_b, "b_completed",
+            "activity b should complete normally"
+        );
         assert!(token_a.is_cancelled());
         assert!(!token_b.is_cancelled());
     }
@@ -660,8 +650,7 @@ mod tests {
     #[tokio::test]
     async fn node_cancel_propagates_to_children() {
         let reg = WorkflowCancellationRegistry::new();
-        let child_token =
-            reg.register_activity("run-1", "run-1::parent-node::work::child");
+        let child_token = reg.register_activity("run-1", "run-1::parent-node::work::child");
         let sibling_token = reg.register_activity("run-1", "run-1::other");
 
         let child_clone = child_token.clone();
@@ -688,11 +677,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let sibling_result =
-            tokio::time::timeout(Duration::from_secs(2), handle_sibling)
-                .await
-                .unwrap()
-                .unwrap();
+        let sibling_result = tokio::time::timeout(Duration::from_secs(2), handle_sibling)
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(child_result, "child_cancelled");
         assert_eq!(sibling_result, "sibling_ok");
@@ -706,8 +694,7 @@ mod tests {
         assert_eq!(reg.total_activities(), 0);
 
         {
-            let guard =
-                ActivityTokenGuard::register(&reg, "run-1", "run-1::a");
+            let guard = ActivityTokenGuard::register(&reg, "run-1", "run-1::a");
             assert_eq!(reg.total_activities(), 1);
             assert!(!guard.token.is_cancelled());
         }
@@ -741,8 +728,7 @@ mod tests {
         let reg = WorkflowCancellationRegistry::new();
 
         // Simulate execute_subagent / execute_host_executor:
-        let guard =
-            ActivityTokenGuard::register(&reg, "run-hooks", "run-hooks::work");
+        let guard = ActivityTokenGuard::register(&reg, "run-hooks", "run-hooks::work");
 
         let token = guard.token.clone();
         let reg_clone = reg.clone();
@@ -781,12 +767,8 @@ mod tests {
     fn guard_unregisters_on_early_exit() {
         let reg = WorkflowCancellationRegistry::new();
 
-        fn simulate_dispatch(
-            reg: &WorkflowCancellationRegistry,
-            should_fail: bool,
-        ) -> bool {
-            let guard =
-                ActivityTokenGuard::register(reg, "run-1", "run-1::a");
+        fn simulate_dispatch(reg: &WorkflowCancellationRegistry, should_fail: bool) -> bool {
+            let guard = ActivityTokenGuard::register(reg, "run-1", "run-1::a");
             if should_fail {
                 return false; // guard drops here
             }
@@ -875,7 +857,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(outcome.starts_with("cancelled"), "expected cancelled, got: {outcome}");
+        assert!(
+            outcome.starts_with("cancelled"),
+            "expected cancelled, got: {outcome}"
+        );
         assert!(guard.token.is_cancelled());
 
         // Guard cleanup
@@ -972,7 +957,11 @@ mod tests {
 
         let calls = trace.snapshot();
         assert_eq!(calls.len(), 2, "expected 2 signals: SIGINT then SIGKILL");
-        assert_eq!(calls[0], (42, libc::SIGINT), "first signal should be SIGINT");
+        assert_eq!(
+            calls[0],
+            (42, libc::SIGINT),
+            "first signal should be SIGINT"
+        );
         assert_eq!(
             calls[1],
             (42, libc::SIGKILL),

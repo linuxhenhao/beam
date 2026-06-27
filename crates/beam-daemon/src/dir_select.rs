@@ -12,7 +12,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use beam_core::{BackendType, SessionScope};
+use beam_core::SessionScope;
 
 // --- Constants ---
 
@@ -90,8 +90,6 @@ pub struct PendingCreateSession {
     // Bot info for session creation
     pub cli_id: String,
     pub cli_bin: String,
-    pub backend_type: BackendType,
-    // Working directory info
     pub root_working_dir: String,
     /// All scanned candidate dirs (relative paths from root)
     pub candidate_dirs: Vec<String>,
@@ -409,6 +407,60 @@ pub fn prune_expired_pending_creates(
     let before = map.len();
     map.retain(|_, pending| now_ms - pending.created_at < PENDING_CREATE_TTL_MS);
     before - map.len()
+}
+
+/// Load pending creates from disk, pruning expired entries.
+pub(crate) async fn load_pending_creates(
+    paths: &beam_core::BeamPaths,
+) -> HashMap<String, PendingCreateSession> {
+    let path = paths.pending_creates_json();
+    let entries: Vec<PendingCreateSession> = match beam_core::persist::read_json(&path) {
+        Ok(Some(entries)) => entries,
+        _ => return Default::default(),
+    };
+    let total_loaded = entries.len();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut map = HashMap::new();
+    let mut retained = Vec::new();
+    for entry in &entries {
+        if now_ms - entry.created_at > PENDING_CREATE_TTL_MS {
+            continue;
+        }
+        retained.push(entry.clone());
+        map.insert(entry.pending_id.clone(), entry.clone());
+    }
+    // Prune expired entries
+    if retained.len() < total_loaded {
+        if retained.is_empty() {
+            let _ = tokio::fs::remove_file(&path).await;
+        } else {
+            let path_clone = path.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                beam_core::persist::atomic_write_json(&path_clone, &retained)
+            })
+            .await;
+        }
+    }
+    map
+}
+
+/// Save pending creates to disk.
+#[allow(dead_code)]
+pub(crate) async fn save_pending_creates(
+    paths: &beam_core::BeamPaths,
+    map: &HashMap<String, PendingCreateSession>,
+) {
+    let entries: Vec<PendingCreateSession> = map.values().cloned().collect();
+    let path = paths.pending_creates_json();
+    if entries.is_empty() {
+        let _ = tokio::fs::remove_file(&path).await;
+        return;
+    }
+    let path_clone = path.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        beam_core::persist::atomic_write_json(&path_clone, &entries)
+    })
+    .await;
 }
 
 // --- Card Building ---
@@ -1844,7 +1896,6 @@ mod tests {
                 created_at: created_at_ms,
                 cli_id: "codex".to_string(),
                 cli_bin: "codex".to_string(),
-                backend_type: BackendType::Tmux,
                 root_working_dir: "/tmp".to_string(),
                 candidate_dirs: vec![".".to_string()],
                 card_message_id: None,

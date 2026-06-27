@@ -1,7 +1,6 @@
 mod adapter;
 mod adapters;
 mod backend;
-mod terminal;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -13,15 +12,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont, point};
 use anyhow::{Context, Result};
 use beam_core::{
-    BackendType, BeamPaths, CliUsageLimitKind, CliUsageLimitState, DaemonToWorker, DisplayMode,
-    InitConfig, ScreenAnalyzerConfig, ScreenStatus, TermActionKey, TuiPromptOption, WorkerToDaemon,
+    BeamPaths, CliUsageLimitKind, CliUsageLimitState, DaemonToWorker, DisplayMode, InitConfig,
+    ScreenAnalyzerConfig, ScreenStatus, TermActionKey, TuiPromptOption, WorkerToDaemon,
 };
 use image::{ColorType, ImageBuffer, ImageEncoder, Rgba, codecs::png::PngEncoder};
 use reqwest::multipart::{Form, Part};
 use reqwest::{Client, header::HeaderMap};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use terminal::{TerminalState, serve};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, RwLock, broadcast};
 use tracing::{info, warn};
@@ -29,15 +27,44 @@ use unicode_width::UnicodeWidthChar;
 use uuid::Uuid;
 
 use crate::adapter::CliAdapter;
-use crate::backend::{
-    PtyBackend, SessionBackend, SpawnOpts, TmuxPipeBackend, ZellijBackend, ZellijObserveBackend,
-};
+use crate::backend::{SessionBackend, SpawnOpts, ZellijBackend, ZellijObserveBackend};
+
+const FALLBACK_TERMINAL_COLS: u16 = 120;
+const FALLBACK_TERMINAL_ROWS: u16 = 36;
+const CARD_VIEWPORT_COLS: usize = 120;
+const CARD_VIEWPORT_ROWS: usize = 36;
 
 fn render_screen_for_display_mode(screen: &str, mode: DisplayMode) -> String {
     match mode {
         DisplayMode::Hidden => "[screen hidden]".to_string(),
-        DisplayMode::Screenshot => screen.to_string(),
+        DisplayMode::Screenshot => card_viewport_text(screen),
     }
+}
+
+fn crop_line_to_cells(line: &str, max_cols: usize) -> String {
+    let mut out = String::new();
+    let mut cols = 0usize;
+    for ch in line.chars() {
+        let width = if is_fullwidth(ch) { 2 } else { 1 };
+        if cols + width > max_cols {
+            break;
+        }
+        out.push(ch);
+        cols += width;
+    }
+    out
+}
+
+fn card_viewport_text(screen_raw: &str) -> String {
+    let clean = strip_ansi(screen_raw).replace('\r', "");
+    let mut out = String::new();
+    for (idx, line) in clean.lines().take(CARD_VIEWPORT_ROWS).enumerate() {
+        if idx > 0 {
+            out.push('\n');
+        }
+        out.push_str(&crop_line_to_cells(line, CARD_VIEWPORT_COLS));
+    }
+    out
 }
 
 const SCREEN_ANALYZER_SYSTEM_PROMPT: &str = "You are a terminal screen analyzer. Determine whether the CLI is showing a blocking interactive prompt. Return only JSON with fields needsInteraction, description, options, multiSelect, toggleKey, confirmKey, checkAgainWhen. checkAgainWhen must be one of content_changed, after_5s, after_10s, not_needed.";
@@ -838,14 +865,15 @@ async fn maybe_send_screenshot_upload(
     if app_id == "local" || app_secret.is_empty() {
         return;
     }
-    let hash = format!("{:x}", Sha256::digest(screen.as_bytes()));
+    let card_screen = card_viewport_text(screen);
+    let hash = format!("{:x}", Sha256::digest(card_screen.as_bytes()));
     {
         let guard = last_uploaded_hash.lock().await;
         if guard.as_deref() == Some(hash.as_str()) {
             return;
         }
     }
-    let png = match render_text_screenshot_png(screen) {
+    let png = match render_text_screenshot_png(&card_screen) {
         Ok(png) => png,
         Err(err) => {
             warn!("failed to render terminal screenshot: {err:#}");
@@ -1033,56 +1061,24 @@ pub async fn run(init: InitConfig) -> Result<()> {
         Some(prepare_wrapper(&init, &paths).await?)
     };
     let (mut backend_impl, attach_context): (Box<dyn SessionBackend>, &'static str) =
-        match init.backend_type {
-            BackendType::Tmux => {
-                let tmux = if let Some(target) = init
-                    .adopted_from
-                    .as_ref()
-                    .and_then(|adopted| adopted.tmux_target.clone())
-                {
-                    TmuxPipeBackend::attach_existing(target)
-                } else if init.resume {
-                    TmuxPipeBackend::attach_existing(session_name)
-                } else {
-                    TmuxPipeBackend::new(session_name)
-                };
-                (
-                    Box::new(tmux),
-                    if init.resume || init.adopted_from.is_some() {
-                        "attach"
-                    } else {
-                        "spawn"
-                    },
-                )
+        if let Some(adopted) = init.adopted_from.as_ref() {
+            if let Some(pane_id) = adopted.zellij_pane_id.clone() {
+                let session = adopted.zellij_session.clone().unwrap_or_else(|| {
+                    format!("bmx-{}", &init.session_id[..8.min(init.session_id.len())])
+                });
+                let observe = ZellijObserveBackend::new(
+                    session,
+                    pane_id,
+                    u32::try_from(adopted.original_cli_pid).ok(),
+                );
+                (Box::new(observe), "observe")
+            } else {
+                let zellij = ZellijBackend::new(session_name.clone());
+                (Box::new(zellij), "spawn")
             }
-            BackendType::Pty => (Box::new(PtyBackend::new()), "spawn"),
-            BackendType::Zellij => {
-                if let Some(adopted) = init.adopted_from.as_ref() {
-                    if let Some(pane_id) = adopted.zellij_pane_id.clone() {
-                        let session = adopted.zellij_session.clone().unwrap_or_else(|| {
-                            format!("bmx-{}", &init.session_id[..8.min(init.session_id.len())])
-                        });
-                        let observe = ZellijObserveBackend::new(
-                            session,
-                            pane_id,
-                            u32::try_from(adopted.original_cli_pid).ok(),
-                        );
-                        (Box::new(observe), "observe")
-                    } else {
-                        let zellij = ZellijBackend::new(format!(
-                            "bmx-{}",
-                            &init.session_id[..8.min(init.session_id.len())]
-                        ));
-                        (Box::new(zellij), "spawn")
-                    }
-                } else {
-                    let zellij = ZellijBackend::new(format!(
-                        "bmx-{}",
-                        &init.session_id[..8.min(init.session_id.len())]
-                    ));
-                    (Box::new(zellij), "spawn")
-                }
-            }
+        } else {
+            let zellij = ZellijBackend::new(session_name.clone());
+            (Box::new(zellij), "spawn")
         };
     let spawn_spec = adapter.lock().await.build_spawn_spec(&init);
     let args = if let Some(wrapper) = wrapper {
@@ -1100,8 +1096,8 @@ pub async fn run(init: InitConfig) -> Result<()> {
             &args.1,
             SpawnOpts {
                 cwd: init.working_dir.clone(),
-                cols: 160,
-                rows: 40,
+                cols: FALLBACK_TERMINAL_COLS,
+                rows: FALLBACK_TERMINAL_ROWS,
                 env: Vec::new(),
             },
         )
@@ -1125,20 +1121,11 @@ pub async fn run(init: InitConfig) -> Result<()> {
     let usage_limit_tracker = Arc::new(Mutex::new(UsageLimitTracker::default()));
     let current_turn_id = Arc::new(RwLock::new(String::new()));
     let (updates, _) = broadcast::channel::<String>(256);
-    let token = Uuid::new_v4().to_string();
-    let addr = serve(TerminalState {
-        backend: backend.clone(),
-        latest_screen: latest_screen.clone(),
-        token: token.clone(),
-        updates: updates.clone(),
-    })
-    .await?;
 
     send_message(
         &stdout,
         &WorkerToDaemon::Ready {
-            port: addr.port(),
-            token,
+            zellij_session: session_name.clone(),
         },
     )
     .await?;
@@ -1629,6 +1616,32 @@ mod tests {
     }
 
     #[test]
+    fn card_viewport_text_crops_to_card_dimensions() {
+        let screen = (0..40)
+            .map(|idx| format!("{idx:02}:{}", "x".repeat(140)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let cropped = card_viewport_text(&screen);
+        let lines: Vec<&str> = cropped.lines().collect();
+
+        assert_eq!(lines.len(), CARD_VIEWPORT_ROWS);
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.chars().count() <= CARD_VIEWPORT_COLS)
+        );
+    }
+
+    #[test]
+    fn card_viewport_text_strips_ansi_and_respects_fullwidth_cells() {
+        let screen = format!("\x1b[31m{}\x1b[0m", "好".repeat(80));
+        let cropped = card_viewport_text(&screen);
+
+        assert_eq!(cropped.chars().count(), CARD_VIEWPORT_COLS / 2);
+        assert!(!cropped.contains("\x1b[31m"));
+    }
+
+    #[test]
     fn term_action_keys_maps_supported_actions() {
         assert_eq!(term_action_keys(TermActionKey::Esc), vec!["Escape"]);
         assert_eq!(term_action_keys(TermActionKey::CtrlC), vec!["C-c"]);
@@ -1674,6 +1687,25 @@ mod tests {
         let png = render_text_screenshot_png("hello\nworld").expect("png rendered");
         assert!(png.starts_with(&[0x89, b'P', b'N', b'G']));
         assert!(png.len() > 64);
+    }
+
+    #[test]
+    fn render_text_screenshot_png_uses_card_viewport_input() {
+        let screen = card_viewport_text(
+            &(0..80)
+                .map(|_| "x".repeat(200))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let png = render_text_screenshot_png(&screen).expect("png rendered");
+        let image = image::load_from_memory(&png).expect("png should decode");
+        let expected_width =
+            ((CARD_VIEWPORT_COLS as f32 * CELL_W).ceil() as u32 + PADDING * 2).clamp(64, 2200);
+        let expected_height =
+            ((CARD_VIEWPORT_ROWS as f32 * CELL_H).ceil() as u32 + PADDING * 2).clamp(32, 2200);
+
+        assert_eq!(image.width(), expected_width);
+        assert_eq!(image.height(), expected_height);
     }
 
     #[test]

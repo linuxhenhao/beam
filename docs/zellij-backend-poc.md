@@ -1,5 +1,7 @@
 # zellij 后端 PoC（BACKEND_TYPE=zellij）
 
+English: [zellij-backend-poc.en.md](zellij-backend-poc.en.md)
+
 把 zellij 作为 tmux 之外的第三种会话后端，验证「能否对齐 beam 全部功能与体验」。
 
 ## 路线：PTY-under-zellij（B 路线）

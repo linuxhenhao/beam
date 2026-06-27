@@ -142,10 +142,7 @@ fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-pub fn create_webhook_secret(
-    paths: &BeamPaths,
-    plaintext: &str,
-) -> Result<WebhookSecretRecord> {
+pub fn create_webhook_secret(paths: &BeamPaths, plaintext: &str) -> Result<WebhookSecretRecord> {
     let ref_id = format!("whsec_{}", Uuid::new_v4().simple());
     set_webhook_secret(paths, &ref_id, plaintext)
 }

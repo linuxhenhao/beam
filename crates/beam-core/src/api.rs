@@ -2,7 +2,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    config::BackendType,
     ipc::{CliUsageLimitState, ScreenStatus},
     session::{AdoptedFrom, PendingResponseCardState, Session, SessionStatus},
 };
@@ -32,8 +31,6 @@ pub struct CreateSessionRequest {
     pub working_dir: String,
     #[serde(default)]
     pub prompt: String,
-    #[serde(default)]
-    pub backend_type: Option<BackendType>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -99,28 +96,12 @@ pub struct AttemptResumeEndResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AdoptTmuxSessionRequest {
-    pub title: Option<String>,
-    pub tmux_target: String,
-    pub cli_id: String,
-    pub cli_bin: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AdoptCandidate {
-    pub tmux_target: String,
-    pub session_name: String,
-    pub pane_id: String,
-    pub title: String,
-    pub cwd: String,
-    pub pid: i32,
-    pub cols: Option<u16>,
-    pub rows: Option<u16>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TerminalInfo {
     pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -133,10 +114,13 @@ pub struct SessionSummary {
     pub cli_id: Option<String>,
     pub cli_bin: Option<String>,
     pub cli_args: Vec<String>,
-    pub backend_type: BackendType,
     pub working_dir: Option<String>,
     pub worker_pid: Option<u32>,
     pub terminal_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_token: Option<String>,
     pub created_at: DateTime<Utc>,
     pub stream_card_nonce: Option<String>,
     pub current_screen: Option<String>,
@@ -169,7 +153,6 @@ pub struct BotSummary {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub oncall_chats: Vec<String>,
     pub private_card: bool,
-    pub backend_type: BackendType,
     pub active_sessions: usize,
 }
 
@@ -198,7 +181,6 @@ pub struct DaemonOverview {
 pub struct SessionLocateInfo {
     pub session_id: String,
     pub terminal_url: Option<String>,
-    pub web_port: Option<u16>,
     pub worker_pid: Option<u32>,
 }
 
@@ -213,10 +195,11 @@ impl From<&Session> for SessionSummary {
             cli_id: value.cli_id.clone(),
             cli_bin: value.cli_bin.clone(),
             cli_args: value.cli_args.clone(),
-            backend_type: value.backend_type.clone(),
             working_dir: value.working_dir.clone(),
             worker_pid: value.worker_pid,
             terminal_url: value.terminal_url.clone(),
+            read_only_token: None,
+            write_token: None,
             created_at: value.created_at,
             stream_card_nonce: value.stream_card_nonce.clone(),
             current_screen: value.current_screen.clone(),

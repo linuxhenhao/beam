@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use beam_core::{
-    BootstrapWorkflowRunInput, BeamPaths, EventDraft, EventLog, WorkflowActor,
+    BeamPaths, BootstrapWorkflowRunInput, EventDraft, EventLog, WorkflowActor,
     WorkflowEventEnvelope, bootstrap_workflow_run, infer_run_status, mint_workflow_run_id,
     read_run_events_pure, resume_schedule_dangling_effects,
 };

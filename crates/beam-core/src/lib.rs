@@ -5,6 +5,7 @@ pub mod i18n;
 pub mod ipc;
 pub mod paths;
 pub mod permissions;
+pub mod persist;
 pub mod schedule_parser;
 pub mod schedule_store;
 pub mod session;
@@ -23,16 +24,15 @@ pub mod workflow_sidecar;
 pub mod workflow_snapshot;
 
 pub use api::{
-    AdoptCandidate, AdoptTmuxSessionRequest, ApiHealth, AttemptResumeEndResponse,
-    AttemptResumeRequest, AttemptResumeStartResponse, BotSummary, CreateSessionRequest,
-    DaemonOverview, DaemonRuntimeState, FinalOutputRequest, RestartSessionRequest,
-    ResumeSessionRequest, SessionGroup, SessionInputRequest, SessionLocateInfo, SessionSummary,
-    TerminalInfo,
+    ApiHealth, AttemptResumeEndResponse, AttemptResumeRequest, AttemptResumeStartResponse,
+    BotSummary, CreateSessionRequest, DaemonOverview, DaemonRuntimeState, FinalOutputRequest,
+    RestartSessionRequest, ResumeSessionRequest, SessionGroup, SessionInputRequest,
+    SessionLocateInfo, SessionSummary, TerminalInfo,
 };
 pub use ask::{AskOption, AskQuestion, AskRequest, AskResult, legacy_selected};
 pub use config::{
-    BackendType, BotConfig, Config, DaemonConfig, LarkConfig, MessageQuotaConfig,
-    OncallChatBinding, QuotaEntry, ScreenAnalyzerConfig, WebConfig,
+    BotConfig, Config, DaemonConfig, LarkConfig, MessageQuotaConfig, OncallChatBinding, QuotaEntry,
+    ScreenAnalyzerConfig, WebConfig,
 };
 pub use ipc::{
     CliUsageLimitKind, CliUsageLimitState, DaemonToWorker, DisplayMode, FinalOutputKind,

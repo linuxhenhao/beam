@@ -234,10 +234,7 @@ pub fn create_task(
     Ok(task)
 }
 
-pub fn get_task(
-    paths: &BeamPaths,
-    id: &str,
-) -> Result<Option<ScheduledTask>, ScheduleStoreError> {
+pub fn get_task(paths: &BeamPaths, id: &str) -> Result<Option<ScheduledTask>, ScheduleStoreError> {
     let tasks = load_tasks(paths)?;
     Ok(tasks.get(id).cloned())
 }
@@ -324,9 +321,29 @@ pub fn mark_run(
         }
     }
 
-    if matches!(task.parsed.kind, ParsedScheduleKind::Once) {
-        task.enabled = false;
-        task.next_run_at = None;
+    // Compute next_run_at based on schedule kind.
+    let now = chrono::Utc::now();
+    match task.parsed.kind {
+        ParsedScheduleKind::Once => {
+            task.enabled = false;
+            task.next_run_at = None;
+        }
+        ParsedScheduleKind::Interval => {
+            if let Some(minutes) = task.parsed.minutes {
+                let next = now + chrono::Duration::minutes(minutes as i64);
+                task.next_run_at = Some(next.to_rfc3339_opts(SecondsFormat::Millis, true));
+            }
+        }
+        ParsedScheduleKind::Cron => {
+            // Cron next-run computation requires a cron library.
+            // For now, mark as unsupported to prevent repeated triggering.
+            task.enabled = false;
+            task.next_run_at = None;
+            task.last_error = Some(
+                "cron schedule auto-advance not supported; re-create the schedule to re-enable"
+                    .to_string(),
+            );
+        }
     }
 
     save_tasks(paths, &tasks)?;
@@ -351,9 +368,7 @@ pub fn append_output_log(
     Ok(path)
 }
 
-fn load_tasks(
-    paths: &BeamPaths,
-) -> Result<BTreeMap<String, ScheduledTask>, ScheduleStoreError> {
+fn load_tasks(paths: &BeamPaths) -> Result<BTreeMap<String, ScheduledTask>, ScheduleStoreError> {
     let path = paths.schedules_json();
     if !path.exists() {
         return Ok(BTreeMap::new());
@@ -624,6 +639,86 @@ mod tests {
         let _ = create_task(&paths, input).expect("create");
         mark_run(&paths, "wf_task", true, None, None).expect("mark run");
         assert!(get_task(&paths, "wf_task").expect("get").is_none());
+        let _ = std::fs::remove_dir_all(paths.root());
+    }
+
+    #[test]
+    fn mark_run_interval_advances_next_run_at() {
+        let paths = temp_paths("interval-advance");
+        let input = CreateTaskInput {
+            id: Some("int_task".to_string()),
+            name: "every 10 min".to_string(),
+            schedule: "every 10 min".to_string(),
+            parsed: ParsedSchedule {
+                kind: ParsedScheduleKind::Interval,
+                run_at: None,
+                minutes: Some(10),
+                expr: None,
+                display: "every 10 min".to_string(),
+            },
+            prompt: "interval test".to_string(),
+            working_dir: "/tmp".to_string(),
+            chat_id: "oc_test".to_string(),
+            root_message_id: None,
+            scope: Some("thread".to_string()),
+            chat_type: None,
+            lark_app_id: None,
+            creator_chat_id: None,
+            creator_root_message_id: None,
+            creator_lark_app_id: None,
+            next_run_at: Some("2026-01-01T00:00:00.000Z".to_string()),
+            repeat: None,
+            deliver: None,
+        };
+        let _ = create_task(&paths, input).expect("create");
+        mark_run(&paths, "int_task", true, None, None).expect("mark");
+        let task = get_task(&paths, "int_task")
+            .expect("get")
+            .expect("task exists");
+        assert!(task.enabled, "interval should stay enabled");
+        assert!(task.next_run_at.is_some(), "should have next_run_at");
+        // next_run_at should be in the future (> now)
+        let next = task.next_run_at.unwrap();
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        assert!(next > now, "next_run_at={} should be > now={}", next, now);
+        let _ = std::fs::remove_dir_all(paths.root());
+    }
+
+    #[test]
+    fn mark_run_once_disables() {
+        let paths = temp_paths("once-disable");
+        let input = CreateTaskInput {
+            id: Some("once_task".to_string()),
+            name: "run once".to_string(),
+            schedule: "once".to_string(),
+            parsed: ParsedSchedule {
+                kind: ParsedScheduleKind::Once,
+                run_at: None,
+                minutes: None,
+                expr: None,
+                display: "run once".to_string(),
+            },
+            prompt: "once test".to_string(),
+            working_dir: "/tmp".to_string(),
+            chat_id: "oc_test".to_string(),
+            root_message_id: None,
+            scope: Some("thread".to_string()),
+            chat_type: None,
+            lark_app_id: None,
+            creator_chat_id: None,
+            creator_root_message_id: None,
+            creator_lark_app_id: None,
+            next_run_at: Some("2026-01-01T00:00:00.000Z".to_string()),
+            repeat: None,
+            deliver: None,
+        };
+        let _ = create_task(&paths, input).expect("create");
+        mark_run(&paths, "once_task", true, None, None).expect("mark");
+        let task = get_task(&paths, "once_task")
+            .expect("get")
+            .expect("task exists");
+        assert!(!task.enabled, "once should be disabled after run");
+        assert!(task.next_run_at.is_none(), "once should clear next_run_at");
         let _ = std::fs::remove_dir_all(paths.root());
     }
 }

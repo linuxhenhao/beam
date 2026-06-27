@@ -587,6 +587,10 @@ conn.commit()
             Ok(())
         }
 
+        async fn cursor_position(&self) -> Result<Option<(u16, u16)>> {
+            Ok(None)
+        }
+
         fn subscribe(&self) -> tokio::sync::broadcast::Receiver<String> {
             let (tx, rx) = tokio::sync::broadcast::channel(1);
             drop(tx);
@@ -604,14 +608,13 @@ conn.commit()
             cli_id: "hermes".to_string(),
             cli_bin: "hermes".to_string(),
             cli_args: vec!["--test-flag".to_string()],
-            backend_type: beam_core::BackendType::Tmux,
+
             prompt: String::new(),
             resume: false,
             cli_session_id: Some("cli-session-1".to_string()),
             lark_app_id: "app".to_string(),
             lark_app_secret: "secret".to_string(),
             prompt_turn_id: None,
-            web_port: None,
             owner_open_id: None,
             adopted_from: None,
             adopt_restored_from_metadata: false,

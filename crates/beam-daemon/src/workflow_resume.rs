@@ -23,9 +23,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use beam_core::{
-    ActivityState, BeamPaths, EventDraft, EventLog, RunStatus, WorkflowActor, WorkflowNode,
-    WorkflowOutputRef, WorkflowEventEnvelope, event_seq_from_id,
-    ScheduleResumeResult, ScheduleResumeOutcome,
+    ActivityState, BeamPaths, EventDraft, EventLog, RunStatus, ScheduleResumeOutcome,
+    ScheduleResumeResult, WorkflowActor, WorkflowEventEnvelope, WorkflowNode, WorkflowOutputRef,
+    event_seq_from_id,
 };
 use chrono::Utc;
 use serde_json::Value;
@@ -37,8 +37,7 @@ use crate::{
     AppState, AttemptResumeEntry, AttemptResumeRequest, AttemptResumeSidecar,
     AttemptResumeWaitOutcome, FeishuResumeInput, FeishuResumeOutcome, FeishuResumeResult,
     FeishuTransientFailure, is_lark_message_withdrawn_error, is_retryable_feishu_resume_error,
-    lark_reply_message, lark_send_chat_message, sha256_hex, write_json_blob,
-    workflow_reconcilers,
+    lark_reply_message, lark_send_chat_message, sha256_hex, workflow_reconcilers, write_json_blob,
 };
 
 // ---------------------------------------------------------------------------
@@ -175,8 +174,7 @@ pub(crate) fn parse_attempt_resume_request_body(
     if body.is_empty() {
         return Ok(AttemptResumeRequest { reason: None });
     }
-    serde_json::from_slice(body)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "bad_json".to_string()))
+    serde_json::from_slice(body).map_err(|_| (StatusCode::BAD_REQUEST, "bad_json".to_string()))
 }
 
 pub(crate) async fn wait_for_attempt_resume_ready(
@@ -1079,7 +1077,8 @@ pub(crate) fn append_resume_worker_crashed(
         .attempts
         .last()
         .context("activity missing latest attempt")?;
-    if latest.effect_attempted.is_some() || latest.wait.is_some() || latest.cancel_request.is_some() {
+    if latest.effect_attempted.is_some() || latest.wait.is_some() || latest.cancel_request.is_some()
+    {
         return Ok(None);
     }
     let terminal_event = log.append(EventDraft {

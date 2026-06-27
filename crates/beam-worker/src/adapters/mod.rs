@@ -100,7 +100,7 @@ pub fn passes_initial_prompt_via_args(cli_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::create_adapter;
-    use beam_core::{BackendType, InitConfig, ScreenAnalyzerConfig};
+    use beam_core::{InitConfig, ScreenAnalyzerConfig};
 
     fn init(cli_id: &str) -> InitConfig {
         InitConfig {
@@ -112,14 +112,13 @@ mod tests {
             cli_id: cli_id.to_string(),
             cli_bin: cli_id.to_string(),
             cli_args: vec![],
-            backend_type: BackendType::Tmux,
+
             prompt: String::new(),
             resume: false,
             cli_session_id: None,
             lark_app_id: "app".to_string(),
             lark_app_secret: "secret".to_string(),
             prompt_turn_id: None,
-            web_port: None,
             owner_open_id: None,
             adopted_from: None,
             adopt_restored_from_metadata: false,

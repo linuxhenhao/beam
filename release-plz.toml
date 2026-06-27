@@ -2,10 +2,14 @@
 # Docs: https://release-plz.ieni.dev/docs/config
 #
 # Release flow (3 stages):
-#   Stage 1: push to main → release-plz PR created/updated with version bumps & changelog
-#   Stage 2: Release PR merged → release-plz creates git tag + GitHub Release (NO crates.io)
-#            → beam-cli-v* tag push triggers release.yml (binary build + upload to GitHub Release)
-#   Stage 3: stable beam-cli-v* tag push → publish.yml (crates.io publish, gated by production environment)
+#   Stage 1: push to main -> release-tag.yml runs `release-plz release`.
+#            When there are unpublished version bumps, it creates git tags and
+#            GitHub Releases (NO crates.io publish). Otherwise it is a no-op.
+#   Stage 2: release-pr.yml runs after Release Tag succeeds on main and runs
+#            `release-plz release-pr` to create/update the Release PR.
+#   Stage 3: beam-cli-v* tag push triggers release.yml (binary build/upload).
+#            Stable beam-cli-vX.Y.Z tags also trigger publish.yml
+#            (crates.io publish, gated by production environment).
 
 [workspace]
 # CRITICAL: crates.io publish is handled by .github/workflows/publish.yml

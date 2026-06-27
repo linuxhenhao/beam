@@ -32,11 +32,7 @@ use crate::{AppState, BotConfig};
 pub trait ApprovalCardSender: Send + Sync {
     /// Send a card to the given chat.
     /// Returns the message_id on success.
-    async fn send_card(
-        &self,
-        chat_id: &str,
-        card_json: &str,
-    ) -> Result<String>;
+    async fn send_card(&self, chat_id: &str, card_json: &str) -> Result<String>;
 }
 
 /// Real Lark-based sender.
@@ -78,9 +74,7 @@ impl ApprovalCardSentMarker {
                     .with_context(|| format!("failed to parse {:?}", path))?;
                 Ok(marker)
             }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                Ok(Self::default())
-            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(err) => Err(err).with_context(|| format!("failed to read {:?}", path)),
         }
     }
@@ -99,12 +93,12 @@ impl ApprovalCardSentMarker {
     }
 
     fn is_sent(&self, activity_id: &str, attempt_id: &str) -> bool {
-        self.sent.contains(&format!("{}::{}", activity_id, attempt_id))
+        self.sent
+            .contains(&format!("{}::{}", activity_id, attempt_id))
     }
 
     fn mark_sent(&mut self, activity_id: &str, attempt_id: &str) {
-        self.sent
-            .insert(format!("{}::{}", activity_id, attempt_id));
+        self.sent.insert(format!("{}::{}", activity_id, attempt_id));
     }
 }
 
@@ -399,10 +393,7 @@ pub(crate) async fn fanout_approval_cards_if_needed<S: ApprovalCardSender>(
 /// Convenience wrapper that creates a `LarkCardSender` from `AppState` + bot
 /// config and fans out approval cards.  This is the primary entry point called
 /// from the runtime driver.
-pub(crate) async fn fanout_with_lark_sender(
-    state: &AppState,
-    run_id: &str,
-) -> usize {
+pub(crate) async fn fanout_with_lark_sender(state: &AppState, run_id: &str) -> usize {
     // Resolve the bot from the run's chat binding.
     let run_dir = state.paths.workflow_run_dir(run_id);
     let binding_path = run_dir.join("chat-binding.json");
@@ -425,10 +416,7 @@ pub(crate) async fn fanout_with_lark_sender(
         None => return 0,
     };
 
-    let sender = LarkCardSender {
-        state,
-        bot: &bot,
-    };
+    let sender = LarkCardSender { state, bot: &bot };
     fanout_approval_cards_if_needed(state, run_id, &sender).await
 }
 
@@ -465,9 +453,7 @@ mod tests {
             started_at: chrono::Utc::now(),
             sessions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             workers: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-            attempt_resumes: Arc::new(tokio::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
+            attempt_resumes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             shutdown: Arc::new(tokio::sync::Mutex::new(Some(_shutdown_tx))),
             options: crate::RunOptions {
                 worker_exe: std::path::PathBuf::from("/bin/true"),
@@ -476,27 +462,17 @@ mod tests {
             config: beam_core::Config::default(),
             bots: Arc::new(std::collections::HashMap::new()),
             lark_tokens: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-            chat_mode_cache: Arc::new(tokio::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
-            recent_lark_events: Arc::new(tokio::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
+            chat_mode_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            recent_lark_events: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             inflight_final_output_turns: Arc::new(tokio::sync::Mutex::new(
                 std::collections::HashSet::new(),
             )),
             workflow_progress_cards: Arc::new(tokio::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
-            ask_pending: Arc::new(tokio::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
-            grant_pending: Arc::new(tokio::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
-            pending_creates: Arc::new(tokio::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
+            ask_pending: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            grant_pending: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            pending_creates: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             dashboard_token: Arc::new(tokio::sync::Mutex::new(None)),
             external_host: "localhost".to_string(),
         }
@@ -568,7 +544,10 @@ mod tests {
         let sent = fanout_approval_cards_if_needed(&state, run_id, &mock).await;
 
         assert_eq!(sent, 1, "expected one card to be sent");
-        assert!(mock.call_count() >= 1, "mock sender should have been called");
+        assert!(
+            mock.call_count() >= 1,
+            "mock sender should have been called"
+        );
 
         // Verify the marker was persisted.
         let marker = ApprovalCardSentMarker::load(&paths.workflow_run_dir(run_id))
@@ -620,7 +599,11 @@ mod tests {
         // Second fanout — should NOT send (idempotent).
         let sent2 = fanout_approval_cards_if_needed(&state, run_id, &mock).await;
         assert_eq!(sent2, 0, "second fanout should not re-send");
-        assert_eq!(mock.call_count(), 1, "mock should have been called only once");
+        assert_eq!(
+            mock.call_count(),
+            1,
+            "mock should have been called only once"
+        );
 
         let _ = std::fs::remove_dir_all(paths.root());
     }
@@ -876,15 +859,9 @@ mod tests {
         assert_eq!(approve["value"]["activity_id"].as_str().unwrap(), "act-1");
         assert_eq!(approve["value"]["attempt_id"].as_str().unwrap(), "att-1");
         assert_eq!(approve["value"]["card_nonce"].as_str().unwrap(), "nonce-1");
-        assert_eq!(
-            approve["value"]["workflow_id"].as_str().unwrap(),
-            "flow-a"
-        );
+        assert_eq!(approve["value"]["workflow_id"].as_str().unwrap(), "flow-a");
         assert_eq!(approve["value"]["revision_id"].as_str().unwrap(), "rev-9");
-        assert_eq!(
-            approve["value"]["node_id"].as_str().unwrap(),
-            "node-gate"
-        );
+        assert_eq!(approve["value"]["node_id"].as_str().unwrap(), "node-gate");
 
         // Second button: reject.
         let reject = &actions[1];
@@ -924,8 +901,7 @@ mod tests {
     #[test]
     fn approval_card_omits_dashboard_button_when_url_is_none() {
         let card = build_approval_card(
-            "run-2", "flow-b", "rev-1", "node-x", "act-2", "att-2", "nonce-2",
-            None,
+            "run-2", "flow-b", "rev-1", "node-x", "act-2", "att-2", "nonce-2", None,
             None, // no dashboard url
         );
 
@@ -944,9 +920,7 @@ mod tests {
         let run_dir = paths.workflow_run_dir("run-marker");
         tokio::fs::create_dir_all(&run_dir).await.unwrap();
 
-        let mut marker1 = ApprovalCardSentMarker::load(&run_dir)
-            .await
-            .expect("load");
+        let mut marker1 = ApprovalCardSentMarker::load(&run_dir).await.expect("load");
         assert!(marker1.sent.is_empty());
 
         marker1.mark_sent("act-1", "att-1");
