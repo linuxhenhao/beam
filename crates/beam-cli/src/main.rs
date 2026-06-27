@@ -50,6 +50,8 @@ enum Command {
     Send {
         content: Option<String>,
     },
+    History(HistoryArgs),
+    Quoted(QuotedArgs),
     Bots {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -163,6 +165,23 @@ struct SessionInputArgs {
 }
 
 #[derive(Debug, Args)]
+struct HistoryArgs {
+    #[arg(long, default_value_t = 50)]
+    limit: usize,
+    #[arg(long, default_value = "session")]
+    scope: String,
+    #[arg(long)]
+    session_id: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct QuotedArgs {
+    message_id: String,
+    #[arg(long)]
+    session_id: Option<String>,
+}
+
+#[derive(Debug, Args)]
 struct WorkerArgs {
     #[arg(long)]
     init_path: PathBuf,
@@ -202,6 +221,17 @@ fn discover_session_id(paths: &BeamPaths) -> Result<String> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     discover_session_id_from_pid(paths, std::process::id(), env_session_id.as_deref())
+}
+
+fn resolve_cli_session_id(paths: &BeamPaths, explicit: Option<String>) -> Result<String> {
+    match explicit {
+        Some(value) if !value.trim().is_empty() => Ok(value.trim().to_string()),
+        _ => discover_session_id(paths).map_err(|_| {
+            anyhow::anyhow!(
+                "无法推断 session-id。请在 beam 会话里的 CLI 中运行，或传 --session-id <id>。"
+            )
+        }),
+    }
 }
 
 fn discover_session_id_from_pid(
@@ -1197,6 +1227,39 @@ async fn main() -> Result<()> {
                         bail!("{}", resp.text().await.unwrap_or_default());
                     }
                     println!("final output accepted");
+                }
+                Command::History(args) => {
+                    let session_id = resolve_cli_session_id(&paths, args.session_id)?;
+                    let (client, base) = api_client(&paths).await?;
+                    let resp = client
+                        .get(format!("{}/sessions/{}/history", base, session_id))
+                        .query(&[
+                            ("limit", args.limit.to_string()),
+                            ("scope", args.scope.clone()),
+                        ])
+                        .send()
+                        .await?;
+                    if !resp.status().is_success() {
+                        bail!("{}", resp.text().await.unwrap_or_default());
+                    }
+                    let out: serde_json::Value = resp.json().await?;
+                    println!("{}", serde_json::to_string_pretty(&out)?);
+                }
+                Command::Quoted(args) => {
+                    let session_id = resolve_cli_session_id(&paths, args.session_id)?;
+                    let (client, base) = api_client(&paths).await?;
+                    let resp = client
+                        .get(format!(
+                            "{}/sessions/{}/quoted/{}",
+                            base, session_id, args.message_id
+                        ))
+                        .send()
+                        .await?;
+                    if !resp.status().is_success() {
+                        bail!("{}", resp.text().await.unwrap_or_default());
+                    }
+                    let out: serde_json::Value = resp.json().await?;
+                    println!("{}", serde_json::to_string_pretty(&out)?);
                 }
                 Command::Bots { args } => cmd_bots(args, &paths)?,
                 Command::Session { command } => {

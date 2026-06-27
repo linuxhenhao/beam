@@ -815,6 +815,39 @@ struct FrozenCard {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct LarkHistoryMessage {
+    #[serde(rename = "messageId")]
+    message_id: String,
+    #[serde(rename = "rootId", skip_serializing_if = "Option::is_none")]
+    root_id: Option<String>,
+    #[serde(rename = "threadId", skip_serializing_if = "Option::is_none")]
+    thread_id: Option<String>,
+    #[serde(rename = "chatId", skip_serializing_if = "Option::is_none")]
+    chat_id: Option<String>,
+    #[serde(rename = "senderId", skip_serializing_if = "Option::is_none")]
+    sender_id: Option<String>,
+    #[serde(rename = "senderType", skip_serializing_if = "Option::is_none")]
+    sender_type: Option<String>,
+    #[serde(rename = "msgType")]
+    msg_type: String,
+    content: String,
+    #[serde(rename = "createTime", skip_serializing_if = "Option::is_none")]
+    create_time: Option<i64>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct LarkHistoryQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+const LARK_HISTORY_DEFAULT_LIMIT: usize = 50;
+const LARK_HISTORY_MAX_LIMIT: usize = 200;
+const LARK_MESSAGE_LIST_MAX_PAGE: usize = 50;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 struct PendingResponsePatchMarker {
     session_id: String,
     card_id: String,
@@ -6024,6 +6057,434 @@ async fn get_session(
         .get(&session_id)
         .ok_or_else(|| (StatusCode::NOT_FOUND, "session not found".to_string()))?;
     Ok(Json(SessionSummary::from(session)))
+}
+
+fn clamp_lark_history_limit(limit: Option<usize>) -> usize {
+    limit
+        .unwrap_or(LARK_HISTORY_DEFAULT_LIMIT)
+        .clamp(1, LARK_HISTORY_MAX_LIMIT)
+}
+
+fn looks_like_lark_message_id(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty() && !trimmed.starts_with("omt_")
+}
+
+fn effective_history_scope(
+    session: &Session,
+    requested: Option<&str>,
+) -> Result<&'static str, (StatusCode, String)> {
+    let requested = requested.unwrap_or("session").trim();
+    let requested = if requested.is_empty() {
+        "session"
+    } else {
+        requested
+    };
+    let effective = match requested {
+        "session" => match session.scope {
+            SessionScope::Chat => "chat",
+            SessionScope::Thread => "thread",
+        },
+        "thread" => "thread",
+        "chat" => "chat",
+        "ambient" => "ambient",
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("invalid scope: {other}; expected session|thread|chat|ambient"),
+            ));
+        }
+    };
+    if session.scope == SessionScope::Chat && matches!(effective, "thread" | "ambient") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "current session is chat-scope; use --scope chat".to_string(),
+        ));
+    }
+    Ok(effective)
+}
+
+fn parse_lark_history_message(item: &Value) -> LarkHistoryMessage {
+    let msg_type = item
+        .get("msg_type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let raw_content = item
+        .pointer("/body/content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let content = render_lark_message_content(&msg_type, raw_content);
+    let sender = item.get("sender");
+    LarkHistoryMessage {
+        message_id: item
+            .get("message_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        root_id: item
+            .get("root_id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        thread_id: item
+            .get("thread_id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        chat_id: item
+            .get("chat_id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        sender_id: sender
+            .and_then(|s| s.get("id"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        sender_type: sender
+            .and_then(|s| s.get("sender_type"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        msg_type,
+        content,
+        create_time: item
+            .get("create_time")
+            .and_then(Value::as_str)
+            .and_then(|v| v.parse::<i64>().ok()),
+    }
+}
+
+fn render_lark_message_content(msg_type: &str, raw_content: &str) -> String {
+    if raw_content.trim().is_empty() {
+        return String::new();
+    }
+    let Ok(value) = serde_json::from_str::<Value>(raw_content) else {
+        return raw_content.to_string();
+    };
+    match msg_type {
+        "text" => value
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or(raw_content)
+            .to_string(),
+        "post" => value
+            .get("content")
+            .map(render_lark_post_content)
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or_else(|| raw_content.to_string()),
+        "interactive" => value
+            .get("elements")
+            .or_else(|| value.get("body").and_then(|body| body.get("elements")))
+            .map(render_lark_post_content)
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or_else(|| value.to_string()),
+        _ => value.to_string(),
+    }
+}
+
+fn render_lark_post_content(value: &Value) -> String {
+    fn collect(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::String(text) => {
+                if !text.trim().is_empty() {
+                    out.push(text.to_string());
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    collect(item, out);
+                }
+            }
+            Value::Object(map) => {
+                for key in ["text", "content"] {
+                    if let Some(child) = map.get(key) {
+                        collect(child, out);
+                    }
+                }
+                for key in ["elements", "fields", "columns"] {
+                    if let Some(child) = map.get(key) {
+                        collect(child, out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut parts = Vec::new();
+    collect(value, &mut parts);
+    parts.join(" ")
+}
+
+async fn lark_get_json(
+    state: &AppState,
+    bot: &BotConfig,
+    path: &str,
+    query: &[(&str, String)],
+) -> Result<Value> {
+    let token = lark_tenant_token(state, bot).await?;
+    let resp = state
+        .http
+        .get(format!("{}{}", lark_base_url(), path))
+        .bearer_auth(token)
+        .query(query)
+        .send()
+        .await?;
+    let status = resp.status();
+    let payload = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("lark get failed: {}", payload);
+    }
+    let value: Value = serde_json::from_str(&payload).unwrap_or(Value::Null);
+    if value.get("code").and_then(Value::as_i64).unwrap_or(0) != 0 {
+        anyhow::bail!(
+            "lark get failed: {} (code: {})",
+            value
+                .get("msg")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+            value.get("code").and_then(Value::as_i64).unwrap_or(-1)
+        );
+    }
+    Ok(value)
+}
+
+async fn lark_get_message_detail(
+    state: &AppState,
+    bot: &BotConfig,
+    message_id: &str,
+    user_card_content: bool,
+) -> Result<Value> {
+    let mut query = Vec::new();
+    if user_card_content {
+        query.push(("card_msg_content_type", "user_card_content".to_string()));
+    }
+    lark_get_json(state, bot, &format!("/im/v1/messages/{message_id}"), &query).await
+}
+
+async fn resolve_lark_thread_id(
+    state: &AppState,
+    bot: &BotConfig,
+    root_message_id: &str,
+) -> Result<Option<String>> {
+    if !looks_like_lark_message_id(root_message_id) {
+        return Ok(None);
+    }
+    let detail = lark_get_message_detail(state, bot, root_message_id, false).await?;
+    Ok(detail
+        .pointer("/data/items/0/thread_id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned))
+}
+
+async fn lark_list_messages(
+    state: &AppState,
+    bot: &BotConfig,
+    container_type: &str,
+    container_id: &str,
+    limit: usize,
+    sort_type: &str,
+) -> Result<Vec<Value>> {
+    let mut items = Vec::new();
+    let mut page_token: Option<String> = None;
+    while items.len() < limit {
+        let remaining = limit - items.len();
+        let mut query = vec![
+            ("container_id_type", container_type.to_string()),
+            ("container_id", container_id.to_string()),
+            (
+                "page_size",
+                remaining.min(LARK_MESSAGE_LIST_MAX_PAGE).to_string(),
+            ),
+            ("sort_type", sort_type.to_string()),
+        ];
+        if let Some(token) = page_token.as_ref() {
+            query.push(("page_token", token.clone()));
+        }
+        let value = lark_get_json(state, bot, "/im/v1/messages", &query).await?;
+        if let Some(page_items) = value.pointer("/data/items").and_then(Value::as_array) {
+            items.extend(page_items.iter().cloned());
+        }
+        page_token = value
+            .pointer("/data/page_token")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        if page_token.as_deref().unwrap_or("").is_empty() {
+            break;
+        }
+    }
+    items.truncate(limit);
+    Ok(items)
+}
+
+async fn lark_list_chat_history(
+    state: &AppState,
+    bot: &BotConfig,
+    chat_id: &str,
+    limit: usize,
+) -> Result<Vec<Value>> {
+    let mut items =
+        lark_list_messages(state, bot, "chat", chat_id, limit, "ByCreateTimeDesc").await?;
+    items.reverse();
+    Ok(items)
+}
+
+async fn lark_list_thread_history(
+    state: &AppState,
+    bot: &BotConfig,
+    session: &Session,
+    limit: usize,
+) -> Result<Vec<Value>> {
+    if let Some(thread_id) = session
+        .thread_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        return lark_list_messages(state, bot, "thread", thread_id, limit, "ByCreateTimeAsc").await;
+    }
+    if let Some(thread_id) = resolve_lark_thread_id(state, bot, &session.root_message_id).await? {
+        return lark_list_messages(state, bot, "thread", &thread_id, limit, "ByCreateTimeAsc")
+            .await;
+    }
+    if !looks_like_lark_message_id(&session.root_message_id) {
+        anyhow::bail!("thread history requires session.thread_id or a root message id");
+    }
+    let scan_limit = (limit * 4).max(50).min(LARK_HISTORY_MAX_LIMIT);
+    let scanned = lark_list_chat_history(state, bot, &session.chat_id, scan_limit).await?;
+    Ok(scanned
+        .into_iter()
+        .filter(|item| {
+            item.get("message_id").and_then(Value::as_str) == Some(session.root_message_id.as_str())
+                || item.get("root_id").and_then(Value::as_str)
+                    == Some(session.root_message_id.as_str())
+        })
+        .rev()
+        .take(limit)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect())
+}
+
+async fn lark_list_ambient_history(
+    state: &AppState,
+    bot: &BotConfig,
+    session: &Session,
+    limit: usize,
+) -> Result<Vec<Value>> {
+    let scan_limit = (limit * 4).max(50).min(LARK_HISTORY_MAX_LIMIT);
+    let before_ms = if looks_like_lark_message_id(&session.root_message_id) {
+        lark_get_message_detail(state, bot, &session.root_message_id, false)
+            .await
+            .ok()
+            .and_then(|detail| {
+                detail
+                    .pointer("/data/items/0/create_time")
+                    .and_then(Value::as_str)
+                    .and_then(|v| v.parse::<i64>().ok())
+            })
+    } else {
+        None
+    };
+    let root = session.root_message_id.as_str();
+    let thread = session.thread_id.as_deref();
+    let filtered = lark_list_chat_history(state, bot, &session.chat_id, scan_limit)
+        .await?
+        .into_iter()
+        .filter(|item| {
+            if item.get("message_id").and_then(Value::as_str) == Some(root)
+                || item.get("root_id").and_then(Value::as_str) == Some(root)
+            {
+                return false;
+            }
+            if thread.is_some() && item.get("thread_id").and_then(Value::as_str) == thread {
+                return false;
+            }
+            if let Some(before_ms) = before_ms {
+                if item
+                    .get("create_time")
+                    .and_then(Value::as_str)
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .is_some_and(|created| created >= before_ms)
+                {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect::<Vec<_>>();
+    Ok(filtered
+        .into_iter()
+        .rev()
+        .take(limit)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect())
+}
+
+async fn session_history(
+    State(state): State<AppState>,
+    AxumPath(session_id): AxumPath<String>,
+    Query(query): Query<LarkHistoryQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let limit = clamp_lark_history_limit(query.limit);
+    let session = {
+        let sessions = state.sessions.lock().await;
+        sessions
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "session not found".to_string()))?
+    };
+    let scope = effective_history_scope(&session, query.scope.as_deref())?;
+    let bot = state
+        .bots
+        .get(&session.lark_app_id)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "session bot not found".to_string()))?;
+    let raw = match scope {
+        "chat" => lark_list_chat_history(&state, bot, &session.chat_id, limit).await,
+        "thread" => lark_list_thread_history(&state, bot, &session, limit).await,
+        "ambient" => lark_list_ambient_history(&state, bot, &session, limit).await,
+        _ => unreachable!(),
+    }
+    .map_err(internal_error)?;
+    let messages = raw
+        .iter()
+        .map(parse_lark_history_message)
+        .collect::<Vec<_>>();
+    Ok(Json(serde_json::json!({
+        "sessionId": session.session_id,
+        "chatId": session.chat_id,
+        "scope": scope,
+        "sessionScope": match session.scope { SessionScope::Chat => "chat", SessionScope::Thread => "thread" },
+        "rootMessageId": session.root_message_id,
+        "threadId": session.thread_id,
+        "messages": messages,
+        "total": messages.len(),
+    })))
+}
+
+async fn quoted_message(
+    State(state): State<AppState>,
+    AxumPath((session_id, message_id)): AxumPath<(String, String)>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let session = {
+        let sessions = state.sessions.lock().await;
+        sessions
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "session not found".to_string()))?
+    };
+    let bot = state
+        .bots
+        .get(&session.lark_app_id)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "session bot not found".to_string()))?;
+    let detail = lark_get_message_detail(&state, bot, &message_id, true)
+        .await
+        .map_err(internal_error)?;
+    let item = detail
+        .pointer("/data/items/0")
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "message not found".to_string()))?;
+    Ok(Json(serde_json::json!({
+        "sessionId": session.session_id,
+        "message": parse_lark_history_message(item),
+    })))
 }
 
 async fn handle_lark_event(
@@ -12321,6 +12782,11 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         .route("/lark/cards/{app_id}", post(handle_lark_card_action))
         .route("/api/schedules", post(create_schedule))
         .route("/webhook/{workflow_id}", post(handle_webhook_trigger))
+        .route("/sessions/{session_id}/history", get(session_history))
+        .route(
+            "/sessions/{session_id}/quoted/{message_id}",
+            get(quoted_message),
+        )
         .route("/sessions/{session_id}/final-output", post(final_output));
 
     // Start zellij web server and ensure tokens
@@ -12491,7 +12957,7 @@ mod tests {
         Json as AxumJson, Router,
         extract::Path as AxumPath,
         extract::Query as AxumQuery,
-        routing::{get, patch, post},
+        routing::{get, post},
     };
     use beam_core::{
         BootstrapWorkflowRunInput, WorkflowDispatchOutcome, WorkflowDispatchRun,
@@ -12562,7 +13028,26 @@ mod tests {
             )
             .route(
                 "/im/v1/messages/{message_id}",
-                patch(|AxumPath(_message_id): AxumPath<String>| async {
+                get(|AxumPath(message_id): AxumPath<String>| async move {
+                    let thread_id = if message_id == "om_root_thread" {
+                        "omt_mock_thread"
+                    } else {
+                        "omt_detail_thread"
+                    };
+                    AxumJson(serde_json::json!({
+                        "code": 0,
+                        "data": { "items": [{
+                            "message_id": message_id,
+                            "chat_id": "chat-1",
+                            "thread_id": thread_id,
+                            "msg_type": "text",
+                            "body": { "content": serde_json::json!({ "text": "quoted detail" }).to_string() },
+                            "sender": { "id": "ou_detail", "sender_type": "user" },
+                            "create_time": "1000",
+                        }] }
+                    }))
+                })
+                .patch(|AxumPath(_message_id): AxumPath<String>| async {
                     AxumJson(serde_json::json!({ "code": 0 }))
                 }),
             )
@@ -12594,7 +13079,54 @@ mod tests {
             )
             .route(
                 "/im/v1/messages",
-                post(
+                get(|AxumQuery(params): AxumQuery<HashMap<String, String>>| async move {
+                    let items = match params.get("container_id_type").map(String::as_str) {
+                        Some("thread") => vec![
+                            serde_json::json!({
+                                "message_id": "om_thread_1",
+                                "chat_id": "chat-1",
+                                "thread_id": params.get("container_id").cloned().unwrap_or_default(),
+                                "msg_type": "text",
+                                "body": { "content": serde_json::json!({ "text": "thread one" }).to_string() },
+                                "sender": { "id": "ou_a", "sender_type": "user" },
+                                "create_time": "1000",
+                            }),
+                            serde_json::json!({
+                                "message_id": "om_thread_2",
+                                "chat_id": "chat-1",
+                                "root_id": "om_root_thread",
+                                "thread_id": params.get("container_id").cloned().unwrap_or_default(),
+                                "msg_type": "text",
+                                "body": { "content": serde_json::json!({ "text": "thread two" }).to_string() },
+                                "sender": { "id": "ou_b", "sender_type": "user" },
+                                "create_time": "2000",
+                            }),
+                        ],
+                        _ => vec![
+                            serde_json::json!({
+                                "message_id": "om_chat_new",
+                                "chat_id": "chat-1",
+                                "msg_type": "text",
+                                "body": { "content": serde_json::json!({ "text": "chat newest" }).to_string() },
+                                "sender": { "id": "ou_c", "sender_type": "user" },
+                                "create_time": "3000",
+                            }),
+                            serde_json::json!({
+                                "message_id": "om_chat_old",
+                                "chat_id": "chat-1",
+                                "msg_type": "text",
+                                "body": { "content": serde_json::json!({ "text": "chat oldest" }).to_string() },
+                                "sender": { "id": "ou_d", "sender_type": "user" },
+                                "create_time": "2000",
+                            }),
+                        ],
+                    };
+                    AxumJson(serde_json::json!({
+                        "code": 0,
+                        "data": { "items": items, "page_token": "" },
+                    }))
+                })
+                .post(
                     |AxumQuery(_params): AxumQuery<HashMap<String, String>>,
                      AxumJson(_body): AxumJson<serde_json::Value>| async {
                         AxumJson(serde_json::json!({
@@ -12739,6 +13271,29 @@ mod tests {
         }
     }
 
+    fn make_bot(app_id: &str) -> BotConfig {
+        BotConfig {
+            name: None,
+            lark_app_id: app_id.to_string(),
+            lark_app_secret: "secret".to_string(),
+            cli_id: "codex".to_string(),
+            cli_bin: None,
+            model: None,
+            working_dir: None,
+            lark_encrypt_key: None,
+            lark_verification_token: None,
+            allowed_users: Vec::new(),
+            private_card: false,
+            allowed_chat_groups: Vec::new(),
+            chat_grants: std::collections::HashMap::new(),
+            global_grants: Vec::new(),
+            oncall_chats: Vec::new(),
+            restrict_grant_commands: false,
+            message_quota: None,
+            quota_state: std::collections::HashMap::new(),
+        }
+    }
+
     fn make_state(paths: BeamPaths, bots: HashMap<String, BotConfig>) -> AppState {
         let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel();
         AppState {
@@ -12766,6 +13321,192 @@ mod tests {
             external_host: "localhost".to_string(),
         }
     }
+
+    #[test]
+    fn effective_history_scope_defaults_from_session_scope() {
+        let mut session = make_session("scope-thread");
+        session.scope = SessionScope::Thread;
+        assert_eq!(effective_history_scope(&session, None).unwrap(), "thread");
+        assert_eq!(
+            effective_history_scope(&session, Some("ambient")).unwrap(),
+            "ambient"
+        );
+
+        session.scope = SessionScope::Chat;
+        assert_eq!(effective_history_scope(&session, None).unwrap(), "chat");
+        assert!(effective_history_scope(&session, Some("thread")).is_err());
+        assert!(effective_history_scope(&session, Some("bad")).is_err());
+    }
+
+    #[test]
+    fn parses_lark_history_text_and_post_content() {
+        let item = serde_json::json!({
+            "message_id": "om_1",
+            "root_id": "om_root",
+            "thread_id": "omt_1",
+            "chat_id": "oc_1",
+            "msg_type": "post",
+            "body": {
+                "content": serde_json::json!({
+                    "content": [[
+                        { "tag": "text", "text": "hello" },
+                        { "tag": "a", "text": "link" }
+                    ]]
+                }).to_string()
+            },
+            "sender": { "id": "ou_1", "sender_type": "user" },
+            "create_time": "1234"
+        });
+        let parsed = parse_lark_history_message(&item);
+        assert_eq!(parsed.message_id, "om_1");
+        assert_eq!(parsed.root_id.as_deref(), Some("om_root"));
+        assert_eq!(parsed.content, "hello link");
+        assert_eq!(parsed.create_time, Some(1234));
+    }
+
+    #[tokio::test]
+    async fn list_chat_history_returns_chronological_tail() {
+        let _env_lock = lark_base_url_env_lock().lock().expect("lark env lock");
+        let base_url = start_mock_lark_server().await;
+        let _env_guard = LarkBaseUrlEnvGuard::set(&base_url);
+        let app_id = "app-history-chat";
+        let bot = make_bot(app_id);
+        let state = make_state(
+            temp_paths("history-chat"),
+            HashMap::from([(app_id.to_string(), bot.clone())]),
+        );
+
+        let raw = lark_list_chat_history(&state, &bot, "chat-1", 10)
+            .await
+            .expect("chat history");
+        let messages = raw
+            .iter()
+            .map(parse_lark_history_message)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["chat oldest", "chat newest"]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_thread_history_uses_session_thread_id_first() {
+        let _env_lock = lark_base_url_env_lock().lock().expect("lark env lock");
+        let base_url = start_mock_lark_server().await;
+        let _env_guard = LarkBaseUrlEnvGuard::set(&base_url);
+        let app_id = "app-history-thread";
+        let bot = make_bot(app_id);
+        let state = make_state(
+            temp_paths("history-thread"),
+            HashMap::from([(app_id.to_string(), bot.clone())]),
+        );
+        let mut session = make_session("sess-history-thread");
+        session.lark_app_id = app_id.to_string();
+        session.root_message_id = "omt_not_a_message".to_string();
+        session.thread_id = Some("omt_direct_thread".to_string());
+
+        let raw = lark_list_thread_history(&state, &bot, &session, 10)
+            .await
+            .expect("thread history");
+        let messages = raw
+            .iter()
+            .map(parse_lark_history_message)
+            .collect::<Vec<_>>();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].thread_id.as_deref(), Some("omt_direct_thread"));
+        assert_eq!(messages[0].content, "thread one");
+    }
+
+    #[tokio::test]
+    async fn quoted_message_api_fetches_message_detail() {
+        let _env_lock = lark_base_url_env_lock().lock().expect("lark env lock");
+        let base_url = start_mock_lark_server().await;
+        let _env_guard = LarkBaseUrlEnvGuard::set(&base_url);
+        let app_id = "app-quoted";
+        let state = make_state(
+            temp_paths("quoted"),
+            HashMap::from([(app_id.to_string(), make_bot(app_id))]),
+        );
+        let mut session = make_session("sess-quoted");
+        session.lark_app_id = app_id.to_string();
+        {
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert(session.session_id.clone(), session.clone());
+        }
+
+        let Json(value) = quoted_message(
+            State(state),
+            AxumPath((session.session_id.clone(), "om_quoted".to_string())),
+        )
+        .await
+        .expect("quoted message");
+        assert_eq!(
+            value.pointer("/message/messageId").and_then(Value::as_str),
+            Some("om_quoted")
+        );
+        assert_eq!(
+            value.pointer("/message/content").and_then(Value::as_str),
+            Some("quoted detail")
+        );
+    }
+
+    #[tokio::test]
+    async fn quoted_message_api_errors_when_session_missing() {
+        let app_id = "app-quoted-missing";
+        let state = make_state(
+            temp_paths("quoted-missing"),
+            HashMap::from([(app_id.to_string(), make_bot(app_id))]),
+        );
+
+        let err = quoted_message(
+            State(state),
+            AxumPath(("missing-session".to_string(), "om_quoted".to_string())),
+        )
+        .await
+        .expect_err("missing session should fail");
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn session_history_api_returns_session_scoped_messages() {
+        let _env_lock = lark_base_url_env_lock().lock().expect("lark env lock");
+        let base_url = start_mock_lark_server().await;
+        let _env_guard = LarkBaseUrlEnvGuard::set(&base_url);
+        let app_id = "app-history-api";
+        let state = make_state(
+            temp_paths("history-api"),
+            HashMap::from([(app_id.to_string(), make_bot(app_id))]),
+        );
+        let mut session = make_session("sess-history-api");
+        session.lark_app_id = app_id.to_string();
+        session.scope = SessionScope::Chat;
+        session.status = SessionStatus::Active;
+        {
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert(session.session_id.clone(), session.clone());
+        }
+
+        let Json(value) = session_history(
+            State(state),
+            AxumPath(session.session_id.clone()),
+            Query(LarkHistoryQuery {
+                limit: Some(10),
+                scope: Some("session".to_string()),
+            }),
+        )
+        .await
+        .expect("history api");
+        assert_eq!(value.get("scope").and_then(Value::as_str), Some("chat"));
+        assert_eq!(value.get("total").and_then(Value::as_u64), Some(2));
+        assert_eq!(
+            value.pointer("/messages/0/content").and_then(Value::as_str),
+            Some("chat oldest")
+        );
+    }
+
     #[tokio::test]
     async fn list_workflow_definitions_prefers_first_search_path_and_hashes_canonically() {
         let paths = temp_paths("workflow-defs");
