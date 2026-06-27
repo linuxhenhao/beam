@@ -17,6 +17,10 @@
 # release-plz must NOT run `cargo publish` itself.
 publish = false
 
+# Only create git tags/releases when a release-plz PR is merged. Ordinary
+# pushes to main should only prepare/update the next Release PR.
+release_always = false
+
 # Changelog is generated via git-cliff (bundled with release-plz).
 # Commit messages use conventional commits: type(scope): 中文描述
 # Version bump rules (default git-cliff / release-plz behaviour):

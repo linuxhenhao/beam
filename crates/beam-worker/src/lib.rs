@@ -1052,7 +1052,7 @@ async fn handle_tui_prompt_override(
 
 pub async fn run(init: InitConfig) -> Result<()> {
     let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
-    let session_name = format!("bmx-{}", &init.session_id[..8.min(init.session_id.len())]);
+    let session_name = format!("beam-{}", &init.session_id[..8.min(init.session_id.len())]);
     let paths = BeamPaths::discover()?;
     let adapter = Arc::new(Mutex::new(CliAdapter::from_init(&init)?));
     let wrapper = if init.resume || init.adopted_from.is_some() {
@@ -1064,7 +1064,7 @@ pub async fn run(init: InitConfig) -> Result<()> {
         if let Some(adopted) = init.adopted_from.as_ref() {
             if let Some(pane_id) = adopted.zellij_pane_id.clone() {
                 let session = adopted.zellij_session.clone().unwrap_or_else(|| {
-                    format!("bmx-{}", &init.session_id[..8.min(init.session_id.len())])
+                    format!("beam-{}", &init.session_id[..8.min(init.session_id.len())])
                 });
                 let observe = ZellijObserveBackend::new(
                     session,

@@ -122,7 +122,7 @@ Paths outside `/s/{session_id}...` are not proxied to zellij web and return 404.
 Beam session to zellij session mapping:
 
 - Adopted sessions prefer `session.adopted_from.zellij_session`.
-- Managed sessions use `bmx-{first 8 chars of session_id}`.
+- Managed sessions use `beam-{first 8 chars of session_id}`.
 
 ## Path Rewriting
 

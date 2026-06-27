@@ -122,7 +122,7 @@ session-scoped 路由需要有效 Beam cookie，除首次 ticket 登录外不接
 Beam session 到 zellij session 的映射：
 
 - adopt session 优先使用 `session.adopted_from.zellij_session`。
-- managed session 使用 `bmx-{session_id 前 8 位}`。
+- managed session 使用 `beam-{session_id 前 8 位}`。
 
 ## 路径重写
 
