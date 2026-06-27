@@ -1,5 +1,7 @@
 # beam parity backlog
 
+English: [beam-parity-backlog.en.md](beam-parity-backlog.en.md)
+
 - 来源：`docs/design/beam-parity-plan.md`
 - 目标：把 TS 版还未对齐的能力拆成可以逐个交付、逐个验收的 Rust 任务
 - 原则：

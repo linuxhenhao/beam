@@ -1,5 +1,7 @@
 # beam：TS 版功能对标计划
 
+English: [beam-parity-plan.en.md](beam-parity-plan.en.md)
+
 - 日期：2026-06-03（初稿），2026-06-08（代码审查更新）
 - 状态：计划草案 + TODO 跟踪
 - 关联文档：`docs/design/beam.md`

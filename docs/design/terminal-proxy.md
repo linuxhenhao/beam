@@ -1,5 +1,7 @@
 # Terminal Proxy
 
+English: [terminal-proxy.en.md](terminal-proxy.en.md)
+
 本文记录当前 Rust daemon 的 web terminal 实现。代码入口：
 
 - `crates/beam-daemon/src/lib.rs`: daemon 启动时接线 zellij web 和 terminal proxy。
@@ -78,6 +80,16 @@ Beam 不 patch zellij 的 JS/assets，也不把 write token 或 zellij write coo
 4. 连接 `/ws/terminal/{zellij_session}?web_client_id=...`，丢弃收到的 terminal frames。
 
 这个 anchor 只用于让 zellij read-only watcher 有普通 client 可 follow，不转发外部输入，也不会把内部 cookie/token 泄露给浏览器。anchor 按 zellij session 维度复用；如果 anchor 失败，proxy 只记录 warning，read-only 请求继续按正常路径代理。
+
+### Viewport model
+
+Beam 把 terminal viewport、card viewport 和 fallback viewport 分开处理：
+
+- terminal viewport 是真实 web viewer 的交互尺寸。zellij web 收到浏览器 control WS 的 resize 后驱动 pane 尺寸；Beam proxy 只透传这条路径。
+- card viewport 是飞书卡片截图展示尺寸。worker 上传截图前按 `120x36` 裁剪，避免卡片截图和卡片文本截断尺度不一致。
+- fallback viewport 是没有真实 viewer 可用时的临时尺寸。worker managed session 默认用 `120x36`，read-only anchor 也发送 `120x36` 的初始 resize/metrics。
+
+如果只有 read-only viewer，优先让 zellij web 使用该 viewer 上报的实际尺寸；只有 read-only anchor 先行建立、真实 viewer 尚未完成 resize/control WS 时，才使用 `120x36` fallback。未来如果飞书卡片模板支持更大图片，应只调整 card viewport，不反向影响真实 terminal viewport。
 
 ## Ticket 生命周期
 

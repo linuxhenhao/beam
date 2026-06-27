@@ -1,5 +1,7 @@
 # beam Federation Design
 
+English: [federation-design.en.md](federation-design.en.md)
+
 > 目标：让多套**彼此独立的 beam 部署**组成一个共享团队，先解决“看见彼此的 bot”，再解决“把不同部署的 bot 拉进同一个飞书群协作”。
 
 ## 1. 这份文档解决什么

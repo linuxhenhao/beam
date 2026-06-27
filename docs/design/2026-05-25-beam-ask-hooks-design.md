@@ -1,5 +1,7 @@
 # beam askUserQuestion：从 skill 触发改为 hook 触发
 
+English: [2026-05-25-beam-ask-hooks-design.en.md](2026-05-25-beam-ask-hooks-design.en.md)
+
 - 日期：2026-05-25
 - 分支：`feat/beam-ask-hooks`（基于 `feat/beam-ask`）
 - 状态：设计待评审

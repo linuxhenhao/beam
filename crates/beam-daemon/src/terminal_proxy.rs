@@ -57,6 +57,10 @@ const STRIP_RESPONSE_HEADERS: &[&str] = &["set-cookie"];
 
 /// Avoid hot-spawning anchors if zellij rejects/fails quickly.
 const ANCHOR_RESTART_COOLDOWN: Duration = Duration::from_secs(5);
+const FALLBACK_TERMINAL_COLS: u16 = 120;
+const FALLBACK_TERMINAL_ROWS: u16 = 36;
+const TERMINAL_CELL_PIXEL_WIDTH: u16 = 9;
+const TERMINAL_CELL_PIXEL_HEIGHT: u16 = 18;
 
 fn is_hop_by_hop(name: &HeaderName) -> bool {
     HOP_BY_HOP.contains(&name.as_str().to_lowercase().as_str())
@@ -399,8 +403,8 @@ fn build_anchor_control_messages(web_client_id: &str) -> [String; 2] {
             "web_client_id": web_client_id,
             "payload": {
                 "type": "TerminalResize",
-                "rows": 24,
-                "cols": 80,
+                "rows": FALLBACK_TERMINAL_ROWS,
+                "cols": FALLBACK_TERMINAL_COLS,
             },
         })
         .to_string(),
@@ -408,10 +412,10 @@ fn build_anchor_control_messages(web_client_id: &str) -> [String; 2] {
             "web_client_id": web_client_id,
             "payload": {
                 "type": "TerminalMetrics",
-                "cell_pixel_width": 9,
-                "cell_pixel_height": 18,
-                "text_area_pixel_width": 720,
-                "text_area_pixel_height": 432,
+                "cell_pixel_width": TERMINAL_CELL_PIXEL_WIDTH,
+                "cell_pixel_height": TERMINAL_CELL_PIXEL_HEIGHT,
+                "text_area_pixel_width": FALLBACK_TERMINAL_COLS * TERMINAL_CELL_PIXEL_WIDTH,
+                "text_area_pixel_height": FALLBACK_TERMINAL_ROWS * TERMINAL_CELL_PIXEL_HEIGHT,
             },
         })
         .to_string(),
@@ -1428,13 +1432,15 @@ mod tests {
 
         assert_eq!(resize["web_client_id"], "client-1");
         assert_eq!(resize["payload"]["type"], "TerminalResize");
-        assert_eq!(resize["payload"]["rows"], 24);
-        assert_eq!(resize["payload"]["cols"], 80);
+        assert_eq!(resize["payload"]["rows"], 36);
+        assert_eq!(resize["payload"]["cols"], 120);
 
         assert_eq!(metrics["web_client_id"], "client-1");
         assert_eq!(metrics["payload"]["type"], "TerminalMetrics");
         assert_eq!(metrics["payload"]["cell_pixel_width"], 9);
         assert_eq!(metrics["payload"]["cell_pixel_height"], 18);
+        assert_eq!(metrics["payload"]["text_area_pixel_width"], 1080);
+        assert_eq!(metrics["payload"]["text_area_pixel_height"], 648);
     }
 
     #[test]

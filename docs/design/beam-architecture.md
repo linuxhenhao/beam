@@ -1,5 +1,7 @@
 # beam 架构
 
+English: [beam-architecture.en.md](beam-architecture.en.md)
+
 ## 核心实体
 
 ### 进程架构

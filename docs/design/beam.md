@@ -1,5 +1,7 @@
 # beam：Rust 版核心后端设计
 
+English: [beam.en.md](beam.en.md)
+
 - 日期：2026-06-02
 - 状态：持续维护中的设计总览（2026-06-13 已按当前 Rust 实现校对）
 

@@ -1,5 +1,7 @@
 # Codex type-ahead steer-aware 归因 — 设计
 
+English: [2026-05-28-codex-type-ahead-steer-design.en.md](2026-05-28-codex-type-ahead-steer-design.en.md)
+
 日期：2026-05-28　分支：`worktree-codex-type-ahead`
 
 ## 背景
