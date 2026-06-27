@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/linuxhenhao/beam/compare/beam-core-v0.2.3...beam-core-v0.3.0) - 2026-06-27
+
+### Added
+
+- *(core)* 增加持久化子系统与状态恢复机制
+- *(terminal)* 切换到 zellij web terminal
+
+### Other
+
+- Merge pull request #15 from linuxhenhao/feat/lark-workdir-select
+- 格式化代码
+
 ## [0.2.2](https://github.com/linuxhenhao/beam/compare/beam-core-v0.2.0...beam-core-v0.2.2) - 2026-06-22
 
 ### Fixed

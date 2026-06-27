@@ -18,9 +18,9 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-beam-core = { path = "../beam-core", version = "0.2.3" }
-beam-daemon = { path = "../beam-daemon", version = "0.2.3" }
-beam-worker = { path = "../beam-worker", version = "0.2.3" }
+beam-core = { path = "../beam-core", version = "0.3.0" }
+beam-daemon = { path = "../beam-daemon", version = "0.3.0" }
+beam-worker = { path = "../beam-worker", version = "0.3.0" }
 clap.workspace = true
 chrono.workspace = true
 libc.workspace = true
