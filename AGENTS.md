@@ -9,6 +9,7 @@
   - Cross-deployment federation: read `docs/federation-design.md`.
   - Ask hook flow: read `docs/design/2026-05-25-beam-ask-hooks-design.md` and `docs/plans/2026-05-25-beam-ask-hooks.md`.
   - Zellij backend or adopt work: read `docs/zellij-backend-poc.md`.
+  - Web terminal / terminal proxy auth bridge: read `docs/design/terminal-proxy.md`.
 - Do not treat design docs as automatically authoritative. Verify critical behavior against the Rust code, and if you rely on a doc that has drifted from code, update the doc in the same change.
 - Build daemon: `cargo build -p beam-cli`, binary at `target/debug/beam`.
 - After daemon/runtime changes, rebuild with `cargo build -p beam-cli` then restart with `beam restart`.

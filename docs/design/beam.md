@@ -130,7 +130,6 @@ worker 是每个 session 一个进程，职责：
 - 启动并持有 CLI backend。
 - 维护 CLI 输入队列。
 - 读取终端 ANSI 输出。
-- 提供 web terminal HTTP/WebSocket。
 - 定时生成 screen snapshot。
 - 运行 idle detector。
 - 监听 CLI transcript fallback。
@@ -360,16 +359,19 @@ session_id 获取：
 
 ## 11. Web Terminal
 
-worker 启动一个 HTTP/WebSocket server，daemon 再启动统一 terminal proxy：
+daemon 启动本地 `zellij web` 和统一 terminal proxy。proxy 是唯一对外入口，浏览器不直接访问 zellij web，也不直接持有 zellij cookie。
 
-- worker read/write 入口通过 query token 区分权限。
-- daemon 对外暴露 `/s/{session_id}` 和 `/s/{session_id}/ws`，按 session 路由到对应 worker。
-- WebSocket 消息：
+- daemon 启动 `zellij web` 于 `proxy_base_port + 1`，并创建/持久化 read-only / write zellij web token。
+- daemon 对外暴露 terminal proxy 于 `proxy_base_port`。
+- 飞书卡片和 dashboard 生成 `/s/{session_id}?beam_terminal_ticket=...` 链接，而不是暴露 zellij token。
+- proxy 验证 Beam ticket 后调用 zellij web `/command/login`，捕获上游 `Set-Cookie`，保存在服务端 cookie jar。
+- proxy 只给浏览器设置 `beam_terminal_session` cookie；后续 HTTP/WS 请求由 proxy 将 Beam cookie 映射为后台 zellij cookie 并注入上游。
+- 上游 zellij `Set-Cookie` 响应头会被剥离，避免 zellij cookie 泄露给外部浏览器。
+- session 页面和资源走 `/s/{session_id}` / `/s/{session_id}/{path}`，WebSocket 走 `/s/{session_id}/ws` 和 `/s/{session_id}/ws/{*rest}`。
 
-```json
-{ "type": "resize", "cols": 160, "rows": 45 }
-{ "type": "input", "data": "\u001b[A" }
-```
+read-only 和 write 的入口使用不同 zellij token 登录，但当前 zellij web 返回的 cookie 可能是全局 session cookie；proxy 记录权限用于审计和后续拦截，不能把它视为已经在 zellij web 协议层强制限制输入。
+
+细节见 `docs/design/terminal-proxy.md`。
 
 tmux-pipe 模式：
 

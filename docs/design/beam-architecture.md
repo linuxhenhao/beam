@@ -31,9 +31,9 @@
 ┌─────────────────────────────────────────────────────┐
 │                beam-worker                       │
 │  ┌──────────────┐  ┌──────────────┐  ┌────────────┐ │
-│  │CLI Adapter   │  │Screen Capture│  │Terminal Web│ │
-│  │(opencode/    │  │+ Screenshot  │  │Server      │ │
-│  │ claude/codex)│  │Upload Loop   │  │(xterm.js)  │ │
+│  │CLI Adapter   │  │Screen Capture│  │Backend I/O │ │
+│  │(opencode/    │  │+ Screenshot  │  │Control     │ │
+│  │ claude/codex)│  │Upload Loop   │  │            │ │
 │  └──────┬───────┘  └──────┬───────┘  └────────────┘ │
 │         │                 │                          │
 │         ▼                 ▼                          │
@@ -46,24 +46,27 @@
 
 ### 终端代理（Terminal Proxy）
 
-每个 Worker 在 `127.0.0.1` 随机端口启动一个 WebSocket + HTTP 终端服务（`worker/src/terminal.rs`），提供 xterm.js 网页终端。Daemon 对外暴露一个统一的 **Terminal Proxy**（`daemon/src/terminal_proxy.rs`），负责鉴权和路由。
+daemon 启动一个本地 `zellij web` server，并在它前面放置统一的 **Terminal Proxy**（`crates/beam-daemon/src/terminal_proxy.rs`）。proxy 是唯一对外入口，负责 Beam ticket 登录、Beam cookie 与后台 zellij cookie 的转换、HTTP/WS 路由和响应头过滤。worker 不再提供独立的 xterm.js HTTP/WebSocket terminal server。
 
 ```
-外部浏览器                    Daemon Proxy                 Worker Terminal
-┌──────────┐    HTTP/WS     ┌──────────────────┐   WS    ┌──────────────┐
-│ xterm.js │ ─────────────> │ /s/{session_id}  │ ──────> │ :random_port │
-│          │ <───────────── │ /s/{session_id}/ │ <────── │ /ws          │
-│ 飞书卡片  │                │ ws               │         │              │
-│ "Open     │                │                  │         │  token 鉴权   │
-│ terminal" │                │ 查找 session →    │         │              │
-│          │                │ worker 地址       │         │ real-time    │
-│          │                │                  │         │ terminal     │
-└──────────┘                └──────────────────┘         └──────────────┘
+外部浏览器                    Daemon Terminal Proxy            zellij web
+┌──────────┐    HTTP/WS     ┌────────────────────────┐ HTTP/WS ┌──────────────┐
+│ browser  │ ─────────────> │ /s/{session_id}        │ ───────>│ 127.0.0.1:   │
+│          │ <───────────── │ /s/{session_id}/ws     │ <───────│ proxy+1      │
+│ 飞书卡片  │                │ /s/{session_id}/{path} │         │              │
+│ terminal │                │                        │         │ /command/    │
+│ button   │                │ Beam cookie            │         │ login        │
+│          │                │ -> zellij cookie       │         │ /ws/...      │
+└──────────┘                └────────────────────────┘         └──────────────┘
 ```
 
-- **Worker Terminal Server**: 每 session 一个，`127.0.0.1:<随机端口>`，通过 `token` query 参数鉴权，WebSocket 推送终端内容
-- **Daemon Terminal Proxy**: 唯一对外入口，`<host>:<proxy_base_port>`，路由 `/s/{session_id}` 和 `/s/{session_id}/ws` → worker 地址。proxy 本身不额外做会话鉴权，读写权限仍由转发到 worker 的 query token 决定。
-- 飞书流式卡片上的「Open terminal」按钮跳转到 proxy 地址
+- **zellij web**: 本地上游服务，端口为 `web.proxy_base_port + 1`。daemon 启动时确保服务在线，创建 read-only / write token，并启动 watchdog 掉线重启。
+- **Daemon Terminal Proxy**: 唯一对外入口，`<host>:<web.proxy_base_port>`。它暴露 `/s/{session_id}`、`/s/{session_id}/ws`、`/s/{session_id}/ws/{*rest}` 和 `/s/{session_id}/{*path}`，把 Beam session 映射到实际 zellij session 名。
+- **Cookie bridge**: 外部浏览器只持有 `beam_terminal_session`。proxy 在服务端保存 `Beam cookie -> zellij cookie` 映射，转发上游请求时丢弃浏览器 Cookie 并注入后台 zellij Cookie。zellij 的 `Set-Cookie` 不会透传给浏览器。
+- **Terminal ticket**: 终端链接使用 `beam_terminal_ticket`。ticket HMAC 签名且单次使用；write ticket 有 5 分钟 TTL，read-only ticket 用于卡片入口，不按创建时间过期。
+- **Read-only anchor**: read-only 登录后，proxy 可在 daemon 内部用 zellij write token 建立一个隐藏普通 web client，丢弃 frames，仅用于让 zellij read-only watcher 有普通 client 可 follow。外部浏览器仍只持有 Beam read-only cookie。
+- **权限边界**: read-only/write ticket 会选择不同 zellij token 登录，但 zellij web cookie 可能是全局 cookie；当前实现只记录权限，尚未在 proxy 层强制阻断 read-only 输入。
+- 详细路由和安全约束见 `docs/design/terminal-proxy.md`。
 
 ### 配置
 
@@ -316,22 +319,29 @@ sequenceDiagram
     participant U as 飞书用户
     participant C as 飞书卡片
     participant P as Daemon Proxy
-    participant W as Worker Terminal
-    participant T as Tmux/Zellij
+    participant Z as zellij web
+    participant T as Zellij Session
 
     U->>C: 点击「Open terminal」
+    C->>P: GET /s/{session_id}?beam_terminal_ticket=...
+    P->>P: 验证 ticket，选择 read-only/write zellij token
+    P->>Z: POST /command/login
+    Z-->>P: Set-Cookie: zellij_session=...
+    P->>P: 保存 Beam cookie -> zellij cookie
+    P-->>C: 302 /s/{session_id} + Set-Cookie: beam_terminal_session=...
     C->>P: GET /s/{session_id}
-    P->>P: 查找 session → worker 端口
-    P-->>C: HTML (xterm.js)
-    C->>P: WS /s/{session_id}/ws
-    P->>W: WS proxy → 127.0.0.1:<port>/ws?token=xxx
-    W->>W: token 验证
-    W->>T: 订阅终端输出
-    loop 实时推送
-        T-->>W: capture_viewport()
-        W-->>P: WS message
+    P->>Z: GET /{zellij_session} (注入 zellij cookie)
+    Z-->>P: HTML/assets (剥离 zellij Set-Cookie)
+    P-->>C: HTML
+    C->>P: WS /s/{session_id}/ws/{*rest} + Beam cookie
+    P->>P: Beam cookie -> zellij cookie
+    P->>Z: WS /ws/... (注入 zellij cookie)
+    loop 终端同步
+        T-->>Z: zellij web terminal state
+        Z-->>P: WS message
         P-->>C: WS message
-        C->>C: xterm.js 渲染
+        C->>P: WS input/control message
+        P->>Z: WS message
     end
 ```
 

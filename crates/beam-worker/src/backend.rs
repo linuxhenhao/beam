@@ -141,7 +141,12 @@ impl ZellijBackend {
         let config_path = tmp.join("config.kdl");
         let layout_path = tmp.join("layout.kdl");
 
-        let config = "show_startup_tips false\npane_frames false\n";
+        let config = concat!(
+            "show_startup_tips false\n",
+            "pane_frames false\n",
+            "web_server true\n",
+            "web_sharing \"on\"\n",
+        );
         std::fs::write(&config_path, config)?;
 
         let pane_command = Self::kdl_string(bin);
@@ -701,9 +706,27 @@ async fn run_zellij_subscribe(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_zellij_pane_closed, numeric_pane_id, parse_zellij_cursor_from_list_panes,
-        parse_zellij_subscribe_viewport, viewport_to_ansi_chunk,
+        SpawnOpts, ZellijBackend, is_zellij_pane_closed, numeric_pane_id,
+        parse_zellij_cursor_from_list_panes, parse_zellij_subscribe_viewport,
+        viewport_to_ansi_chunk,
     };
+
+    #[test]
+    fn runtime_config_enables_zellij_web_clients() {
+        let opts = SpawnOpts {
+            cwd: "/tmp".to_string(),
+            cols: 80,
+            rows: 24,
+            env: Vec::new(),
+        };
+        let (_tmp, config_path, _layout_path) =
+            ZellijBackend::write_runtime_files("/bin/sh", &[], &opts)
+                .expect("runtime files should be written");
+        let config = std::fs::read_to_string(&config_path).expect("config should be readable");
+
+        assert!(config.contains("web_server true"));
+        assert!(config.contains("web_sharing \"on\""));
+    }
 
     // ---- numeric_pane_id tests ----
 

@@ -26,6 +26,8 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+const ZELLIJ_WEB_WATCHDOG_INTERVAL: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZellijWebTokens {
     pub port: u16,
@@ -180,6 +182,25 @@ pub fn ensure_zellij_web(port: u16) -> Result<()> {
         return Ok(());
     }
     zellij_web_start(port)
+}
+
+/// Spawn a background watchdog that restarts zellij web if it goes offline.
+pub fn spawn_zellij_web_watchdog(port: u16) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(ZELLIJ_WEB_WATCHDOG_INTERVAL);
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            if zellij_web_is_running(port) {
+                continue;
+            }
+            warn!("zellij web watchdog: port {port} offline, attempting restart");
+            match ensure_zellij_web(port) {
+                Ok(()) => info!("zellij web watchdog: port {port} restart success"),
+                Err(err) => warn!("zellij web watchdog: port {port} restart failed: {err:#}"),
+            }
+        }
+    });
 }
 
 // ── token creation helpers ────────────────────────────────────────────

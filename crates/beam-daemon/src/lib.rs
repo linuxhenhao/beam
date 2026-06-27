@@ -3787,7 +3787,7 @@ fn build_readonly_link_card(session: &Session, ro_url: &str, _ro_token: &str) ->
         "elements": [
             {
                 "tag": "markdown",
-                "content": "**Read-only access**\n\nClick the button below to open the terminal in read-only mode. The link is valid for 5 minutes and is single-use."
+                "content": "**Read-only access**\n\nClick the button below to open the terminal in read-only mode. The link is single-use."
             },
             {
                 "tag": "action",
@@ -3938,7 +3938,7 @@ fn build_terminal_url_with_ticket(
     session_id: &str,
     permission: terminal_auth::TerminalPermission,
 ) -> String {
-    // Generate a short-lived Beam ticket (no raw zellij token in URL)
+    // Generate a Beam ticket for the requested permission.
     let ticket = terminal_auth::generate_terminal_ticket(session_id, permission);
     let sep = if base_url.contains('?') { "&" } else { "?" };
     format!(
@@ -3956,7 +3956,7 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
         session.title.clone()
     };
     let base_terminal = session.terminal_url.clone().unwrap_or_default();
-    // Attach a read-only ticket (short-lived, no raw token exposed)
+    // Attach a read-only ticket (single-use, no raw token exposed)
     let zellij_tokens = load_zellij_web_tokens_for_card();
     let has_ro_token = zellij_tokens
         .as_ref()
@@ -11920,6 +11920,7 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         zellij_web_port,
     )
     .with_context(|| "failed to create zellij web tokens")?;
+    zellij_web::spawn_zellij_web_watchdog(zellij_web_port);
 
     // Start terminal proxy with auth bridge
     let proxy_host = state.config.web.host.clone();
@@ -13714,6 +13715,26 @@ mod tests {
             "url should start with base: {url}"
         );
         assert!(card.pointer("/elements/3").is_none());
+    }
+
+    #[test]
+    fn build_readonly_link_card_omits_stale_five_minute_copy() {
+        let session = make_session("sess-ro");
+        let card: Value = serde_json::from_str(&build_readonly_link_card(
+            &session,
+            "http://proxy.example.com/s/sess-ro",
+            "",
+        ))
+        .expect("valid card json");
+        let body = card
+            .pointer("/elements/0/content")
+            .and_then(Value::as_str)
+            .expect("markdown body");
+        assert!(body.contains("single-use"));
+        assert!(
+            !body.contains("5 minutes"),
+            "read-only link copy should not mention the stale 5 minute TTL"
+        );
     }
 
     #[test]

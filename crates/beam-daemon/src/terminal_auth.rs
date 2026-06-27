@@ -1,13 +1,13 @@
 //! Beam terminal proxy authentication bridge.
 //!
-//! Replaces raw zellij tokens in terminal URLs with Beam's own short-lived
-//! auth tickets.  The Beam proxy maintains its own HttpOnly/SameSite cookie
+//! Replaces raw zellij tokens in terminal URLs with Beam's own auth tickets.
+//! The Beam proxy maintains its own HttpOnly/SameSite cookie
 //! and a server-side cookie jar that maps Beam cookies → zellij cookies.
 //! The browser never sees the raw zellij token or the zellij auth cookie.
 //!
 //! ## Flow
 //!
-//! 1. A Beam ticket is generated (HMAC-signed, short TTL, one-time use) and
+//! 1. A Beam ticket is generated (HMAC-signed, one-time use; write links have a TTL) and
 //!    embedded in the terminal link: `/s/<session_id>?beam_terminal_ticket=...`.
 //! 2. The proxy verifies the ticket, calls zellij web `/command/login` with
 //!    the corresponding zellij token, captures the zellij Set-Cookie, stores
@@ -41,7 +41,7 @@ use tokio::sync::Mutex;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// How long a terminal ticket is valid after creation.
+/// How long a write terminal ticket is valid after creation.
 const TICKET_TTL: Duration = Duration::from_secs(300); // 5 minutes
 
 /// How long a Beam terminal session cookie is valid.
@@ -56,13 +56,12 @@ pub const BEAM_COOKIE_NAME: &str = "beam_terminal_session";
 /// Query parameter name for the terminal ticket.
 pub const TICKET_QUERY_PARAM: &str = "beam_terminal_ticket";
 
-/// Legacy query parameter for raw zellij tokens (deprecated, kept for compat).
-pub const LEGACY_TOKEN_QUERY_PARAM: &str = "token";
-
 /// Derive the ticket-secret file path from environment, matching BeamPaths convention.
 fn ticket_secret_path() -> std::path::PathBuf {
     let root = std::env::var("BEAM_HOME").unwrap_or_else(|_| {
-        std::env::var("HOME").map(|h| format!("{}/.beam", h)).unwrap_or_default()
+        std::env::var("HOME")
+            .map(|h| format!("{}/.beam", h))
+            .unwrap_or_default()
     });
     std::path::PathBuf::from(root).join("state/ticket-secret")
 }
@@ -382,6 +381,7 @@ pub fn extract_zellij_set_cookie(set_cookie_value: &str) -> Option<String> {
 pub fn is_zellij_root_path(path: &str) -> bool {
     path == "session"
         || path == "info"
+        || path.starts_with("info/")
         || path == "favicon.ico"
         || path.starts_with("command")
         || path.starts_with("api/")
@@ -403,16 +403,11 @@ pub fn translate_root_ws_path(rest: &str, zellij_session: &str) -> String {
     // axum strips the /ws/ route prefix, so rest may be:
     //   "terminal"         → Zellij 0.44 WS endpoint: /ws/terminal (no session in path)
     //   "control"          → Zellij control WS: /ws/control
-    //   "terminal/<name>"  → legacy path with session name
-    //   "ws/terminal/..."  → legacy path (starts with ws/)
+    //   "terminal/<name>"  → terminal WS endpoint with a client-supplied name
     if rest == "terminal" || rest == "control" {
         format!("ws/{rest}")
     } else if rest.starts_with("terminal/") {
         format!("ws/terminal/{zellij_session}")
-    } else if rest.starts_with("ws/terminal/") {
-        format!("ws/terminal/{zellij_session}")
-    } else if rest.starts_with("ws/control") {
-        rest.to_string()
     } else {
         rest.to_string()
     }
@@ -617,6 +612,29 @@ mod tests {
         assert_eq!(extract_zellij_set_cookie("; HttpOnly"), None);
     }
 
+    #[tokio::test]
+    async fn auth_state_maps_external_beam_cookie_to_internal_zellij_cookie() {
+        let auth = TerminalAuthState::new();
+        let zellij_cookie = "zellij-session=secret-upstream-cookie".to_string();
+
+        let beam_cookie = auth
+            .insert(
+                zellij_cookie.clone(),
+                "beam-session-1".to_string(),
+                TerminalPermission::Write,
+            )
+            .await;
+
+        assert_ne!(beam_cookie, zellij_cookie);
+        let (stored_zellij_cookie, stored_session_id, stored_permission) = auth
+            .lookup(&beam_cookie)
+            .await
+            .expect("stored cookie entry");
+        assert_eq!(stored_zellij_cookie, zellij_cookie);
+        assert_eq!(stored_session_id, "beam-session-1");
+        assert_eq!(stored_permission, TerminalPermission::Write);
+    }
+
     // ── UsedTickets ────────────────────────────────────────────────
 
     #[test]
@@ -639,6 +657,7 @@ mod tests {
     fn root_paths_identified() {
         assert!(is_zellij_root_path("session"));
         assert!(is_zellij_root_path("info"));
+        assert!(is_zellij_root_path("info/version"));
         assert!(is_zellij_root_path("command/login"));
         assert!(is_zellij_root_path("command"));
         assert!(is_zellij_root_path("api/stats"));
@@ -661,7 +680,7 @@ mod tests {
 
     #[test]
     fn translate_terminal_ws_replaces_session_name() {
-        let result = translate_root_ws_path("ws/terminal/beam-session-id-123", "bmx-beam-se");
+        let result = translate_root_ws_path("terminal/beam-session-id-123", "bmx-beam-se");
         assert_eq!(result, "ws/terminal/bmx-beam-se");
     }
 
@@ -676,16 +695,6 @@ mod tests {
         // Zellij 0.44: WS endpoint is just /ws/terminal (no session name in path)
         assert_eq!(translate_root_ws_path("terminal", "bmx-any"), "ws/terminal");
         assert_eq!(translate_root_ws_path("control", "bmx-any"), "ws/control");
-    }
-
-    fn translate_ws_control_no_prefix() {
-        assert_eq!(translate_root_ws_path("ws/control", "bmx-any"), "ws/control");
-    }
-
-    #[test]
-    fn translate_control_ws_passthrough() {
-        let result = translate_root_ws_path("ws/control", "any-session");
-        assert_eq!(result, "ws/control");
     }
 
     #[test]
