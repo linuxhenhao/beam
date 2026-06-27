@@ -36,12 +36,16 @@ concurrency:
 jobs:
   release-pr:
     # Run on manual dispatch from main, or when Release Tag succeeded on main.
+    # Skip release merge commits: after Release Tag has created/published the
+    # tag, running release-pr again can treat the release merge commit as the
+    # next unreleased change and open a duplicate patch PR.
     # Skipping failed/cancelled runs avoids unnecessary runs on broken pushes.
     if: |
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_branch == 'main')
+       github.event.workflow_run.head_branch == 'main' &&
+       !contains(github.event.workflow_run.head_commit.message, 'chore: release'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
