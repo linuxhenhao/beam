@@ -204,7 +204,8 @@ async fn api_client(paths: &BeamPaths) -> Result<(Client, String)> {
 
 fn resolve_session_owner_approver(paths: &BeamPaths, session_id: &str) -> Option<String> {
     let raw = std::fs::read(paths.session_store_json()).ok()?;
-    let sessions = serde_json::from_slice::<std::collections::HashMap<String, Session>>(&raw).ok()?;
+    let sessions =
+        serde_json::from_slice::<std::collections::HashMap<String, Session>>(&raw).ok()?;
     sessions
         .get(session_id)
         .and_then(|session| session.owner_open_id.as_ref())
@@ -222,9 +223,18 @@ async fn post_ask(paths: &BeamPaths, body: &serde_json::Value) -> Result<serde_j
         .filter(|value| !value.trim().is_empty())
         .map(|value| value.to_string());
     tracing::info!(
-        session_id = body.get("sessionId").and_then(|v| v.as_str()).unwrap_or_default(),
-        chat_id = body.get("chatId").and_then(|v| v.as_str()).unwrap_or_default(),
-        lark_app_id = body.get("larkAppId").and_then(|v| v.as_str()).unwrap_or_default(),
+        session_id = body
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default(),
+        chat_id = body
+            .get("chatId")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default(),
+        lark_app_id = body
+            .get("larkAppId")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default(),
         approvers = body
             .get("approvers")
             .and_then(|v| v.as_array())
@@ -236,16 +246,16 @@ async fn post_ask(paths: &BeamPaths, body: &serde_json::Value) -> Result<serde_j
     let needs_approver = body
         .get("approvers")
         .and_then(|value| value.as_array())
-        .map(|arr| arr.iter().all(|value| value.as_str().unwrap_or("").trim().is_empty()))
+        .map(|arr| {
+            arr.iter()
+                .all(|value| value.as_str().unwrap_or("").trim().is_empty())
+        })
         .unwrap_or(true);
     if needs_approver {
         if let Some(session_id) = body.get("sessionId").and_then(|value| value.as_str()) {
             if let Some(owner_open_id) = resolve_session_owner_approver(paths, session_id) {
                 if let Some(obj) = body.as_object_mut() {
-                    obj.insert(
-                        "approvers".to_string(),
-                        serde_json::json!([owner_open_id]),
-                    );
+                    obj.insert("approvers".to_string(), serde_json::json!([owner_open_id]));
                 }
             }
         }
@@ -295,7 +305,8 @@ fn resolve_ask_context(
 
     let mut session_id = None;
     if let Ok(raw) = std::fs::read_to_string(paths.session_store_json()) {
-        if let Ok(sessions) = serde_json::from_str::<std::collections::HashMap<String, Session>>(&raw)
+        if let Ok(sessions) =
+            serde_json::from_str::<std::collections::HashMap<String, Session>>(&raw)
         {
             if let Some(cli_session_id) = payload_cli_session_id.as_deref() {
                 if let Some((beam_session_id, session)) = sessions
@@ -343,7 +354,9 @@ fn resolve_ask_context(
 
     if chat_id.is_none() || lark_app_id.is_none() || root_message_id.is_none() {
         if let Ok(raw) = std::fs::read_to_string(paths.session_store_json()) {
-            if let Ok(sessions) = serde_json::from_str::<std::collections::HashMap<String, Session>>(&raw) {
+            if let Ok(sessions) =
+                serde_json::from_str::<std::collections::HashMap<String, Session>>(&raw)
+            {
                 if let Some(session_key) = session_id.as_deref() {
                     if let Some(session) = sessions.get(session_key) {
                         chat_id.get_or_insert_with(|| session.chat_id.clone());
@@ -366,7 +379,9 @@ fn resolve_ask_context(
         .ok_or_else(|| anyhow::anyhow!("unable to resolve chat_id for session {}", session_id))?;
     let lark_app_id = lark_app_id
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("unable to resolve lark_app_id for session {}", session_id))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("unable to resolve lark_app_id for session {}", session_id)
+        })?;
 
     Ok((session_id, chat_id, lark_app_id, root_message_id))
 }
@@ -1225,6 +1240,7 @@ async fn main() -> Result<()> {
                 .with_default_directive(LevelFilter::INFO.into())
                 .from_env_lossy(),
         )
+        .with_writer(std::io::stderr)
         .with_target(false)
         .compact()
         .init();

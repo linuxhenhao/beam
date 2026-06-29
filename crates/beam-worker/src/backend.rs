@@ -4,6 +4,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -11,6 +12,8 @@ use tokio::io::AsyncBufReadExt;
 use tokio::process::Command as TokioCommand;
 use tokio::sync::broadcast;
 use tracing::warn;
+
+const RAW_INPUT_ENTER_DELAY: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone)]
 pub struct SpawnOpts {
@@ -344,6 +347,7 @@ impl SessionBackend for ZellijBackend {
 
     async fn raw_input(&self, text: &str) -> Result<()> {
         self.send_text(text).await?;
+        tokio::time::sleep(RAW_INPUT_ENTER_DELAY).await;
         self.send_enter().await
     }
 
@@ -460,7 +464,6 @@ impl ZellijObserveBackend {
         let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         ZellijBackend::run_zellij_action(&self.session_name, &args_refs)
     }
-
 }
 
 #[async_trait]
@@ -516,6 +519,7 @@ impl SessionBackend for ZellijObserveBackend {
 
     async fn raw_input(&self, text: &str) -> Result<()> {
         self.send_text(text).await?;
+        tokio::time::sleep(RAW_INPUT_ENTER_DELAY).await;
         self.send_enter().await
     }
 
@@ -1007,5 +1011,4 @@ mod tests {
         assert_eq!(args[2], "observe_pane");
         assert!(!args.contains(&"--full".to_string()));
     }
-
 }
