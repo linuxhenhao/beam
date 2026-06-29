@@ -90,22 +90,63 @@ import {{ spawnSync }} from "child_process";
 const BEAM_BIN = {exe_json};
 const BEAM_CLI_ID = {cli_json};
 
-export default {{
-  name: "beam-ask",
-  "question.asked"(payload) {{
-    try {{
-      const result = spawnSync(BEAM_BIN, ["hook", BEAM_CLI_ID], {{
-        input: JSON.stringify(payload),
-        encoding: "utf-8",
-        timeout: 86400000,
-      }});
-      if (result.status === 0 && result.stdout && result.stdout.trim()) {{
-        return JSON.parse(result.stdout.trim());
-      }}
-    }} catch {{}}
-    return undefined;
+function runBeamHook(payload) {{
+  try {{
+    const result = spawnSync(BEAM_BIN, ["hook", BEAM_CLI_ID], {{
+      input: JSON.stringify(payload),
+      encoding: "utf-8",
+      timeout: 86400000,
+    }});
+    if (result.status === 0 && result.stdout && result.stdout.trim()) {{
+      return JSON.parse(result.stdout.trim());
+    }}
+  }} catch {{}}
+  return undefined;
+}}
+
+function normalizePermissionPayload(input) {{
+  const patterns = Array.isArray(input?.pattern)
+    ? input.pattern
+    : input?.pattern
+      ? [input.pattern]
+      : [];
+  return {{
+    hook_event_name: "permission.ask",
+    id: input?.id ?? "",
+    permission: input?.type ?? input?.title ?? "permission request",
+    patterns,
+    metadata: input?.metadata ?? {{}},
+    tool: {{
+      messageID: input?.messageID ?? "",
+      callID: input?.callID ?? "",
+    }},
+  }};
+}}
+
+function handlePermission(input, output) {{
+  const directive = runBeamHook(normalizePermissionPayload(input));
+  if (!directive || directive.type !== "permission") return;
+  output.status = directive.reply === "reject" ? "deny" : "allow";
+}}
+
+export const BeamAskPlugin = async ({{ serverUrl }}) => ({{
+  event: async ({{ event }}) => {{
+    if (event?.type !== "question.asked") return;
+    const directive = runBeamHook({{
+      hook_event_name: event.type,
+      ...(event.properties ?? {{}}),
+    }});
+    if (!directive || directive.type !== "answer") return;
+    await fetch(new URL(`/question/${{event.properties.id}}/reply`, serverUrl), {{
+      method: "POST",
+      headers: {{ "content-type": "application/json" }},
+      body: JSON.stringify({{ answers: directive.answers ?? [] }}),
+    }});
   }},
-}};
+  "permission.asked": async (input, output) => {{
+    handlePermission(input, output);
+  }},
+}});
 "#
     );
     let _ = write_if_changed(path, &content)?;
@@ -125,7 +166,7 @@ fn install_hooks_at(home: &Path) -> Result<()> {
         &home
             .join(".config")
             .join("opencode")
-            .join("plugin")
+            .join("plugins")
             .join("beam-ask.js"),
         "opencode",
     )?;
@@ -155,14 +196,15 @@ mod tests {
         let opencode = root
             .join(".config")
             .join("opencode")
-            .join("plugin")
+            .join("plugins")
             .join("beam-ask.js");
         let claude_raw = std::fs::read_to_string(&claude).expect("claude settings");
         let opencode_raw = std::fs::read_to_string(&opencode).expect("opencode plugin");
         assert!(claude_raw.contains("AskUserQuestion"));
         assert!(claude_raw.contains("hook claude-code"));
-        assert!(opencode_raw.contains("beam-ask"));
+        assert!(opencode_raw.contains("BeamAskPlugin"));
         assert!(opencode_raw.contains("question.asked"));
+        assert!(opencode_raw.contains("permission.asked"));
         let _ = std::fs::remove_dir_all(root);
     }
 }

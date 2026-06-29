@@ -35,7 +35,7 @@ English: [2026-05-25-beam-ask-hooks-design.en.md](2026-05-25-beam-ask-hooks-desi
 
 | 知识点 | 内容 |
 | --- | --- |
-| askUserQuestion 入口事件 | Claude=`PermissionRequest`(tool=AskUserQuestion)；Codex=`PermissionRequest`(permission_request)；OpenCode=`QuestionAsked` |
+| askUserQuestion 入口事件 | Claude=`PermissionRequest`(tool=AskUserQuestion)；Codex=`PermissionRequest`(permission_request)；OpenCode=`QuestionAsked` / `permission.asked` |
 | payload 字段形状 | `tool_input.questions[]`，每项含 `question`、`options[]`、`multiSelect`；各家异名/嵌套差异 |
 | 阻塞式回填协议 | 这三家的 hook 是"发出后挂起等响应"，答案以 directive 形式写回 stdout 被 CLI 消费——**不碰键盘也能回答**的关键 |
 | hook 安装格式 | Claude=`~/.claude/settings.json` hooks；Codex=`~/.codex/hooks.json`+`config.toml`；OpenCode=JS 插件 |
@@ -47,7 +47,7 @@ English: [2026-05-25-beam-ask-hooks-design.en.md](2026-05-25-beam-ask-hooks-desi
 
 ```
 agent 调用原生 AskUserQuestion
-  → CLI 触发 hook（Claude=PermissionRequest / Codex=permission_request / OpenCode=QuestionAsked）
+  → CLI 触发 hook（Claude=PermissionRequest / Codex=permission_request / OpenCode=QuestionAsked / permission.asked）
   → 执行 `beam hook <cliId>`（新子命令；hook 客户端）
       · 从 stdin 读 hook JSON
       · 按 cliId 用 adapter 解析出 { prompt, options[] }

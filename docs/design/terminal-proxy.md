@@ -72,20 +72,31 @@ Set-Cookie: beam_terminal_session=...; HttpOnly; SameSite=Strict; Path=/s/; Max-
 
 zellij web 的 read-only client 在 0.44.x 中走 watcher client 路径。实际浏览器前端先打开 terminal WS，收到首帧后才打开 control WS；如果这个 watcher 没有普通 client 可 follow，首屏可能没有任何 terminal frame，页面表现为黑屏。
 
-Beam 不 patch zellij 的 JS/assets，也不把 write token 或 zellij write cookie 发给外部浏览器。proxy 在 read-only 登录成功后，为同一个 zellij session 在 daemon 内部建立一个隐藏普通 web client：
+Beam 不 patch zellij 的 JS/assets，也不把 write token 或 zellij write cookie 发给外部浏览器。proxy 在 read-only 登录成功后，为同一个 zellij session 在 daemon 内部建立一个隐藏普通 web client（anchor）：
 
 1. 使用 zellij `write_token` 调 `/command/login`，cookie 仅保存在 daemon 进程内。
 2. 调 zellij root `/session` 创建普通 `web_client_id`。
-3. 连接 `/ws/control` 并保持连接，但不发送 `TerminalResize` 或 `TerminalMetrics`。
-4. 连接 `/ws/terminal/{zellij_session}?web_client_id=...`，丢弃收到的 terminal frames。
+3. 先连接 `/ws/terminal/{zellij_session}` 等待首帧（确认 zellij server listener 已 attach），再连接 `/ws/control` 等待 `SetConfig` 后，通过 control WS 发送 `TerminalResize` 160×50。`TerminalResize` 会触发 zellij 的 `ReevaluateMobileMode`，使 pane 退出 mobile layout 并采用目标尺寸。
+4. 后续保持在线，并能通过内部命令 `ResizeToDefault` 重新发送 `TerminalResize`，用于 viewer 全部离开后将 pane 恢复到默认尺寸。
+5. anchor 不转发外部输入，不会把内部 cookie/token 泄露给浏览器。anchor 的 terminal WS 不计入 viewer 计数。
 
-这个 anchor 只用于让 zellij read-only watcher 有普通 client 可 follow，不转发外部输入，不发送 resize/metrics，也不会把内部 cookie/token 泄露给浏览器。anchor 按 zellij session 维度复用；如果 anchor 失败，proxy 只记录 warning，read-only 请求继续按正常路径代理。
+anchor 按 zellij session 维度复用；如果 anchor 失败，proxy 只记录 warning，read-only 请求继续按正常路径代理。
+
+### Viewer 计数与 Reset
+
+- 仅统计用户浏览器 `ws/terminal/...` 连接（control WS 不计入）。
+- readonly web terminal 和 writable web terminal 都计入 viewer。
+- anchor 自己的 terminal WS 不计入。
+- terminal viewer count 从非 0 变 0 时，启动 800ms debounce 延迟任务。
+- 延迟到期后再次检查 count，仍为 0 才向 anchor 发送 `ResizeToDefault`。
+- 如果期间有新 terminal WS 连接，取消 pending reset。
+- `relay_ws` 保持消息纯转发，不过滤 viewer resize。
 
 ### Viewport model
 
 Beam 把 terminal viewport 和 card viewport 分开处理：
 
-- terminal viewport 是真实 web viewer 的交互尺寸。zellij web 收到浏览器 control WS 的 resize 后驱动 pane 尺寸；Beam proxy 只透传这条路径，不做拦截或过滤。read-only viewer 和 write viewer 的 resize/metrics 都由 zellij/web 正常处理，Beam 不介入。
+- terminal viewport 是真实 web viewer 的交互尺寸。zellij web 收到浏览器 control WS 的 resize 后驱动 pane 尺寸；Beam proxy 透传这条路径，不做拦截或过滤。默认 pane 尺寸为 160×50（参考 botmux），由 anchor 在建立连接后通过 `TerminalResize` 设置（`TerminalResize` 对应 `ResizeCause::Viewport`，会触发 zellij 重新评估/退出 mobile layout）。所有浏览器 viewer 离开后，anchor 通过 debounce 再次发送 `TerminalResize` 将 pane 恢复到 160×50。
 - card 文本和截图采样由 worker 使用 `dump-screen`（不带 `--full`）捕获当前可见 viewport，不在 Beam 侧额外裁剪或截断。如果飞书平台自身有展示限制，那是平台限制，不在 Beam 里做静默裁剪。
 
 ## Ticket 生命周期

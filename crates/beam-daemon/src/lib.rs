@@ -458,6 +458,10 @@ async fn dashboard_gate(
     request: axum::extract::Request,
     next: middleware::Next,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
+    let path = request.uri().path().to_string();
+    if path == "/api/asks" || path.ends_with("/final-output") {
+        return Ok(next.run(request).await);
+    }
     let token = query.get("token").map(|s| s.as_str());
     require_dashboard_access(&state, &headers, token).await?;
     Ok(next.run(request).await)
@@ -12732,7 +12736,6 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         )
         .route("/api/workflows/{run_id}", get(get_workflow_run))
         .route("/api/trigger", post(api_trigger))
-        .route("/api/asks", post(ask::create_ask))
         .route(
             "/adopt/zellij",
             get(list_zellij_adopt_candidates).post(adopt_zellij_session),
@@ -12787,7 +12790,8 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
             "/sessions/{session_id}/quoted/{message_id}",
             get(quoted_message),
         )
-        .route("/sessions/{session_id}/final-output", post(final_output));
+        .route("/sessions/{session_id}/final-output", post(final_output))
+        .route("/api/asks", post(ask::create_ask));
 
     // Start zellij web server and ensure tokens
     let zellij_web_port = state.config.web.proxy_base_port + 1;
@@ -12935,8 +12939,8 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
     });
 
     let app = Router::new()
-        .merge(open_routes)
         .merge(protected_dashboard)
+        .merge(open_routes)
         .with_state(state);
 
     info!("beam daemon listening on {}", addr);

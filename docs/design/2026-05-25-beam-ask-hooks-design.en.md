@@ -40,6 +40,8 @@ Timeouts and cancellation must write explicit terminal events so recovery can di
 - Recovery after daemon restart should inspect persisted events before deciding whether to re-render, resume, or fail a wait.
 - Hook execution must not bypass existing session ownership, chat, or bot routing checks.
 
+Current OpenCode hook coverage includes both `QuestionAsked` and `permission.asked` events. The latter is what carries permission-requirement prompts in the current CLI flow.
+
 ## Implementation Notes
 
 The hook path should use the same daemon-to-worker channel as other worker control messages. Avoid inventing a second side channel. State transitions should be visible in the same event log used by workflow execution, so that cold attach and recovery can reason from a single source of truth.

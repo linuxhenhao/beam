@@ -16,8 +16,12 @@ use tracing::warn;
 pub struct SpawnOpts {
     pub cwd: String,
     #[allow(dead_code)]
+    /// Desired terminal columns (passed as layout intent; actual pane size is
+    /// managed by the terminal proxy anchor).
     pub cols: u16,
     #[allow(dead_code)]
+    /// Desired terminal rows (passed as layout intent; actual pane size is
+    /// managed by the terminal proxy anchor).
     pub rows: u16,
     pub env: Vec<(String, String)>,
 }

@@ -22,7 +22,10 @@ use tokio_tungstenite::tungstenite::{
 };
 use tracing::{info, warn};
 
-use beam_core::session::Session;
+use beam_core::{
+    DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS,
+    session::Session,
+};
 
 use crate::terminal_auth;
 use crate::terminal_auth::{
@@ -104,6 +107,7 @@ struct ProxyState {
     zellij_tokens: ZellijWebTokens,
     auth_state: TerminalAuthState,
     anchors: ZellijAnchorManager,
+    viewer_counter: ViewerCounter,
 }
 
 #[derive(Clone, Default)]
@@ -114,6 +118,90 @@ struct ZellijAnchorManager {
 struct ZellijAnchorEntry {
     task: JoinHandle<()>,
     started_at: Instant,
+    /// Command sender for internal resize requests (ResizeToDefault).
+    cmd_tx: tokio::sync::mpsc::UnboundedSender<AnchorCommand>,
+}
+
+/// Internal command sent to the anchor task.
+#[derive(Debug, Clone)]
+enum AnchorCommand {
+    /// Resize the pane back to the default 160×50 dimensions.
+    ResizeToDefault,
+}
+
+/// Per-session viewer state for debounced reset logic.
+struct ViewerState {
+    count: usize,
+    /// Pending debounce reset task, if count has dropped to zero.
+    pending_reset: Option<JoinHandle<()>>,
+}
+
+/// Tracks active terminal WebSocket viewer counts and coordinates
+/// debounced reset-to-default resize via the anchor.
+#[derive(Clone)]
+struct ViewerCounter {
+    inner: Arc<Mutex<HashMap<String, ViewerState>>>,
+    anchors: ZellijAnchorManager,
+}
+
+impl ViewerCounter {
+    /// Increment the terminal viewer count for `zellij_session`.
+    /// Cancels any pending debounce reset.
+    async fn increment(&self, zellij_session: &str) {
+        let mut inner = self.inner.lock().await;
+        let state = inner.entry(zellij_session.to_string()).or_insert(ViewerState {
+            count: 0,
+            pending_reset: None,
+        });
+        state.count += 1;
+        if let Some(handle) = state.pending_reset.take() {
+            handle.abort();
+        }
+    }
+
+    /// Decrement the terminal viewer count for `zellij_session`.
+    /// If count reaches zero and no debounce is already pending, spawn a
+    /// debounce task that will send `ResizeToDefault` to the anchor after
+    /// a delay (unless a new viewer connects in the meantime).
+    async fn decrement(&self, zellij_session: &str) {
+        let mut inner = self.inner.lock().await;
+        let state = match inner.get_mut(zellij_session) {
+            Some(s) => s,
+            None => return,
+        };
+        if state.count > 0 {
+            state.count -= 1;
+        }
+        // Only create a new debounce if we just reached zero AND no pending
+        // task already exists (defends against unbalanced double-decrement).
+        if state.count == 0 && state.pending_reset.is_none() {
+            let zellij_session = zellij_session.to_string();
+            let anchors = self.anchors.clone();
+            let counter = self.inner.clone();
+            let handle = tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                let mut inner = counter.lock().await;
+                if let Some(state) = inner.get_mut(&zellij_session) {
+                    if state.count == 0 {
+                        let anchors_map = anchors.anchors.lock().await;
+                        if let Some(entry) = anchors_map.get(&zellij_session) {
+                            if !entry.task.is_finished() {
+                                let _ = entry.cmd_tx.send(AnchorCommand::ResizeToDefault);
+                            }
+                        }
+                        state.pending_reset = None;
+                    }
+                }
+            });
+            state.pending_reset = Some(handle);
+        }
+    }
+}
+
+/// Determine if the `rest` path from `/s/{session_id}/ws/{*rest}` targets
+/// a terminal WebSocket (as opposed to a control WebSocket).
+fn is_terminal_ws_rest(rest: &str) -> bool {
+    rest == "terminal" || rest.starts_with("terminal/")
 }
 
 struct AuthenticatedTerminal {
@@ -143,13 +231,20 @@ pub async fn start_proxy(
     zellij_tokens: ZellijWebTokens,
     auth_state: TerminalAuthState,
 ) -> anyhow::Result<u16> {
+    let anchors = ZellijAnchorManager::default();
+    let viewer_counter = ViewerCounter {
+        inner: Arc::new(Mutex::new(HashMap::new())),
+        anchors: anchors.clone(),
+    };
+
     let state = ProxyState {
         http_client: Client::new(),
         sessions,
         zellij_web_port,
         zellij_tokens,
         auth_state,
-        anchors: ZellijAnchorManager::default(),
+        anchors,
+        viewer_counter,
     };
 
     let app = Router::new()
@@ -382,6 +477,36 @@ async fn zellij_web_login(
 
 // ── Read-only render anchor ─────────────────────────────────────────────
 
+/// Build the JSON text frame for a zellij web control-message resize.
+///
+/// Wire shape follows zellij's `WebClientToWebServerControlMessage`:
+/// ```json
+/// {
+///   "web_client_id": "<id>",
+///   "payload": {
+///     "type": "TerminalResize",
+///     "rows": <u16>,
+///     "cols": <u16>
+///   }
+/// }
+/// ```
+///
+/// `TerminalResize` (ResizeCause::Viewport) is the correct message for
+/// the anchor because it triggers zellij's `ReevaluateMobileMode`, which
+/// exits mobile layout and lets the pane adopt the requested dimensions.
+///
+/// Separated from the WebSocket I/O so it can be unit-tested.
+fn build_web_resize_message(web_client_id: &str, cols: u16, rows: u16) -> serde_json::Value {
+    serde_json::json!({
+        "web_client_id": web_client_id,
+        "payload": {
+            "type": "TerminalResize",
+            "rows": rows,
+            "cols": cols,
+        }
+    })
+}
+
 fn should_ensure_read_only_anchor(
     permission: TerminalPermission,
     tokens: &ZellijWebTokens,
@@ -416,12 +541,14 @@ async fn ensure_read_only_anchor(state: &ProxyState, session_id: &str, zellij_se
     let zellij_session_for_task = zellij_session.to_string();
     let session_id_for_log = session_id.to_string();
 
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let task = tokio::spawn(async move {
         if let Err(err) = run_zellij_anchor_client(
             client,
             zellij_web_port,
             zellij_session_for_task.clone(),
             write_token,
+            cmd_rx,
         )
         .await
         {
@@ -432,11 +559,14 @@ async fn ensure_read_only_anchor(state: &ProxyState, session_id: &str, zellij_se
         }
     });
 
+    // Register the anchor entry so the viewer-counter debounce can reach
+    // the anchor's command channel via ZellijAnchorManager.
     anchors.insert(
         key,
         ZellijAnchorEntry {
             task,
             started_at: Instant::now(),
+            cmd_tx,
         },
     );
 }
@@ -446,6 +576,7 @@ async fn run_zellij_anchor_client(
     zellij_web_port: u16,
     zellij_session: String,
     write_token: String,
+    mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<AnchorCommand>,
 ) -> anyhow::Result<()> {
     let zellij_cookie = zellij_web_login(&client, zellij_web_port, &write_token)
         .await
@@ -477,32 +608,157 @@ async fn run_zellij_anchor_client(
         Some(&format!("web_client_id={web_client_id}")),
     );
 
-    // Keep the hidden client online without sending resize/metrics; those
-    // messages resize the shared zellij pane and pollute dump-screen screenshots.
-    let mut control_ws = connect_ws_with_cookie(&control_url, Some(&zellij_cookie)).await?;
+    // Connect terminal WS first — mirror browser behaviour.
+    // The zellij server listener must finish attaching before a resize can
+    // take effect; waiting for the first terminal frame guarantees that.
     let mut terminal_ws = connect_ws_with_cookie(&terminal_url, Some(&zellij_cookie)).await?;
-    info!("terminal proxy: zellij read-only anchor connected for {zellij_session}");
+    info!("terminal proxy: anchor terminal WS connected for {zellij_session}, waiting for first frame...");
+    {
+        // Drain pings and wait for the first substantive frame (text/binary)
+        // or until the socket closes. Timeout after 5 s to avoid stalling.
+        let deadline = tokio::time::sleep(std::time::Duration::from_secs(5));
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                msg = terminal_ws.next() => {
+                    match msg {
+                        Some(Ok(TungsteniteMessage::Ping(data))) => {
+                            let _ = terminal_ws.send(TungsteniteMessage::Pong(data)).await;
+                        }
+                        Some(Ok(TungsteniteMessage::Close(_))) | None => {
+                            anyhow::bail!("anchor terminal WS closed before first frame");
+                        }
+                        Some(Ok(_)) => break, // got a real frame
+                        Some(Err(err)) => {
+                            anyhow::bail!("anchor terminal WS error before first frame: {err}");
+                        }
+                    }
+                }
+                _ = &mut deadline => {
+                    // No terminal frame within timeout — proceed anyway; the
+                    // resize might still work.
+                    warn!("terminal proxy: anchor no terminal frame after 5 s, proceeding for {zellij_session}");
+                    break;
+                }
+            }
+        }
+    }
 
+    // Connect control WS after the terminal listener is ready.
+    let mut control_ws = connect_ws_with_cookie(&control_url, Some(&zellij_cookie)).await?;
+    info!("terminal proxy: zellij read-only anchor fully connected for {zellij_session}");
+
+    // Wait for the server to send SetConfig (or any initial message) so we
+    // don't race the resize before the control channel is fully set up.
+    {
+        let deadline = tokio::time::sleep(std::time::Duration::from_secs(3));
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                msg = control_ws.next() => {
+                    match msg {
+                        Some(Ok(TungsteniteMessage::Text(text))) => {
+                            // Accept any server→client control message as a
+                            // readiness signal (SetConfig, QueryTerminalSize,
+                            // etc.).
+                            let _ = text; // consumed
+                            break;
+                        }
+                        Some(Ok(TungsteniteMessage::Ping(data))) => {
+                            let _ = control_ws.send(TungsteniteMessage::Pong(data)).await;
+                        }
+                        Some(Ok(TungsteniteMessage::Close(_))) | None => {
+                            anyhow::bail!("anchor control WS closed before SetConfig");
+                        }
+                        Some(Ok(_)) => break, // any non-text non-ping message
+                        Some(Err(err)) => {
+                            anyhow::bail!("anchor control WS error before SetConfig: {err}");
+                        }
+                    }
+                }
+                _ = &mut deadline => {
+                    // No SetConfig within timeout — proceed with resize anyway.
+                    warn!("terminal proxy: anchor no SetConfig after 3 s, proceeding for {zellij_session}");
+                    break;
+                }
+            }
+        }
+    }
+
+    // ── Send initial resize using TerminalResize ──────────────────────
+    // TerminalResize (ResizeCause::Viewport) triggers zellij's
+    // ReevaluateMobileMode, which exits the mobile layout and lets the
+    // pane adopt the requested dimensions (160×50).  We wait for the
+    // terminal first frame and control SetConfig before sending so the
+    // zellij server listener is fully attached.
+    let initial_resize =
+        build_web_resize_message(&web_client_id, DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS);
+    control_ws
+        .send(TungsteniteMessage::Text(
+            initial_resize.to_string().into(),
+        ))
+        .await?;
+    info!(
+        "terminal proxy: anchor sent initial TerminalResize {DEFAULT_TERMINAL_COLS}x{DEFAULT_TERMINAL_ROWS} for {zellij_session}"
+    );
+
+    // ── Event loop: zellij control/terminal + internal commands ─────────
     loop {
         tokio::select! {
+            // Terminal channel: discard frames, just detect close.
             msg = terminal_ws.next() => {
                 match msg {
                     Some(Ok(TungsteniteMessage::Ping(data))) => {
                         let _ = terminal_ws.send(TungsteniteMessage::Pong(data)).await;
                     }
-                    Some(Ok(TungsteniteMessage::Close(_))) | None => break,
+                    Some(Ok(TungsteniteMessage::Close(_))) | None => {
+                        info!("terminal proxy: anchor terminal WS closed for {zellij_session}");
+                        break;
+                    }
                     Some(Ok(_)) => {}
                     Some(Err(err)) => return Err(err.into()),
                 }
             }
+            // Control channel: keep alive, detect close.
             msg = control_ws.next() => {
                 match msg {
                     Some(Ok(TungsteniteMessage::Ping(data))) => {
                         let _ = control_ws.send(TungsteniteMessage::Pong(data)).await;
                     }
-                    Some(Ok(TungsteniteMessage::Close(_))) | None => break,
+                    Some(Ok(TungsteniteMessage::Close(_))) | None => {
+                        info!("terminal proxy: anchor control WS closed for {zellij_session}");
+                        break;
+                    }
                     Some(Ok(_)) => {}
                     Some(Err(err)) => return Err(err.into()),
+                }
+            }
+            // Internal commands from the daemon.
+            cmd = cmd_rx.recv() => {
+                match cmd {
+                    Some(AnchorCommand::ResizeToDefault) => {
+                        let resize_json = build_web_resize_message(
+                            &web_client_id,
+                            DEFAULT_TERMINAL_COLS,
+                            DEFAULT_TERMINAL_ROWS,
+                        );
+                        if let Err(e) = control_ws
+                            .send(TungsteniteMessage::Text(resize_json.to_string().into()))
+                            .await
+                        {
+                            warn!(
+                                "terminal proxy: anchor failed to send ResizeToDefault for {zellij_session}: {e}"
+                            );
+                            return Err(e.into());
+                        }
+                        info!(
+                            "terminal proxy: anchor reset {zellij_session} to {DEFAULT_TERMINAL_COLS}x{DEFAULT_TERMINAL_ROWS}"
+                        );
+                    }
+                    None => {
+                        // Sender dropped — parent no longer managing this anchor.
+                        break;
+                    }
                 }
             }
         }
@@ -742,25 +998,33 @@ async fn handle_session_ws(
 
     let query = req.uri().query().map(|q| q.to_string());
     let zellij_web_port = state.zellij_web_port;
+    let viewer_counter = state.viewer_counter.clone();
+    let zellij_session_for_count = zellij_session.clone();
 
     Ok(ws.on_upgrade(move |client_socket| async move {
         let ws_url = build_ws_target_url(
             zellij_web_port,
-            &format!("{zellij_session}/ws"),
+            &format!("{zellij_session_for_count}/ws"),
             query.as_deref(),
         );
 
+        // Session-level WS always counts as a terminal viewer.
+        viewer_counter.increment(&zellij_session_for_count).await;
+
         // Connect to zellij WS with optional cookie.
-        match connect_ws_with_cookie(&ws_url, Some(&auth.zellij_cookie)).await {
+        let result = connect_ws_with_cookie(&ws_url, Some(&auth.zellij_cookie)).await;
+        match result {
             Ok(zellij_ws) => {
                 relay_ws(client_socket, zellij_ws).await;
             }
             Err(err) => {
                 warn!(
-                    "terminal proxy: failed to connect to zellij session WS {zellij_session}: {err}"
+                    "terminal proxy: failed to connect to zellij session WS {zellij_session_for_count}: {err}"
                 );
             }
         }
+
+        viewer_counter.decrement(&zellij_session_for_count).await;
     }))
 }
 
@@ -806,17 +1070,32 @@ async fn handle_session_root_ws(
     let query = req.uri().query().map(|q| q.to_string());
     let zellij_web_port = state.zellij_web_port;
     let rest_for_log = rest.clone();
+    let viewer_counter = state.viewer_counter.clone();
+    let is_terminal = is_terminal_ws_rest(&rest);
+    let zellij_session_for_count = zellij_session.clone();
 
     Ok(ws.on_upgrade(move |client_socket| async move {
         let ws_url = build_ws_target_url(zellij_web_port, &translated_path, query.as_deref());
 
-        match connect_ws_with_cookie(&ws_url, Some(&auth.zellij_cookie)).await {
+        // Only terminal WebSocket paths (ws/terminal/...) count as viewers;
+        // control WS does not count. The anchor's own terminal WS connections
+        // are internal and never pass through here.
+        if is_terminal {
+            viewer_counter.increment(&zellij_session_for_count).await;
+        }
+
+        let result = connect_ws_with_cookie(&ws_url, Some(&auth.zellij_cookie)).await;
+        match result {
             Ok(zellij_ws) => {
                 relay_ws(client_socket, zellij_ws).await;
             }
             Err(err) => {
                 warn!("terminal proxy: failed to connect to zellij root WS {rest_for_log}: {err}");
             }
+        }
+
+        if is_terminal {
+            viewer_counter.decrement(&zellij_session_for_count).await;
         }
     }))
 }
@@ -1446,5 +1725,182 @@ mod tests {
             result,
             "<html><head><base href=\"/\"></head><body></body></html>"
         );
+    }
+
+    // ── build_web_resize_message tests ────────────────────────────────
+
+    /// Verify the wire shape matches zellij's
+    /// `WebClientToWebServerControlMessage` with a `TerminalResize` payload.
+    #[test]
+    fn build_web_resize_message_constructs_correct_wire_shape() {
+        let msg = build_web_resize_message("abc-123", 120, 36);
+        assert_eq!(msg["web_client_id"], "abc-123");
+        assert_eq!(msg["payload"]["type"], "TerminalResize");
+        assert_eq!(msg["payload"]["cols"], 120);
+        assert_eq!(msg["payload"]["rows"], 36);
+        // No extra top-level keys
+        let obj = msg.as_object().unwrap();
+        assert_eq!(obj.len(), 2, "should only have web_client_id + payload");
+    }
+
+    /// `cols` and `rows` should serialize as JSON numbers (not strings).
+    #[test]
+    fn build_web_resize_message_cols_rows_are_numbers() {
+        let msg = build_web_resize_message("id", 80, 24);
+        let cols = &msg["payload"]["cols"];
+        let rows = &msg["payload"]["rows"];
+        assert!(cols.is_number(), "cols must be a number, got {:?}", cols);
+        assert!(rows.is_number(), "rows must be a number, got {:?}", rows);
+    }
+
+    /// Round-trip: produced JSON must survive a serde parse as a generic Value.
+    #[test]
+    fn build_web_resize_message_round_trips() {
+        let msg = build_web_resize_message("test-client", 100, 50);
+        let json_str = msg.to_string();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("should parse as valid JSON");
+        assert_eq!(parsed["web_client_id"], "test-client");
+        assert_eq!(parsed["payload"]["type"], "TerminalResize");
+    }
+
+    /// Anchor default resize uses `TerminalResize` (not TerminalSizeSettled)
+    /// with 160×50 dimensions.
+    #[test]
+    fn anchor_default_resize_uses_terminal_resize_type_160x50() {
+        let msg = build_web_resize_message("anchor-1", 160, 50);
+        assert_eq!(msg["payload"]["type"], "TerminalResize");
+        assert_eq!(msg["payload"]["cols"], 160);
+        assert_eq!(msg["payload"]["rows"], 50);
+    }
+
+    // ── is_terminal_ws_rest tests ──────────────────────────────────────
+
+    #[test]
+    fn terminal_ws_rest_paths_identified() {
+        assert!(is_terminal_ws_rest("terminal"));
+        assert!(is_terminal_ws_rest("terminal/beam-abc-123"));
+        assert!(is_terminal_ws_rest("terminal/some-session"));
+    }
+
+    #[test]
+    fn control_ws_rest_path_not_terminal() {
+        assert!(!is_terminal_ws_rest("control"));
+        assert!(!is_terminal_ws_rest(""));
+        assert!(!is_terminal_ws_rest("something-else"));
+    }
+
+    // ── ViewerCounter tests ───────────────────────────────────────────
+
+    /// Build a ViewerCounter backed by a ZellijAnchorManager that contains
+    /// a dummy (never-finishing) anchor entry with a real command channel.
+    /// Returns the counter and the receiver so tests can assert on commands.
+    fn viewer_counter_with_dummy_anchor(
+        session: &str,
+    ) -> (
+        ViewerCounter,
+        tokio::sync::mpsc::UnboundedReceiver<AnchorCommand>,
+    ) {
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let dummy_task = tokio::spawn(std::future::pending::<()>());
+        let entry = ZellijAnchorEntry {
+            task: dummy_task,
+            started_at: Instant::now(),
+            cmd_tx,
+        };
+        let mut anchors_map = HashMap::new();
+        anchors_map.insert(session.to_string(), entry);
+        let anchors = ZellijAnchorManager {
+            anchors: Arc::new(Mutex::new(anchors_map)),
+        };
+        let vc = ViewerCounter {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            anchors,
+        };
+        (vc, cmd_rx)
+    }
+
+    /// Increment and decrement are tracked per session.
+    #[tokio::test]
+    async fn viewer_counter_increment_decrement() {
+        let (vc, _cmd_rx) = viewer_counter_with_dummy_anchor("sess-1");
+
+        vc.increment("sess-1").await;
+        vc.increment("sess-1").await;
+        assert_eq!(vc.inner.lock().await.get("sess-1").unwrap().count, 2);
+
+        vc.decrement("sess-1").await;
+        assert_eq!(vc.inner.lock().await.get("sess-1").unwrap().count, 1);
+    }
+
+    /// Decrement for a session that has never been incremented is a no-op.
+    #[tokio::test]
+    async fn viewer_counter_decrement_below_zero_is_noop() {
+        let (vc, _cmd_rx) = viewer_counter_with_dummy_anchor("s");
+        vc.decrement("no-such-session").await;
+        assert!(vc.inner.lock().await.get("no-such-session").is_none());
+    }
+
+    /// Defensive: a second decrement when count is already 0 and a debounce
+    /// task is pending MUST NOT spawn a second task (no leak).
+    #[tokio::test]
+    async fn viewer_counter_double_decrement_no_duplicate_debounce() {
+        let (vc, _cmd_rx) = viewer_counter_with_dummy_anchor("s");
+
+        vc.increment("s").await;
+        vc.decrement("s").await; // count 0 → spawns first debounce
+        vc.decrement("s").await; // count still 0, debounce already pending
+
+        let inner = vc.inner.lock().await;
+        let state = inner.get("s").unwrap();
+        assert_eq!(state.count, 0);
+        assert!(
+            state.pending_reset.is_some(),
+            "first debounce should still exist"
+        );
+        // The old handle hasn't been replaced; we can't easily count tasks
+        // but this assertion proves state.pending_reset.is_some() guard works.
+    }
+
+    /// Count 1→0: debounce fires after >800ms and sends ResizeToDefault to
+    /// the anchor's command channel.
+    #[tokio::test]
+    async fn viewer_counter_debounce_sends_resize_to_default_after_delay() {
+        let (vc, mut cmd_rx) = viewer_counter_with_dummy_anchor("test-sess");
+
+        vc.increment("test-sess").await;
+        vc.decrement("test-sess").await; // count 0 → spawns debounce
+
+        // The debounce task sleeps 800ms; wait long enough for it to fire.
+        tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+
+        // Expect exactly one ResizeToDefault command on the channel.
+        match tokio::time::timeout(std::time::Duration::from_secs(1), cmd_rx.recv()).await
+        {
+            Ok(Some(AnchorCommand::ResizeToDefault)) => { /* expected */ }
+            Ok(None) => panic!("channel closed unexpectedly"),
+            Err(_elapsed) => panic!("timed out waiting for ResizeToDefault"),
+        }
+    }
+
+    /// Count 1→0→1 (reconnect during debounce window): the debounce is
+    /// cancelled and no ResizeToDefault is sent.
+    #[tokio::test]
+    async fn viewer_counter_debounce_skips_on_reconnect() {
+        let (vc, mut cmd_rx) = viewer_counter_with_dummy_anchor("test-sess");
+
+        vc.increment("test-sess").await;
+        vc.decrement("test-sess").await; // count 0 → debounce starts
+        vc.increment("test-sess").await; // reconnect immediately → abort debounce
+
+        // Sleep past the 800ms debounce window.
+        tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+
+        // The command channel should NOT contain any message.
+        match tokio::time::timeout(std::time::Duration::from_millis(100), cmd_rx.recv()).await
+        {
+            Ok(None) | Err(tokio::time::error::Elapsed { .. }) => { /* expected — no message */ }
+            Ok(Some(cmd)) => panic!("unexpected command after reconnect: {:?}", cmd),
+        }
     }
 }
