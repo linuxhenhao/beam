@@ -89,6 +89,7 @@ import {{ spawnSync }} from "child_process";
 
 const BEAM_BIN = {exe_json};
 const BEAM_CLI_ID = {cli_json};
+const seenPermissionIds = new Set();
 
 function runBeamHook(payload) {{
   try {{
@@ -111,9 +112,10 @@ function normalizePermissionPayload(input) {{
       ? [input.pattern]
       : [];
   return {{
-    hook_event_name: "permission.ask",
+    hook_event_name: "permission.asked",
     id: input?.id ?? "",
-    permission: input?.type ?? input?.title ?? "permission request",
+    sessionID: input?.sessionID ?? "",
+    permission: input?.permission ?? input?.type ?? input?.title ?? "permission request",
     patterns,
     metadata: input?.metadata ?? {{}},
     tool: {{
@@ -126,25 +128,54 @@ function normalizePermissionPayload(input) {{
 function handlePermission(input, output) {{
   const directive = runBeamHook(normalizePermissionPayload(input));
   if (!directive || directive.type !== "permission") return;
-  output.status = directive.reply === "reject" ? "deny" : "allow";
+  if (output) {{
+    output.status = directive.reply === "reject" ? "deny" : "allow";
+  }}
+  return directive;
+}}
+
+async function replyPermission(serverUrl, requestID, reply) {{
+  if (!serverUrl || !requestID || !reply) return;
+  await fetch(new URL(`/permission/${{requestID}}/reply`, serverUrl), {{
+    method: "POST",
+    headers: {{ "content-type": "application/json" }},
+    body: JSON.stringify({{ reply }}),
+  }});
+}}
+
+async function handleQuestion(event, serverUrl) {{
+  const directive = runBeamHook({{
+    hook_event_name: event.type,
+    ...(event.properties ?? {{}}),
+  }});
+  if (!directive || directive.type !== "answer") return;
+  await fetch(new URL(`/question/${{event.properties.id}}/reply`, serverUrl), {{
+    method: "POST",
+    headers: {{ "content-type": "application/json" }},
+    body: JSON.stringify({{ answers: directive.answers ?? [] }}),
+  }});
 }}
 
 export const BeamAskPlugin = async ({{ serverUrl }}) => ({{
   event: async ({{ event }}) => {{
-    if (event?.type !== "question.asked") return;
-    const directive = runBeamHook({{
-      hook_event_name: event.type,
-      ...(event.properties ?? {{}}),
-    }});
-    if (!directive || directive.type !== "answer") return;
-    await fetch(new URL(`/question/${{event.properties.id}}/reply`, serverUrl), {{
-      method: "POST",
-      headers: {{ "content-type": "application/json" }},
-      body: JSON.stringify({{ answers: directive.answers ?? [] }}),
-    }});
-  }},
-  "permission.asked": async (input, output) => {{
-    handlePermission(input, output);
+    if (event?.type === "question.asked") {{
+      await handleQuestion(event, serverUrl);
+      return;
+    }}
+    if (event?.type === "permission.asked") {{
+      const requestID = event.properties?.id;
+      if (requestID && seenPermissionIds.has(requestID)) {{
+        return;
+      }}
+      if (requestID) {{
+        seenPermissionIds.add(requestID);
+      }}
+      const directive = handlePermission(event.properties, undefined);
+      if (directive?.type === "permission") {{
+        await replyPermission(serverUrl, requestID, directive.reply);
+      }}
+      return;
+    }}
   }},
 }});
 "#
@@ -205,6 +236,10 @@ mod tests {
         assert!(opencode_raw.contains("BeamAskPlugin"));
         assert!(opencode_raw.contains("question.asked"));
         assert!(opencode_raw.contains("permission.asked"));
+        assert!(opencode_raw.contains("seenPermissionIds"));
+        assert!(opencode_raw.contains("/permission/${requestID}/reply"));
+        assert!(!opencode_raw.contains("appendFileSync"));
+        assert!(!opencode_raw.contains("LOG_PATH"));
         let _ = std::fs::remove_dir_all(root);
     }
 }
