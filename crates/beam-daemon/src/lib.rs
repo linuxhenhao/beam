@@ -15284,6 +15284,161 @@ mod tests {
     }
 
     #[test]
+    fn ws_card_action_handler_routes_ask_toggle_and_submit() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let _env_lock = lark_base_url_env_lock().lock().expect("lark env lock");
+            let base_url = start_mock_lark_server().await;
+            let _env_guard = LarkBaseUrlEnvGuard::set(&base_url);
+
+            let app_id = "app-ask-ws";
+            let bot = BotConfig {
+                name: None,
+                lark_app_id: app_id.to_string(),
+                lark_app_secret: "secret".to_string(),
+                cli_id: "opencode".to_string(),
+                cli_bin: None,
+                model: None,
+                working_dir: None,
+                lark_encrypt_key: None,
+                lark_verification_token: None,
+                allowed_users: vec!["ou_approver".to_string()],
+                private_card: false,
+                allowed_chat_groups: Vec::new(),
+                chat_grants: std::collections::HashMap::new(),
+                global_grants: Vec::new(),
+                oncall_chats: Vec::new(),
+                restrict_grant_commands: false,
+                message_quota: None,
+                quota_state: std::collections::HashMap::new(),
+            };
+            let paths = temp_paths("ask-ws");
+            let state = make_state(paths.clone(), HashMap::from([(app_id.to_string(), bot)]));
+
+            let ask_body = serde_json::json!({
+                "sessionId": "sess-ask-ws",
+                "chatId": "chat-1",
+                "larkAppId": app_id,
+                "rootMessageId": null,
+                "timeoutMs": 10_000,
+                "approvers": ["ou_approver"],
+                "questions": [{
+                    "prompt": "Approve OpenCode permission?",
+                    "multiSelect": false,
+                    "options": [
+                        { "key": "always", "label": "Always allow" },
+                        { "key": "reject", "label": "Reject" }
+                    ]
+                }]
+            });
+
+            let create_state = state.clone();
+            let create_task =
+                tokio::spawn(
+                    async move { ask::create_ask(State(create_state), Json(ask_body)).await },
+                );
+
+            let snapshot = {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                loop {
+                    if let Ok(Some(snaps)) = beam_core::persist::read_json::<
+                        Vec<ask::AskPendingSnapshot>,
+                    >(&paths.ask_pending_json())
+                    {
+                        if let Some(snap) = snaps.into_iter().next() {
+                            break snap;
+                        }
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "ask pending snapshot was not persisted"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            };
+
+            let handler = LarkWsCardActionEventHandler {
+                state: state.clone(),
+                app_id: app_id.to_string(),
+                event_type: "card.action.trigger",
+            };
+
+            let toggle_event = mock_card_action_event(serde_json::json!({
+                "operator": { "open_id": "ou_approver" },
+                "context": { "open_message_id": "om_ask_card" },
+                "action": {
+                    "value": {
+                        "action": "ask_toggle",
+                        "ask_id": snapshot.ask_id,
+                        "nonce": snapshot.nonce,
+                        "question_index": 0,
+                        "key": "always"
+                    }
+                }
+            }));
+            let toggle_resp = handler
+                .handle(toggle_event)
+                .await
+                .expect("toggle event handler")
+                .expect("toggle event response");
+            let toggle_body: Value =
+                serde_json::from_slice(&toggle_resp.body).expect("toggle body");
+            assert_eq!(
+                toggle_body.pointer("/toast/type").and_then(Value::as_str),
+                Some("success")
+            );
+
+            let submit_event = mock_card_action_event(serde_json::json!({
+                "operator": { "open_id": "ou_approver" },
+                "context": { "open_message_id": "om_ask_card" },
+                "action": {
+                    "value": {
+                        "action": "ask_submit",
+                        "ask_id": snapshot.ask_id,
+                        "nonce": snapshot.nonce
+                    }
+                }
+            }));
+            let submit_resp = handler
+                .handle(submit_event)
+                .await
+                .expect("submit event handler")
+                .expect("submit event response");
+            let submit_body: Value =
+                serde_json::from_slice(&submit_resp.body).expect("submit body");
+            assert_eq!(
+                submit_body
+                    .pointer("/toast/content")
+                    .and_then(Value::as_str),
+                Some("ask submitted")
+            );
+
+            let create_response = create_task
+                .await
+                .expect("create task join")
+                .expect("create ask");
+            assert_eq!(
+                create_response.0.pointer("/kind").and_then(Value::as_str),
+                Some("answered")
+            );
+            assert_eq!(
+                create_response
+                    .0
+                    .pointer("/answers/0/0")
+                    .and_then(Value::as_str),
+                Some("always")
+            );
+            assert_eq!(
+                create_response.0.pointer("/by").and_then(Value::as_str),
+                Some("ou_approver")
+            );
+        });
+    }
+
+    #[test]
     fn build_streaming_card_shows_retry_button_when_limit_is_ready() {
         let mut session = make_session("sess-limit");
         session.last_screen_status = Some(ScreenStatus::Limited);
@@ -17507,13 +17662,11 @@ mod tests {
             .iter()
             .filter(|e| e["tag"].as_str() == Some("action"))
             .find_map(|e| {
-                e["actions"]
-                    .as_array()
-                    .and_then(|actions| {
-                        actions
-                            .iter()
-                            .find(|a| a["tag"].as_str() == Some("select_static"))
-                    })
+                e["actions"].as_array().and_then(|actions| {
+                    actions
+                        .iter()
+                        .find(|a| a["tag"].as_str() == Some("select_static"))
+                })
             })
             .expect("card should contain select_static dropdown inside action.actions");
         // Verify no bare select_static at the top level

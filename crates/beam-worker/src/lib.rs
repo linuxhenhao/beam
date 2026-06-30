@@ -12,9 +12,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont, point};
 use anyhow::{Context, Result};
 use beam_core::{
-    BeamPaths, CliUsageLimitKind, CliUsageLimitState, DaemonToWorker, DEFAULT_TERMINAL_COLS,
-    DEFAULT_TERMINAL_ROWS, DisplayMode, InitConfig, ScreenAnalyzerConfig, ScreenStatus,
-    TermActionKey, TuiPromptOption, WorkerToDaemon,
+    BeamPaths, CliUsageLimitKind, CliUsageLimitState, DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS,
+    DaemonToWorker, DisplayMode, InitConfig, ScreenAnalyzerConfig, ScreenStatus, TermActionKey,
+    TuiPromptOption, WorkerToDaemon,
 };
 use image::{ColorType, ImageBuffer, ImageEncoder, Rgba, codecs::png::PngEncoder};
 use reqwest::multipart::{Form, Part};

@@ -22,10 +22,7 @@ use tokio_tungstenite::tungstenite::{
 };
 use tracing::{info, warn};
 
-use beam_core::{
-    DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS,
-    session::Session,
-};
+use beam_core::{DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS, session::Session};
 
 use crate::terminal_auth;
 use crate::terminal_auth::{
@@ -149,10 +146,12 @@ impl ViewerCounter {
     /// Cancels any pending debounce reset.
     async fn increment(&self, zellij_session: &str) {
         let mut inner = self.inner.lock().await;
-        let state = inner.entry(zellij_session.to_string()).or_insert(ViewerState {
-            count: 0,
-            pending_reset: None,
-        });
+        let state = inner
+            .entry(zellij_session.to_string())
+            .or_insert(ViewerState {
+                count: 0,
+                pending_reset: None,
+            });
         state.count += 1;
         if let Some(handle) = state.pending_reset.take() {
             handle.abort();
@@ -612,7 +611,9 @@ async fn run_zellij_anchor_client(
     // The zellij server listener must finish attaching before a resize can
     // take effect; waiting for the first terminal frame guarantees that.
     let mut terminal_ws = connect_ws_with_cookie(&terminal_url, Some(&zellij_cookie)).await?;
-    info!("terminal proxy: anchor terminal WS connected for {zellij_session}, waiting for first frame...");
+    info!(
+        "terminal proxy: anchor terminal WS connected for {zellij_session}, waiting for first frame..."
+    );
     {
         // Drain pings and wait for the first substantive frame (text/binary)
         // or until the socket closes. Timeout after 5 s to avoid stalling.
@@ -694,9 +695,7 @@ async fn run_zellij_anchor_client(
     let initial_resize =
         build_web_resize_message(&web_client_id, DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS);
     control_ws
-        .send(TungsteniteMessage::Text(
-            initial_resize.to_string().into(),
-        ))
+        .send(TungsteniteMessage::Text(initial_resize.to_string().into()))
         .await?;
     info!(
         "terminal proxy: anchor sent initial TerminalResize {DEFAULT_TERMINAL_COLS}x{DEFAULT_TERMINAL_ROWS} for {zellij_session}"
@@ -1875,8 +1874,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(900)).await;
 
         // Expect exactly one ResizeToDefault command on the channel.
-        match tokio::time::timeout(std::time::Duration::from_secs(1), cmd_rx.recv()).await
-        {
+        match tokio::time::timeout(std::time::Duration::from_secs(1), cmd_rx.recv()).await {
             Ok(Some(AnchorCommand::ResizeToDefault)) => { /* expected */ }
             Ok(None) => panic!("channel closed unexpectedly"),
             Err(_elapsed) => panic!("timed out waiting for ResizeToDefault"),
@@ -1897,8 +1895,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(900)).await;
 
         // The command channel should NOT contain any message.
-        match tokio::time::timeout(std::time::Duration::from_millis(100), cmd_rx.recv()).await
-        {
+        match tokio::time::timeout(std::time::Duration::from_millis(100), cmd_rx.recv()).await {
             Ok(None) | Err(tokio::time::error::Elapsed { .. }) => { /* expected — no message */ }
             Ok(Some(cmd)) => panic!("unexpected command after reconnect: {:?}", cmd),
         }

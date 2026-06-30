@@ -6,8 +6,8 @@ use axum::{Json, extract::State, http::StatusCode};
 use beam_core::{AskQuestion, AskRequest, AskResult};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
-use uuid::Uuid;
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use crate::{
     AppState, build_lark_card_action_toast, internal_error, lark_reply_card, send_lark_card_in_chat,
@@ -324,10 +324,9 @@ mod tests {
     use tokio::sync::Mutex;
 
     fn make_state(session_owner: Option<&str>, allowed_users: Vec<&str>) -> AppState {
-        let paths = BeamPaths::from_root(std::env::temp_dir().join(format!(
-            "beam-ask-approvers-{}",
-            std::process::id()
-        )));
+        let paths = BeamPaths::from_root(
+            std::env::temp_dir().join(format!("beam-ask-approvers-{}", std::process::id())),
+        );
         let mut sessions = HashMap::new();
         if let Some(owner_open_id) = session_owner {
             sessions.insert(

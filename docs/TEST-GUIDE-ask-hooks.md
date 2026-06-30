@@ -1,27 +1,25 @@
 # 测试指南：beam askUserQuestion hook 接管
 
-分支：`feat/beam-ask-hooks`（已推送 origin）。本期支持 **Claude Code + OpenCode**；Codex 不适用（无结构化提问 hook）。
+本期支持 **Claude Code + OpenCode**；Codex 不适用（无结构化提问 hook）。
 
 ## 1. 拉代码 + 构建（在另一台环境的 beam 仓库里）
 
 ```bash
 cd <你的 beam 仓库目录>
 git fetch origin
-git checkout feat/beam-ask-hooks      # 已在该分支则 git pull
-pnpm install
-pnpm build                              # tsc 干净，产出 dist/
+cargo build -p beam-cli
 ```
 
-确认 beam 可执行指向这个仓库的 dist：
+确认用于验证的 beam 可执行是当前仓库构建产物：
 ```bash
-cat "$(which beam)"                    # 应 exec node <本仓库>/dist/cli.js
+./target/debug/beam --version
 ```
 
 ## 2. 重启 daemon 让它跑新代码
 
 ```bash
-beam restart
-beam status                            # 确认 online
+./target/debug/beam restart
+./target/debug/beam status             # 确认 online
 ```
 
 ## 3. 确认 hook 被装上（spawn 一个会话后）
@@ -60,9 +58,9 @@ ls -l ~/.config/opencode/plugins/beam-ask.js
 
 - daemon 日志：`beam logs --bot <bot 名或序号>`，找 `[hook]`（安装）和 `[ask:...]`（提问生命周期）行。
 - 三个"线上没验过、各隔离在一处"的点，行为异常时按序查：
-  1. **飞书多选回调形状** → `src/im/lark/ask-card.ts` 的 `parseFormSelections`（已防御式兼容 数组/字符串/逗号串；若飞书回的格式更怪，这里加一种）。
-  2. **OpenCode 插件 question.asked / permission.asked API** → `src/adapters/hook-installer.ts`（有 `TODO(dogfood)` 标记；插件协议若对不上，改这一处）。
-  3. **Claude/OpenCode directive 形状** → `src/core/ask-hook/{claude-code,opencode}.ts` 的 `formatAnswer`（回填字段若 CLI 不认，改这一处）。
+  1. **飞书多选回调形状** → `crates/beam-daemon/src/lib.rs` 的 ask card action 解析与测试（若飞书回的格式更怪，这里加兼容）。
+  2. **OpenCode 插件 question.asked / permission.asked API** → `crates/beam-cli/assets/opencode/beam-ask.js`（模板）和 `crates/beam-cli/src/hook_setup.rs`（安装）；permission 回填走注入的 v1 client API，插件协议若对不上，改这两处。
+  3. **Claude/OpenCode directive 形状** → `crates/beam-cli/src/ask_hook.rs` 的解析与回填格式（回填字段若 CLI 不认，改这一处）。
 
 ## 7.（可选）不用 CLI 的快速冒烟：直接打 broker
 

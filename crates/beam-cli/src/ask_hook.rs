@@ -370,8 +370,8 @@ mod tests {
         });
         let parsed = parse_questions("opencode", &payload).expect("parsed");
         assert_eq!(parsed.kind, AskKind::Permission);
-        let directive = format_answer("opencode", &[vec!["once".to_string()]], &parsed)
-            .expect("directive");
+        let directive =
+            format_answer("opencode", &[vec!["once".to_string()]], &parsed).expect("directive");
         assert!(directive.contains("\"type\":\"permission\""));
         assert!(directive.contains("\"reply\":\"once\""));
         assert!(directive.contains("perm_123"));
