@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.3.2...beam-worker-v0.3.3) - 2026-06-30
+
+### Fixed
+
+- *(opencode)* 修复权限确认回填
+- *(runtime)* 修复 hook 输出和 slash 透传执行
+- *(terminal-proxy)* anchor 发送 TermnalResize 设默认 160×50，viewer 断开后 debounce 复位
+
+### Other
+
+- Merge pull request #22 from linuxhenhao/fix/dump_screen
+
 ## [0.3.2](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.3.1...beam-worker-v0.3.2) - 2026-06-27
 
 ### Fixed
