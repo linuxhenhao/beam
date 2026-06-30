@@ -2032,9 +2032,7 @@ mod tests {
         // inside an action.actions array, NOT as a bare top-level element.
         // A bare select_static would not render in Feishu cards.
         let dirs: Vec<String> = (0..10).map(|i| format!("project-{:03}", i)).collect();
-        let card = build_dir_select_card(
-            "pid", "/root", "test", &dirs, &dirs, None, None, None,
-        );
+        let card = build_dir_select_card("pid", "/root", "test", &dirs, &dirs, None, None, None);
         let v: Value = serde_json::from_str(&card).expect("valid card JSON");
         let elements = v["elements"].as_array().unwrap();
 
@@ -2056,9 +2054,7 @@ mod tests {
 
         // Verify the select_static has the correct content
         let select = found.unwrap();
-        let placeholder = select["placeholder"]["content"]
-            .as_str()
-            .unwrap_or("");
+        let placeholder = select["placeholder"]["content"].as_str().unwrap_or("");
         assert!(
             placeholder.contains("选择"),
             "select_static should have a meaningful placeholder"
@@ -2068,7 +2064,9 @@ mod tests {
 
         // Each option value must be valid JSON with action/pending_id/working_dir
         for opt in options {
-            let val_str = opt["value"].as_str().expect("option value must be a string");
+            let val_str = opt["value"]
+                .as_str()
+                .expect("option value must be a string");
             let parsed: Value =
                 serde_json::from_str(val_str).expect("option value must be valid JSON");
             assert_eq!(
@@ -2095,7 +2093,14 @@ mod tests {
         // instructional text — it should NOT look like a clickable title.
         let dirs = vec!["project-a".to_string(), "project-b".to_string()];
         let card = build_dir_select_card(
-            "pid", "/root", "test", &dirs, &dirs, None, Some("test"), None,
+            "pid",
+            "/root",
+            "test",
+            &dirs,
+            &dirs,
+            None,
+            Some("test"),
+            None,
         );
         let v: Value = serde_json::from_str(&card).expect("valid card JSON");
         let elements = v["elements"].as_array().unwrap();
@@ -2128,9 +2133,7 @@ mod tests {
             "input default_value should reflect the search keyword"
         );
         // Placeholder should be instructive
-        let placeholder = input["placeholder"]["content"]
-            .as_str()
-            .unwrap_or("");
+        let placeholder = input["placeholder"]["content"].as_str().unwrap_or("");
         assert!(
             placeholder.contains("关键词"),
             "input placeholder should mention keywords"
@@ -2159,9 +2162,7 @@ mod tests {
         // One button must be the best-match button with action=dir_select_best
         let best_btn = buttons
             .iter()
-            .find(|b| {
-                b.pointer("/value/action").and_then(Value::as_str) == Some("dir_select_best")
-            })
+            .find(|b| b.pointer("/value/action").and_then(Value::as_str) == Some("dir_select_best"))
             .expect("must have a dir_select_best button");
         assert_eq!(
             best_btn["action_type"].as_str(),

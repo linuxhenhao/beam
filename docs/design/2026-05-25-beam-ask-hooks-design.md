@@ -4,7 +4,7 @@ English: [2026-05-25-beam-ask-hooks-design.en.md](2026-05-25-beam-ask-hooks-desi
 
 - 日期：2026-05-25
 - 分支：`feat/beam-ask-hooks`（基于 `feat/beam-ask`）
-- 状态：设计待评审
+- 状态：已落地到 Rust 实现；本文保留原始设计背景，并在实现说明中记录当前代码路径。
 
 ## 1. 背景与目标
 
@@ -35,11 +35,11 @@ English: [2026-05-25-beam-ask-hooks-design.en.md](2026-05-25-beam-ask-hooks-desi
 
 | 知识点 | 内容 |
 | --- | --- |
-| askUserQuestion 入口事件 | Claude=`PermissionRequest`(tool=AskUserQuestion)；Codex=`PermissionRequest`(permission_request)；OpenCode=`QuestionAsked` |
+| askUserQuestion 入口事件 | Claude=`PermissionRequest`(tool=AskUserQuestion)；Codex=`PermissionRequest`(permission_request)；OpenCode=`QuestionAsked` / `permission.asked` |
 | payload 字段形状 | `tool_input.questions[]`，每项含 `question`、`options[]`、`multiSelect`；各家异名/嵌套差异 |
-| 阻塞式回填协议 | 这三家的 hook 是"发出后挂起等响应"，答案以 directive 形式写回 stdout 被 CLI 消费——**不碰键盘也能回答**的关键 |
-| hook 安装格式 | Claude=`~/.claude/settings.json` hooks；Codex=`~/.codex/hooks.json`+`config.toml`；OpenCode=JS 插件 |
-| directive 形状 | Claude=`hookSpecificOutput.decision.updatedInput.answers`；OpenCode=`{type:'answer', answers:string[][]}` |
+| 阻塞式回填协议 | Claude hook 通过 stdout directive 回填；OpenCode question 通过插件回调给 `beam hook opencode`，permission 通过注入的 OpenCode v1 client 直接 reply |
+| hook 安装格式 | Claude=`~/.claude/settings.json` hooks；Codex 不安装结构化 ask hook；OpenCode=JS 插件，安装到 `~/.config/opencode/plugins/beam-ask.js` |
+| directive / reply 形状 | Claude=`hookSpecificOutput.decision.updatedInput.answers`；OpenCode question=`{type:'answer', answers:string[][]}`；OpenCode permission=`postSessionIdPermissionsPermissionId({ path:{ id:sessionID, permissionID:requestID }, body:{ response } })` |
 
 > 注：以上为设计输入，实现时需在 beam 内对各 CLI 当前版本逐一**实测核验**，不照抄桌面端的具体字段常量。
 
@@ -47,7 +47,7 @@ English: [2026-05-25-beam-ask-hooks-design.en.md](2026-05-25-beam-ask-hooks-desi
 
 ```
 agent 调用原生 AskUserQuestion
-  → CLI 触发 hook（Claude=PermissionRequest / Codex=permission_request / OpenCode=QuestionAsked）
+  → CLI 触发 hook（Claude=PermissionRequest / Codex=permission_request / OpenCode=QuestionAsked / permission.asked）
   → 执行 `beam hook <cliId>`（新子命令；hook 客户端）
       · 从 stdin 读 hook JSON
       · 按 cliId 用 adapter 解析出 { prompt, options[] }
@@ -67,14 +67,14 @@ agent 调用原生 AskUserQuestion
 
 ## 5. 组件分解
 
-### 5.1 hook 客户端：`beam hook <cliId>`（新增 `src/cli.ts` 子命令）
+### 5.1 hook 客户端：`beam hook <cliId>`（Rust：`crates/beam-cli/src/ask_hook.rs`）
 
 - 职责：stdin→解析→POST `/api/asks`→等结果→stdout 输出 directive。
 - 与 `cmdAsk` 共享 daemon 发现（`findDaemon`）、`/api/asks` POST、长轮询逻辑——抽出公共 `postAsk()` 复用，避免两份。
 - 输入：`cliId`（claude-code / codex / opencode）作为参数；hook JSON 从 stdin。
 - 输出：directive JSON 到 stdout（成功）或安全的"放行/无操作"directive（降级，见 §9）。
 
-### 5.2 per-CLI adapter 归一层（新增 `src/core/ask-hook/<cliId>.ts`）
+### 5.2 per-CLI adapter 归一层（Rust：`crates/beam-cli/src/ask_hook.rs`）
 
 每个 CLI 一个纯模块，两个纯函数（已按多问 + 多选建模）：
 
@@ -90,16 +90,22 @@ parseQuestions(payload: unknown): { questions: AskQuestion[]; raw: ParsedRaw } |
 formatAnswer(answersByQuestion: string[][], raw: ParsedRaw): string
 ```
 
-- `claude-code.ts`、`codex.ts`、`opencode.ts` 三份。
-- 纯函数、无 IO，便于单测（对照各 CLI 真实 payload 样本，含多问 / 多选样本）。
-- 通过 `src/core/ask-hook/registry.ts` 按 cliId 分发。
+- 当前 Rust 实现集中在 `crates/beam-cli/src/ask_hook.rs`，由 `beam hook <cliId>` 按 cliId 分发。
+- 纯解析/格式化逻辑有单测覆盖（对照各 CLI 真实 payload 样本，含多问 / 多选样本）。
 
-### 5.3 hook 安装：`ensureHooks(cliId, adapter)`（新增 `src/adapters/hook-installer.ts`）
+### 5.3 hook 安装：`install_hooks_at`（Rust：`crates/beam-cli/src/hook_setup.rs`）
 
-- 紧贴 `src/core/worker-pool.ts:351` 现有 `ensureSkills(cliId, adapter.skillsDir)` 之后调用。
-- 在 `src/adapters/cli/types.ts` 的 adapter 接口上加可选元数据（hook 配置文件路径 + 写入格式），仅 claude-code / codex / opencode 三家填。
 - 幂等：内容不变不写（对齐 `ensureSkills` 行为）。
-- 把对应 CLI 的 hook 配置写好，命令指向 `beam hook <cliId>`。
+- Claude hook 写入 `~/.claude/settings.json`，命令指向 `beam hook claude-code`。
+- OpenCode 插件模板独立存放在 `crates/beam-cli/assets/opencode/beam-ask.js`，由 `include_str!` 嵌入二进制，并安装到 `~/.config/opencode/plugins/beam-ask.js`。
+- OpenCode 插件只给 OpenCode 使用，内部固定 `BEAM_CLI_ID = "opencode"`；不再通过模板占位符注入 cli id。
+
+### 5.3.1 OpenCode permission 回填约束
+
+- 保持异步 `permission.asked` event，不使用同步 `permission.ask` hook。
+- 使用 OpenCode 注入到插件入参里的 v1 client：`client.postSessionIdPermissionsPermissionId(...)`。
+- 不使用 `serverUrl` 重新构造 HTTP client；本机实际可能没有独立监听端口，插件内 server URL 也可能不可达。
+- 不使用 v2 SDK，除非 OpenCode 插件运行时明确注入 v2 client。
 
 ### 5.4 复用与扩展
 

@@ -72,20 +72,31 @@ Later requests authenticate only with the Beam cookie. After the proxy finds the
 
 In zellij web 0.44.x, read-only clients use the watcher client path. The browser frontend opens the terminal WS first, then opens the control WS after receiving the first frame. If this watcher has no regular client to follow, the first screen may have no terminal frames and the page can appear black.
 
-Beam does not patch zellij JS/assets and does not send the write token or zellij write cookie to the external browser. After a successful read-only login, the proxy creates one hidden regular web client inside the daemon for the same zellij session:
+Beam does not patch zellij JS/assets and does not send the write token or zellij write cookie to the external browser. After a successful read-only login, the proxy creates one hidden regular web client (anchor) inside the daemon for the same zellij session:
 
 1. Calls `/command/login` with the zellij `write_token`; the cookie is stored only inside the daemon process.
 2. Calls zellij root `/session` to create a regular `web_client_id`.
-3. Connects to `/ws/control` and keeps it open, but does not send `TerminalResize` or `TerminalMetrics`.
-4. Connects to `/ws/terminal/{zellij_session}?web_client_id=...` and discards received terminal frames.
+3. Connects to `/ws/terminal/{zellij_session}` first and waits for the first frame (confirming the zellij server listener has attached), then connects to `/ws/control`, waits for `SetConfig`, and sends `TerminalResize` 160×50 through the control WS. `TerminalResize` triggers zellij's `ReevaluateMobileMode`, which exits mobile layout and lets the pane adopt the requested dimensions.
+4. Stays online and can receive internal `ResizeToDefault` commands to restore the pane to default dimensions (via `TerminalResize`) after all viewers disconnect.
+5. The anchor does not forward external input, does not leak internal cookies/tokens to the browser. The anchor's terminal WS does not count toward the viewer count.
 
-This anchor only gives the zellij read-only watcher a regular client to follow. It does not forward external input, does not send resize/metrics, and does not leak internal cookies/tokens to the browser. Anchors are reused per zellij session. If anchor startup fails, the proxy only logs a warning and continues proxying the read-only request normally.
+Anchors are reused per zellij session. If anchor startup fails, the proxy only logs a warning and continues proxying the read-only request normally.
+
+### Viewer Counting & Reset
+
+- Only user browser `ws/terminal/...` connections are counted (control WS is not counted).
+- Both read-only and writable web terminals count as viewers.
+- The anchor's own terminal WS is not counted.
+- When the terminal viewer count drops from non-zero to zero, an 800ms debounce delay task is started.
+- After the delay expires, the count is re-checked; only if it is still zero is `ResizeToDefault` sent to the anchor.
+- If a new terminal WS connects during the debounce window, the pending reset is cancelled.
+- `relay_ws` remains pure message forward — no viewer resize filtering.
 
 ### Viewport Model
 
 Beam treats terminal viewport and card viewport separately:
 
-- The terminal viewport is the interaction size of the real web viewer. After zellij web receives browser control WS resize events, it drives the pane size; the Beam proxy only relays that path, without intercepting or filtering. Resize/metrics from both read-only and write viewers are handled normally by zellij/web; Beam does not intervene.
+- The terminal viewport is the interaction size of the real web viewer. After zellij web receives browser control WS resize events, it drives the pane size; the Beam proxy only relays that path, without intercepting or filtering. Default pane dimensions are 160×50 (reference: botmux), set by the anchor via `TerminalResize` after establishing connections. `TerminalResize` corresponds to `ResizeCause::Viewport`, which triggers zellij to re-evaluate / exit mobile layout. When all browser viewers leave, the anchor restores the pane to 160×50 via debounce (again using `TerminalResize`).
 - Card text and screenshot sampling is done by the worker using `dump-screen` (without `--full`) to capture the current visible viewport. Beam does not apply additional cropping or truncation. If the Feishu platform itself has display limits, those are platform limits; Beam does not silently crop.
 
 ## Ticket Lifecycle

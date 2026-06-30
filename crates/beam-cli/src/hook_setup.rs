@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde_json::{Map, Value};
 
+const OPENCODE_PLUGIN_TEMPLATE: &str = include_str!("../assets/opencode/beam-ask.js");
+
 fn home_dir() -> PathBuf {
     env::var_os("HOME")
         .map(PathBuf::from)
@@ -25,8 +27,7 @@ fn write_if_changed(path: &Path, content: &str) -> Result<bool> {
 }
 
 fn hook_command(cli_id: &str) -> Result<String> {
-    let exe = env::current_exe()?;
-    Ok(format!("\"{}\" hook {}", exe.display(), cli_id))
+    Ok(format!("beam hook {}", cli_id))
 }
 
 fn install_claude_settings(path: &Path, hook_cmd: &str) -> Result<()> {
@@ -79,36 +80,8 @@ fn install_claude_settings(path: &Path, hook_cmd: &str) -> Result<()> {
     Ok(())
 }
 
-fn install_opencode_plugin(path: &Path, cli_id: &str) -> Result<()> {
-    let exe = env::current_exe()?;
-    let exe_json = serde_json::to_string(&exe.display().to_string())?;
-    let cli_json = serde_json::to_string(cli_id)?;
-    let content = format!(
-        r#"// beam ask hook for OpenCode
-import {{ spawnSync }} from "child_process";
-
-const BEAM_BIN = {exe_json};
-const BEAM_CLI_ID = {cli_json};
-
-export default {{
-  name: "beam-ask",
-  "question.asked"(payload) {{
-    try {{
-      const result = spawnSync(BEAM_BIN, ["hook", BEAM_CLI_ID], {{
-        input: JSON.stringify(payload),
-        encoding: "utf-8",
-        timeout: 86400000,
-      }});
-      if (result.status === 0 && result.stdout && result.stdout.trim()) {{
-        return JSON.parse(result.stdout.trim());
-      }}
-    }} catch {{}}
-    return undefined;
-  }},
-}};
-"#
-    );
-    let _ = write_if_changed(path, &content)?;
+fn install_opencode_plugin(path: &Path) -> Result<()> {
+    let _ = write_if_changed(path, OPENCODE_PLUGIN_TEMPLATE)?;
     Ok(())
 }
 
@@ -125,9 +98,8 @@ fn install_hooks_at(home: &Path) -> Result<()> {
         &home
             .join(".config")
             .join("opencode")
-            .join("plugin")
+            .join("plugins")
             .join("beam-ask.js"),
-        "opencode",
     )?;
     Ok(())
 }
@@ -137,7 +109,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hook_command_quotes_binary_path() {
+    fn hook_command_uses_beam_cli() {
         let cmd = hook_command("claude-code").expect("hook cmd");
         assert!(cmd.contains("hook claude-code"));
     }
@@ -155,14 +127,29 @@ mod tests {
         let opencode = root
             .join(".config")
             .join("opencode")
-            .join("plugin")
+            .join("plugins")
             .join("beam-ask.js");
         let claude_raw = std::fs::read_to_string(&claude).expect("claude settings");
         let opencode_raw = std::fs::read_to_string(&opencode).expect("opencode plugin");
         assert!(claude_raw.contains("AskUserQuestion"));
         assert!(claude_raw.contains("hook claude-code"));
-        assert!(opencode_raw.contains("beam-ask"));
+        assert!(opencode_raw.contains("BeamAskPlugin"));
+        assert!(opencode_raw.contains("const BEAM_CLI_ID = \"opencode\";"));
         assert!(opencode_raw.contains("question.asked"));
+        assert!(opencode_raw.contains("permission.asked"));
+        assert!(opencode_raw.contains("permission.replied"));
+        assert!(opencode_raw.contains("spawn("));
+        assert!(opencode_raw.contains("trackBackground("));
+        assert!(opencode_raw.contains("postSessionIdPermissionsPermissionId"));
+        assert!(opencode_raw.contains("sessionID"));
+        assert!(opencode_raw.contains("client.question.reply"));
+        assert!(opencode_raw.contains("patterns"));
+        assert!(opencode_raw.contains("seenPermissionIds"));
+        assert!(!opencode_raw.contains("spawnSync"));
+        assert!(!opencode_raw.contains("fetch("));
+        assert!(!opencode_raw.contains("serverUrl"));
+        assert!(!opencode_raw.contains("appendFileSync"));
+        assert!(!opencode_raw.contains("LOG_PATH"));
         let _ = std::fs::remove_dir_all(root);
     }
 }

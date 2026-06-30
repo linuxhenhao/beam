@@ -14,6 +14,7 @@
 - System design docs must be maintained in Chinese and English together. This applies to `docs/design/*.md`, `docs/platform-design.md`, `docs/federation-design.md`, and `docs/zellij-backend-poc.md`. When adding or changing one of these docs, update its paired `*.en.md` or Chinese source in the same change; if no pair exists yet, create it.
 - Build daemon: `cargo build -p beam-cli`, binary at `target/debug/beam`.
 - After daemon/runtime changes, rebuild with `cargo build -p beam-cli` then restart with `beam restart`.
+- `beam restart` resolves from `PATH`; on this machine it may hit `~/.cargo/bin/beam` instead of `target/debug/beam`. For workspace verification, prefer `target/debug/beam restart` after rebuilding.
 - Lifecycle commands: `beam start` (background daemon), `beam stop`, `beam restart`, `beam logs`, `beam status`.
 - Run tests: `cargo test --workspace --no-fail-fast`; narrower: `cargo test -p <crate> <filter>`.
 - There is no repo `lint` or `format` script; do not assume one exists.

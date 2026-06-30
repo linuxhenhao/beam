@@ -4,6 +4,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -12,12 +13,18 @@ use tokio::process::Command as TokioCommand;
 use tokio::sync::broadcast;
 use tracing::warn;
 
+const RAW_INPUT_ENTER_DELAY: Duration = Duration::from_millis(200);
+
 #[derive(Debug, Clone)]
 pub struct SpawnOpts {
     pub cwd: String,
     #[allow(dead_code)]
+    /// Desired terminal columns (passed as layout intent; actual pane size is
+    /// managed by the terminal proxy anchor).
     pub cols: u16,
     #[allow(dead_code)]
+    /// Desired terminal rows (passed as layout intent; actual pane size is
+    /// managed by the terminal proxy anchor).
     pub rows: u16,
     pub env: Vec<(String, String)>,
 }
@@ -340,6 +347,7 @@ impl SessionBackend for ZellijBackend {
 
     async fn raw_input(&self, text: &str) -> Result<()> {
         self.send_text(text).await?;
+        tokio::time::sleep(RAW_INPUT_ENTER_DELAY).await;
         self.send_enter().await
     }
 
@@ -456,7 +464,6 @@ impl ZellijObserveBackend {
         let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         ZellijBackend::run_zellij_action(&self.session_name, &args_refs)
     }
-
 }
 
 #[async_trait]
@@ -512,6 +519,7 @@ impl SessionBackend for ZellijObserveBackend {
 
     async fn raw_input(&self, text: &str) -> Result<()> {
         self.send_text(text).await?;
+        tokio::time::sleep(RAW_INPUT_ENTER_DELAY).await;
         self.send_enter().await
     }
 
@@ -1003,5 +1011,4 @@ mod tests {
         assert_eq!(args[2], "observe_pane");
         assert!(!args.contains(&"--full".to_string()));
     }
-
 }

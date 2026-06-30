@@ -1,5 +1,7 @@
 # beam askUserQuestion hook 接管 Implementation Plan
 
+> 历史说明：这是 2026-05-25 的 TypeScript 时代实施计划，保留用于追溯设计决策，不再代表当前仓库路径。当前实现是 Rust：hook 解析在 `crates/beam-cli/src/ask_hook.rs`，hook 安装在 `crates/beam-cli/src/hook_setup.rs`，OpenCode 插件模板在 `crates/beam-cli/assets/opencode/beam-ask.js`，安装目标固定为 `~/.config/opencode/plugins/beam-ask.js`。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把 beam 的 askUserQuestion 能力从"skill 教 agent 调 `beam ask`"改为"hook 拦截 agent 原生 askUserQuestion 自动接管"，并完整支持多选 + 多问。

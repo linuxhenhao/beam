@@ -6,6 +6,7 @@ use axum::{Json, extract::State, http::StatusCode};
 use beam_core::{AskQuestion, AskRequest, AskResult};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -138,6 +139,14 @@ pub async fn create_ask(
         timeout_ms: req.timeout_ms,
         approvers: resolve_ask_approvers(&state, &req).await,
     };
+    info!(
+        session_id = %request.session_id,
+        chat_id = %request.chat_id,
+        lark_app_id = %request.lark_app_id,
+        question_count = request.questions.len(),
+        approver_count = request.approvers.len(),
+        "ask request accepted"
+    );
     if request.questions.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -145,6 +154,12 @@ pub async fn create_ask(
         ));
     }
     if request.approvers.is_empty() {
+        warn!(
+            session_id = %request.session_id,
+            chat_id = %request.chat_id,
+            lark_app_id = %request.lark_app_id,
+            "ask request rejected: no approvers available"
+        );
         return Err((StatusCode::FORBIDDEN, "no approvers available".to_string()));
     }
 
@@ -196,6 +211,12 @@ pub async fn create_ask(
             .await
             .map_err(internal_error)?
     };
+    info!(
+        ask_id = %ask_id,
+        message_id = %message_id,
+        card_message_id = %message_id,
+        "ask card sent"
+    );
     {
         let mut pending = state.ask_pending.lock().await;
         if let Some(entry) = pending.get_mut(&ask_id) {
@@ -206,6 +227,7 @@ pub async fn create_ask(
     let result = match tokio::time::timeout(Duration::from_millis(request.timeout_ms), rx).await {
         Ok(Ok(answer)) => answer,
         _ => {
+            warn!(ask_id = %ask_id, "ask timed out");
             let mut pending = state.ask_pending.lock().await;
             pending.remove(&ask_id);
             drop(pending);
@@ -256,10 +278,13 @@ async fn resolve_ask_approvers(state: &AppState, req: &AskRequestBody) -> HashSe
         .cloned()
         .collect();
     if !explicit.is_empty() {
+        info!(
+            session_id = %req.session_id,
+            approver_count = explicit.len(),
+            "ask approvers resolved from explicit request"
+        );
         return explicit;
     }
-    let bot = state.bots.get(&req.lark_app_id);
-    let allow = bot.map(|b| b.allowed_users.clone()).unwrap_or_default();
     let session_owner = {
         let sessions = state.sessions.lock().await;
         sessions
@@ -267,11 +292,184 @@ async fn resolve_ask_approvers(state: &AppState, req: &AskRequestBody) -> HashSe
             .and_then(|s| s.owner_open_id.clone())
     };
     if let Some(owner) = session_owner {
-        if allow.iter().any(|value| value == &owner) {
-            return HashSet::from([owner]);
+        info!(
+            session_id = %req.session_id,
+            owner_open_id = %owner,
+            "ask approvers resolved from session owner"
+        );
+        return HashSet::from([owner]);
+    }
+    let bot = state.bots.get(&req.lark_app_id);
+    let resolved: HashSet<String> = bot
+        .map(|b| b.allowed_users.iter().cloned().collect())
+        .unwrap_or_default();
+    info!(
+        session_id = %req.session_id,
+        approver_count = resolved.len(),
+        "ask approvers resolved from bot allowlist"
+    );
+    resolved
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use beam_core::{BeamPaths, BotConfig, Session, SessionScope, SessionStatus};
+    use chrono::Utc;
+    use tokio::sync::Mutex;
+
+    fn make_state(session_owner: Option<&str>, allowed_users: Vec<&str>) -> AppState {
+        let paths = BeamPaths::from_root(
+            std::env::temp_dir().join(format!("beam-ask-approvers-{}", std::process::id())),
+        );
+        let mut sessions = HashMap::new();
+        if let Some(owner_open_id) = session_owner {
+            sessions.insert(
+                "sess-1".to_string(),
+                Session {
+                    session_id: "sess-1".to_string(),
+                    title: "test".to_string(),
+                    chat_id: "chat-1".to_string(),
+                    root_message_id: "root-1".to_string(),
+                    chat_type: Some("p2p".to_string()),
+                    quote_target_id: None,
+                    scope: SessionScope::Thread,
+                    status: SessionStatus::Active,
+                    created_at: Utc::now(),
+                    closed_at: None,
+                    working_dir: Some("/tmp".to_string()),
+                    lark_app_id: "app-1".to_string(),
+                    owner_open_id: Some(owner_open_id.to_string()),
+                    worker_pid: None,
+                    cli_id: Some("opencode".to_string()),
+                    cli_bin: Some("opencode-cli".to_string()),
+                    cli_args: Vec::new(),
+                    cli_session_id: None,
+                    last_cli_input: None,
+                    stream_card_id: None,
+                    stream_card_nonce: None,
+                    display_mode: None,
+                    current_screen: None,
+                    last_screen_status: None,
+                    usage_limit: None,
+                    current_image_key: None,
+                    tui_prompt_card_id: None,
+                    tui_prompt_options: Vec::new(),
+                    tui_prompt_multi_select: None,
+                    tui_toggled_indices: Vec::new(),
+                    pending_response_card_id: None,
+                    pending_response_card_state: None,
+                    last_patched_response_card_id: None,
+                    terminal_url: None,
+                    last_final_output_turn_id: None,
+                    last_final_output: None,
+                    adopted_from: None,
+                    model: None,
+                    locale: None,
+                    bot_name: None,
+                    bot_open_id: None,
+                    resume_session_id: None,
+                    disable_cli_bypass: false,
+                    initial_prompt: None,
+                    thread_id: Some("omt_1".to_string()),
+                },
+            );
+        }
+
+        let bot = BotConfig {
+            name: None,
+            lark_app_id: "app-1".to_string(),
+            lark_app_secret: "secret".to_string(),
+            cli_id: "opencode".to_string(),
+            cli_bin: Some("opencode-cli".to_string()),
+            model: None,
+            working_dir: Some("~".to_string()),
+            lark_encrypt_key: None,
+            lark_verification_token: None,
+            allowed_users: allowed_users.into_iter().map(String::from).collect(),
+            private_card: false,
+            allowed_chat_groups: Vec::new(),
+            chat_grants: HashMap::new(),
+            global_grants: Vec::new(),
+            oncall_chats: Vec::new(),
+            restrict_grant_commands: false,
+            message_quota: None,
+            quota_state: HashMap::new(),
+        };
+
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel();
+        AppState {
+            paths,
+            started_at: Utc::now(),
+            sessions: Arc::new(Mutex::new(sessions)),
+            workers: Arc::new(Mutex::new(HashMap::new())),
+            attempt_resumes: Arc::new(Mutex::new(HashMap::new())),
+            shutdown: Arc::new(Mutex::new(Some(shutdown_tx))),
+            options: crate::RunOptions {
+                worker_exe: PathBuf::from("/bin/true"),
+            },
+            http: reqwest::Client::new(),
+            config: beam_core::Config::default(),
+            bots: Arc::new(HashMap::from([(bot.lark_app_id.clone(), bot)])),
+            lark_tokens: Arc::new(Mutex::new(HashMap::new())),
+            chat_mode_cache: Arc::new(Mutex::new(HashMap::new())),
+            recent_lark_events: Arc::new(Mutex::new(HashMap::new())),
+            inflight_final_output_turns: Arc::new(Mutex::new(HashSet::new())),
+            workflow_progress_cards: Arc::new(Mutex::new(HashMap::new())),
+            ask_pending: Arc::new(Mutex::new(HashMap::new())),
+            grant_pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_creates: Arc::new(Mutex::new(HashMap::new())),
+            dashboard_token: Arc::new(Mutex::new(None)),
+            external_host: "localhost".to_string(),
         }
     }
-    allow.into_iter().collect()
+
+    #[tokio::test]
+    async fn resolve_ask_approvers_defaults_to_session_owner_when_allowlist_empty() {
+        let state = make_state(Some("ou_owner"), vec![]);
+        let req = AskRequestBody {
+            session_id: "sess-1".to_string(),
+            chat_id: "chat-1".to_string(),
+            lark_app_id: "app-1".to_string(),
+            root_message_id: None,
+            questions: vec![AskQuestion {
+                prompt: "pick one".to_string(),
+                options: vec![],
+                multi_select: false,
+            }],
+            timeout_ms: 10_000,
+            approvers: vec![],
+        };
+
+        let approvers = resolve_ask_approvers(&state, &req).await;
+        assert_eq!(approvers, HashSet::from(["ou_owner".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn resolve_ask_approvers_uses_explicit_approvers_first() {
+        let state = make_state(Some("ou_owner"), vec!["ou_allowed"]);
+        let req = AskRequestBody {
+            session_id: "sess-1".to_string(),
+            chat_id: "chat-1".to_string(),
+            lark_app_id: "app-1".to_string(),
+            root_message_id: None,
+            questions: vec![AskQuestion {
+                prompt: "pick one".to_string(),
+                options: vec![],
+                multi_select: false,
+            }],
+            timeout_ms: 10_000,
+            approvers: vec!["ou_explicit".to_string()],
+        };
+
+        let approvers = resolve_ask_approvers(&state, &req).await;
+        assert_eq!(approvers, HashSet::from(["ou_explicit".to_string()]));
+    }
 }
 
 fn build_ask_card(

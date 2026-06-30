@@ -4,6 +4,7 @@ Chinese: [2026-05-25-beam-ask-hooks-design.md](2026-05-25-beam-ask-hooks-design.
 
 - Date: 2026-05-25
 - Scope: replace the old skill-triggered `askUserQuestion` path with a hook-driven flow.
+- Status: implemented in Rust. This document keeps the design background and records the current implementation paths below.
 
 ## Problem
 
@@ -40,7 +41,15 @@ Timeouts and cancellation must write explicit terminal events so recovery can di
 - Recovery after daemon restart should inspect persisted events before deciding whether to re-render, resume, or fail a wait.
 - Hook execution must not bypass existing session ownership, chat, or bot routing checks.
 
+Current OpenCode hook coverage includes both `QuestionAsked` and `permission.asked` events. The latter is what carries permission-requirement prompts in the current CLI flow.
+
 ## Implementation Notes
+
+The Rust hook client lives in `crates/beam-cli/src/ask_hook.rs`. `beam hook <cliId>` parses the CLI hook payload, posts the ask request to the daemon, waits for the Feishu card answer, and formats the CLI-specific reply.
+
+Hook installation lives in `crates/beam-cli/src/hook_setup.rs`. Claude hooks are written to `~/.claude/settings.json`. OpenCode uses a standalone JavaScript template at `crates/beam-cli/assets/opencode/beam-ask.js`; the Rust binary embeds it with `include_str!` and installs it to `~/.config/opencode/plugins/beam-ask.js`.
+
+OpenCode permission replies keep the asynchronous `permission.asked` event. The plugin replies through the injected v1 OpenCode client with `postSessionIdPermissionsPermissionId({ path: { id: sessionID, permissionID: requestID }, body: { response } })`. It does not use `serverUrl` to reconstruct an HTTP client, because the OpenCode runtime may use in-process transport and may not expose a reachable local listener. It also does not use the v2 SDK unless the plugin runtime explicitly injects a v2 client.
 
 The hook path should use the same daemon-to-worker channel as other worker control messages. Avoid inventing a second side channel. State transitions should be visible in the same event log used by workflow execution, so that cold attach and recovery can reason from a single source of truth.
 

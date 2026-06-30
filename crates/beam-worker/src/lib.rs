@@ -12,8 +12,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont, point};
 use anyhow::{Context, Result};
 use beam_core::{
-    BeamPaths, CliUsageLimitKind, CliUsageLimitState, DaemonToWorker, DisplayMode, InitConfig,
-    ScreenAnalyzerConfig, ScreenStatus, TermActionKey, TuiPromptOption, WorkerToDaemon,
+    BeamPaths, CliUsageLimitKind, CliUsageLimitState, DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS,
+    DaemonToWorker, DisplayMode, InitConfig, ScreenAnalyzerConfig, ScreenStatus, TermActionKey,
+    TuiPromptOption, WorkerToDaemon,
 };
 use image::{ColorType, ImageBuffer, ImageEncoder, Rgba, codecs::png::PngEncoder};
 use reqwest::multipart::{Form, Part};
@@ -29,8 +30,6 @@ use uuid::Uuid;
 use crate::adapter::CliAdapter;
 use crate::backend::{SessionBackend, SpawnOpts, ZellijBackend, ZellijObserveBackend};
 
-const FALLBACK_TERMINAL_COLS: u16 = 120;
-const FALLBACK_TERMINAL_ROWS: u16 = 36;
 fn render_screen_for_display_mode(screen: &str, mode: DisplayMode) -> String {
     match mode {
         DisplayMode::Hidden => "[screen hidden]".to_string(),
@@ -1060,20 +1059,16 @@ pub async fn run(init: InitConfig) -> Result<()> {
     } else {
         (spawn_spec.bin, spawn_spec.args)
     };
+    let spawn_opts = SpawnOpts {
+        cwd: init.working_dir.clone(),
+        cols: DEFAULT_TERMINAL_COLS,
+        rows: DEFAULT_TERMINAL_ROWS,
+        env: Vec::new(),
+    };
     backend_impl
-        .spawn(
-            &args.0,
-            &args.1,
-            SpawnOpts {
-                cwd: init.working_dir.clone(),
-                cols: FALLBACK_TERMINAL_COLS,
-                rows: FALLBACK_TERMINAL_ROWS,
-                env: Vec::new(),
-            },
-        )
+        .spawn(&args.0, &args.1, spawn_opts)
         .await
         .with_context(|| format!("failed to {} session {}", attach_context, init.session_id))?;
-
     let backend: Arc<Mutex<Box<dyn SessionBackend>>> = Arc::new(Mutex::new(backend_impl));
     let mut cli_pid_marker = None;
     let child_pid = backend.lock().await.child_pid().await?;

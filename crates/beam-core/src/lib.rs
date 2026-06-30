@@ -23,6 +23,14 @@ pub mod workflow_runtime;
 pub mod workflow_sidecar;
 pub mod workflow_snapshot;
 
+/// Default terminal columns used by beam when creating zellij sessions
+/// and for reset-to-default resize operations (reference: botmux 160×50).
+pub const DEFAULT_TERMINAL_COLS: u16 = 160;
+
+/// Default terminal rows used by beam when creating zellij sessions
+/// and for reset-to-default resize operations.
+pub const DEFAULT_TERMINAL_ROWS: u16 = 50;
+
 pub use api::{
     ApiHealth, AttemptResumeEndResponse, AttemptResumeRequest, AttemptResumeStartResponse,
     BotSummary, CreateSessionRequest, DaemonOverview, DaemonRuntimeState, FinalOutputRequest,

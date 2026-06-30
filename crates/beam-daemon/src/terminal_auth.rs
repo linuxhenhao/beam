@@ -828,7 +828,10 @@ mod tests {
     #[test]
     fn translate_terminal_no_session() {
         // Zellij 0.44: WS endpoint is just /ws/terminal (no session name in path)
-        assert_eq!(translate_root_ws_path("terminal", "beam-any"), "ws/terminal");
+        assert_eq!(
+            translate_root_ws_path("terminal", "beam-any"),
+            "ws/terminal"
+        );
         assert_eq!(translate_root_ws_path("control", "beam-any"), "ws/control");
     }
 
