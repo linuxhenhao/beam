@@ -821,8 +821,9 @@ fn spawn_background_daemon(exe: &Path, paths: &BeamPaths) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BotInfoEntry, Cli, Command, SessionCommand, active_sessions, discover_session_id_from_pid,
-        format_bot_info_entries_for_cli, format_duration, parse_migrate_flags, setup_backup_file,
+        BotInfoEntry, Cli, Command, SessionCommand, active_sessions, default_cli_args_for_cli_id,
+        discover_session_id_from_pid, format_bot_info_entries_for_cli, format_duration,
+        parse_migrate_flags, setup_backup_file,
     };
     use beam_core::{BeamPaths, SessionStatus, SessionSummary};
     use chrono::Utc;
@@ -899,6 +900,12 @@ mod tests {
         assert!(backup.ends_with("bots.json.bak"));
         assert_eq!(fs::read_to_string(&backup).unwrap(), "[]\n");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn setup_defaults_traex_cli_args() {
+        assert_eq!(default_cli_args_for_cli_id("traex"), vec!["-y".to_string()]);
+        assert!(default_cli_args_for_cli_id("codex").is_empty());
     }
 
     #[test]
@@ -1639,12 +1646,20 @@ async fn validate_setup_credentials(app_id: &str, app_secret: &str) -> Result<()
 const CLI_CHOICES: &[(&str, &str, &str)] = &[
     ("claude-code", "Claude", "claude"),
     ("codex", "Codex", "codex"),
+    ("traex", "Traex", "traex"),
     ("coco", "CoCo", "coco"),
     ("gemini", "Gemini", "gemini"),
     ("opencode", "OpenCode", "opencode-cli"),
     ("hermes", "Hermes", "hermes"),
     ("antigravity", "Antigravity", "agy"),
 ];
+
+fn default_cli_args_for_cli_id(cli_id: &str) -> Vec<String> {
+    match cli_id {
+        "traex" => vec!["-y".to_string()],
+        _ => Vec::new(),
+    }
+}
 
 fn detect_installed_clis() -> Vec<&'static (&'static str, &'static str, &'static str)> {
     CLI_CHOICES
@@ -1717,6 +1732,7 @@ async fn prompt_setup_bot() -> Result<BotConfig> {
     let name = ask_line("机器人名称（留空=不设）: ")?;
     let credentials = register_app::prompt_credentials().await?;
     let cli_id = prompt_cli_id()?;
+    let cli_args = default_cli_args_for_cli_id(&cli_id);
     let working_dir = {
         let value = ask_line("默认工作目录 [~]: ")?;
         if value.trim().is_empty() {
@@ -1724,6 +1740,10 @@ async fn prompt_setup_bot() -> Result<BotConfig> {
         } else {
             Some(value)
         }
+    };
+    let skip_working_dir_prompt = {
+        let value = ask_line("是否跳过工作目录选择？[y/N]: ")?;
+        matches!(value.trim().to_lowercase().as_str(), "y" | "yes")
     };
     let mut allowed_users = {
         let value = ask_line("允许用户（逗号分隔，留空=不限制）: ")?;
@@ -1749,8 +1769,10 @@ async fn prompt_setup_bot() -> Result<BotConfig> {
         lark_app_secret: credentials.app_secret,
         cli_id,
         cli_bin: None,
+        cli_args,
         model: None,
         working_dir,
+        skip_working_dir_prompt,
         lark_encrypt_key: None,
         lark_verification_token: None,
         allowed_users,

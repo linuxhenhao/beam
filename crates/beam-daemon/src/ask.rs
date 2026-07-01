@@ -387,6 +387,8 @@ mod tests {
             lark_app_secret: "secret".to_string(),
             cli_id: "opencode".to_string(),
             cli_bin: Some("opencode-cli".to_string()),
+            cli_args: Vec::new(),
+            skip_working_dir_prompt: false,
             model: None,
             working_dir: Some("~".to_string()),
             lark_encrypt_key: None,

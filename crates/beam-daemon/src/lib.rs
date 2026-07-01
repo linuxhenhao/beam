@@ -2018,6 +2018,9 @@ fn cli_id_from_zellij_command(command: &str) -> String {
     if command.contains("claude") {
         return "claude-code".to_string();
     }
+    if command.contains("traex") {
+        return "traex".to_string();
+    }
     if command.contains("codex") {
         return "codex".to_string();
     }
@@ -5880,6 +5883,113 @@ struct SessionCreateSpec {
     adopted_from: Option<AdoptedFrom>,
 }
 
+fn build_session_create_spec_from_bot(
+    bot: &BotConfig,
+    title: String,
+    chat_id: String,
+    chat_type: Option<String>,
+    root_message_id: String,
+    quote_target_id: Option<String>,
+    scope: SessionScope,
+    thread_id: Option<String>,
+    working_dir: String,
+    prompt: String,
+    lark_app_id: String,
+    owner_open_id: Option<String>,
+    adopted_from: Option<AdoptedFrom>,
+) -> SessionCreateSpec {
+    SessionCreateSpec {
+        title,
+        chat_id,
+        chat_type,
+        root_message_id,
+        quote_target_id,
+        scope,
+        thread_id,
+        working_dir,
+        cli_id: bot.cli_id.clone(),
+        cli_bin: bot.cli_bin.clone().unwrap_or_else(|| bot.cli_id.clone()),
+        cli_args: bot.cli_args.clone(),
+        prompt,
+        lark_app_id,
+        owner_open_id,
+        adopted_from,
+    }
+}
+
+fn build_session_create_spec_from_pending(
+    pending: &dir_select::PendingCreateSession,
+    title: String,
+    chat_id: String,
+    chat_type: Option<String>,
+    root_message_id: String,
+    quote_target_id: Option<String>,
+    scope: SessionScope,
+    thread_id: Option<String>,
+    working_dir: String,
+    prompt: String,
+    lark_app_id: String,
+    owner_open_id: Option<String>,
+    adopted_from: Option<AdoptedFrom>,
+) -> SessionCreateSpec {
+    SessionCreateSpec {
+        title,
+        chat_id,
+        chat_type,
+        root_message_id,
+        quote_target_id,
+        scope,
+        thread_id,
+        working_dir,
+        cli_id: pending.cli_id.clone(),
+        cli_bin: pending.cli_bin.clone(),
+        cli_args: pending.cli_args.clone(),
+        prompt,
+        lark_app_id,
+        owner_open_id,
+        adopted_from,
+    }
+}
+
+fn resolve_direct_create_working_dir(bot: &BotConfig, daemon_working_dirs: &[String]) -> String {
+    dir_select::determine_root_working_dir(bot.working_dir.as_deref(), daemon_working_dirs)
+}
+
+fn build_direct_create_session_spec_from_bot(
+    bot: &BotConfig,
+    daemon_working_dirs: &[String],
+    title: String,
+    chat_id: String,
+    chat_type: Option<String>,
+    root_message_id: String,
+    quote_target_id: Option<String>,
+    scope: SessionScope,
+    thread_id: Option<String>,
+    prompt: String,
+    lark_app_id: String,
+    owner_open_id: Option<String>,
+    adopted_from: Option<AdoptedFrom>,
+) -> SessionCreateSpec {
+    let working_dir = resolve_direct_create_working_dir(bot, daemon_working_dirs);
+    SessionCreateSpec {
+        title,
+        chat_id,
+        chat_type,
+        root_message_id,
+        quote_target_id,
+        scope,
+        thread_id,
+        working_dir,
+        cli_id: bot.cli_id.clone(),
+        cli_bin: bot.cli_bin.clone().unwrap_or_else(|| bot.cli_id.clone()),
+        cli_args: bot.cli_args.clone(),
+        prompt,
+        lark_app_id,
+        owner_open_id,
+        adopted_from,
+    }
+}
+
 async fn create_session_internal(
     state: &AppState,
     spec: SessionCreateSpec,
@@ -7215,6 +7325,100 @@ async fn handle_lark_event_payload(
                 bot.working_dir.as_deref(),
                 &state.config.daemon.working_dirs,
             );
+            let root_message_id = parsed
+                .root_id
+                .clone()
+                .unwrap_or_else(|| message_id.to_string());
+            let title = text.chars().take(32).collect::<String>();
+            let quota_key = talk
+                .as_ref()
+                .and_then(|t| t.quota_key.as_deref())
+                .map(|s| s.to_string());
+
+            if bot.skip_working_dir_prompt {
+                let mentions = parsed.mentions.clone();
+                let prompt_raw = prompt::build_quote_hint(
+                    parsed.parent_id.as_deref(),
+                    &parsed.message_id,
+                    scope,
+                    &root_message_id,
+                ) + &text;
+                let prompt = if bot.cli_id == "opencode" {
+                    let (bot_name, bot_open_id) = load_bot_identity(&state.paths, &bot.lark_app_id);
+                    let observed_bots =
+                        load_observed_bots_for_chat(&state.paths, &bot.lark_app_id, chat_id);
+                    prompt::build_initial_prompt(&prompt::InitialPromptOptions {
+                        user_message: &prompt_raw,
+                        session_id: "pending",
+                        sender_open_id: sender_open_id.as_deref(),
+                        sender_type: parsed.sender_type.as_deref(),
+                        mentions: &mentions,
+                        bot_name: bot_name.as_deref(),
+                        bot_open_id: bot_open_id.as_deref(),
+                        observed_bots: &observed_bots,
+                        follow_ups: &Vec::new(),
+                    })
+                } else {
+                    prompt::build_follow_up_content(
+                        &prompt_raw,
+                        &prompt::FollowUpContentOptions {
+                            session_id: "pending",
+                            sender_open_id: sender_open_id.as_deref(),
+                            sender_type: parsed.sender_type.as_deref(),
+                            mentions: &mentions,
+                            cli_id: bot.cli_id.as_str(),
+                        },
+                    )
+                };
+                if let Some(quota_key) = quota_key.as_deref() {
+                    let quota = consume_inbound_quota(&state, &app_id, quota_key).await?;
+                    if !quota.allowed {
+                        let _ =
+                            lark_reply_message(&state, &bot, message_id, "quota exceeded").await;
+                        return Ok(Json(serde_json::json!({
+                            "ok": true,
+                            "quota": "exhausted",
+                        })));
+                    }
+                }
+                let session = create_session_internal(
+                    &state,
+                    build_direct_create_session_spec_from_bot(
+                        &bot,
+                        &state.config.daemon.working_dirs,
+                        title.clone(),
+                        chat_id.to_string(),
+                        parsed.chat_type.clone(),
+                        root_message_id,
+                        Some(message_id.to_string()),
+                        scope,
+                        parsed.thread_id.clone(),
+                        prompt,
+                        app_id.clone(),
+                        sender_open_id.clone(),
+                        None,
+                    ),
+                )
+                .await
+                .map_err(internal_error)?;
+                info!(
+                    app_id = %app_id,
+                    chat_id = %chat_id,
+                    chat_type = ?parsed.chat_type,
+                    scope = ?scope,
+                    message_id = %message_id,
+                    session_id = %session.session_id,
+                    working_dir = %root_working_dir,
+                    skip_working_dir_prompt = true,
+                    "created session without dir select"
+                );
+                return Ok(Json(serde_json::json!({
+                    "ok": true,
+                    "direct_create": true,
+                    "sessionId": session.session_id,
+                    "workingDir": root_working_dir,
+                })));
+            }
 
             // Scan candidate directories under root
             let root_path = std::path::Path::new(&root_working_dir);
@@ -7258,11 +7462,6 @@ async fn handle_lark_event_payload(
 
             // Build pending entry (quota is NOT consumed yet — done when dir is picked)
             let pending_id = Uuid::new_v4().to_string();
-            let title = text.chars().take(32).collect::<String>();
-            let quota_key = talk
-                .as_ref()
-                .and_then(|t| t.quota_key.as_deref())
-                .map(|s| s.to_string());
 
             let pending = dir_select::PendingCreateSession {
                 pending_id: pending_id.clone(),
@@ -7284,6 +7483,7 @@ async fn handle_lark_event_payload(
                 created_at: Utc::now().timestamp_millis(),
                 cli_id: bot.cli_id.clone(),
                 cli_bin: bot.cli_bin.clone().unwrap_or_else(|| bot.cli_id.clone()),
+                cli_args: bot.cli_args.clone(),
                 root_working_dir: root_working_dir.clone(),
                 candidate_dirs: candidate_dirs.clone(),
                 card_message_id: None,
@@ -7985,23 +8185,21 @@ async fn handle_lark_card_action_payload(
 
         let session = create_session_internal(
             state,
-            SessionCreateSpec {
-                title: pending.title.clone(),
-                chat_id: pending.chat_id.clone(),
-                chat_type: pending.chat_type.clone(),
+            build_session_create_spec_from_pending(
+                pending,
+                pending.title.clone(),
+                pending.chat_id.clone(),
+                pending.chat_type.clone(),
                 root_message_id,
-                quote_target_id: Some(pending.message_id.clone()),
-                scope: pending.scope,
-                thread_id: pending.thread_id.clone(),
-                working_dir: working_dir.to_string(),
-                cli_id: pending.cli_id.clone(),
-                cli_bin: pending.cli_bin.clone(),
-                cli_args: Vec::new(),
+                Some(pending.message_id.clone()),
+                pending.scope,
+                pending.thread_id.clone(),
+                working_dir.to_string(),
                 prompt,
-                lark_app_id: pending.lark_app_id.clone(),
-                owner_open_id: pending.sender_open_id.clone(),
-                adopted_from: None,
-            },
+                pending.lark_app_id.clone(),
+                pending.sender_open_id.clone(),
+                None,
+            ),
         )
         .await
         .map_err(internal_error)?;
@@ -9691,7 +9889,7 @@ async fn start_workflow_attempt_resume(
     if bot.cli_id.trim().is_empty()
         || !matches!(
             bot.cli_id.as_str(),
-            "coco" | "claude-code" | "codex" | "hermes" | "antigravity"
+            "coco" | "claude-code" | "codex" | "traex" | "hermes" | "antigravity"
         )
     {
         return Err((StatusCode::CONFLICT, "resume_unsupported_cli".to_string()));
@@ -11861,23 +12059,21 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         }));
         let summary = create_session_internal(
             &state,
-            SessionCreateSpec {
-                title: api_trigger_title(&request),
-                chat_id: chat_id.clone(),
-                chat_type: Some("group".to_string()),
-                root_message_id: chat_id.clone(),
-                quote_target_id: None,
-                scope: SessionScope::Chat,
-                thread_id: None,
-                working_dir: working_dir.clone(),
-                cli_id: bot.cli_id.clone(),
-                cli_bin: bot.cli_bin.clone().unwrap_or_else(|| bot.cli_id.clone()),
-                cli_args: Vec::new(),
+            build_session_create_spec_from_bot(
+                &bot,
+                api_trigger_title(&request),
+                chat_id.clone(),
+                Some("group".to_string()),
+                chat_id.clone(),
+                None,
+                SessionScope::Chat,
+                None,
+                working_dir.clone(),
                 prompt,
-                lark_app_id: bot_id.clone(),
-                owner_open_id: None,
-                adopted_from: None,
-            },
+                bot_id.clone(),
+                None,
+                None,
+            ),
         )
         .await
         .map_err(internal_error)?;
@@ -13282,6 +13478,8 @@ mod tests {
             lark_app_secret: "secret".to_string(),
             cli_id: "codex".to_string(),
             cli_bin: None,
+            cli_args: Vec::new(),
+            skip_working_dir_prompt: false,
             model: None,
             working_dir: None,
             lark_encrypt_key: None,
@@ -13296,6 +13494,68 @@ mod tests {
             message_quota: None,
             quota_state: std::collections::HashMap::new(),
         }
+    }
+
+    #[test]
+    fn build_direct_create_session_spec_from_bot_prefers_bot_working_dir_and_cli_args() {
+        let bot = BotConfig {
+            cli_id: "traex".to_string(),
+            cli_bin: Some("traex".to_string()),
+            cli_args: vec!["-y".to_string()],
+            skip_working_dir_prompt: true,
+            working_dir: Some("/bot/work".to_string()),
+            ..make_bot("app-spec")
+        };
+        let daemon_working_dirs = vec!["/daemon/work".to_string()];
+        let spec = build_direct_create_session_spec_from_bot(
+            &bot,
+            &daemon_working_dirs,
+            "title".to_string(),
+            "chat".to_string(),
+            Some("group".to_string()),
+            "root".to_string(),
+            Some("quote".to_string()),
+            SessionScope::Thread,
+            Some("omt_1".to_string()),
+            "prompt".to_string(),
+            "app-spec".to_string(),
+            Some("ou_owner".to_string()),
+            None,
+        );
+        assert_eq!(spec.cli_id, "traex");
+        assert_eq!(spec.cli_bin, "traex");
+        assert_eq!(spec.cli_args, vec!["-y".to_string()]);
+        assert_eq!(spec.working_dir, "/bot/work");
+    }
+
+    #[test]
+    fn build_direct_create_session_spec_from_bot_falls_back_to_daemon_working_dir() {
+        let bot = BotConfig {
+            cli_id: "codex".to_string(),
+            cli_bin: Some("codex".to_string()),
+            cli_args: vec![],
+            skip_working_dir_prompt: true,
+            working_dir: None,
+            ..make_bot("app-spec-fallback")
+        };
+        let daemon_working_dirs = vec!["/daemon/work".to_string()];
+        let spec = build_direct_create_session_spec_from_bot(
+            &bot,
+            &daemon_working_dirs,
+            "title".to_string(),
+            "chat".to_string(),
+            Some("group".to_string()),
+            "root".to_string(),
+            None,
+            SessionScope::Thread,
+            Some("omt_1".to_string()),
+            "prompt".to_string(),
+            "app-spec-fallback".to_string(),
+            None,
+            None,
+        );
+        assert_eq!(spec.working_dir, "/daemon/work");
+        assert!(spec.cli_args.is_empty());
     }
 
     fn make_state(paths: BeamPaths, bots: HashMap<String, BotConfig>) -> AppState {
@@ -13740,6 +14000,8 @@ mod tests {
             lark_app_secret: "secret".to_string(),
             cli_id: "codex".to_string(),
             cli_bin: None,
+            cli_args: Vec::new(),
+            skip_working_dir_prompt: false,
             model: None,
             working_dir: None,
             lark_encrypt_key: None,
@@ -13766,6 +14028,8 @@ mod tests {
             lark_app_secret: "secret".to_string(),
             cli_id: "codex".to_string(),
             cli_bin: None,
+            cli_args: Vec::new(),
+            skip_working_dir_prompt: false,
             model: None,
             working_dir: None,
             lark_encrypt_key: None,
@@ -13812,6 +14076,8 @@ mod tests {
             lark_app_secret: "secret".to_string(),
             cli_id: "codex".to_string(),
             cli_bin: None,
+            cli_args: Vec::new(),
+            skip_working_dir_prompt: false,
             model: None,
             working_dir: None,
             lark_encrypt_key: None,
@@ -14678,6 +14944,8 @@ mod tests {
             lark_app_secret: "secret".to_string(),
             cli_id: "codex".to_string(),
             cli_bin: None,
+            cli_args: Vec::new(),
+            skip_working_dir_prompt: false,
             model: None,
             working_dir: None,
             lark_encrypt_key: None,
@@ -15066,6 +15334,8 @@ mod tests {
                 lark_app_secret: "secret".to_string(),
                 cli_id: "codex".to_string(),
                 cli_bin: None,
+                cli_args: Vec::new(),
+                skip_working_dir_prompt: false,
                 model: None,
                 working_dir: None,
                 lark_encrypt_key: None,
@@ -15136,6 +15406,8 @@ mod tests {
                 lark_app_secret: "secret".to_string(),
                 cli_id: "codex".to_string(),
                 cli_bin: None,
+                cli_args: Vec::new(),
+                skip_working_dir_prompt: false,
                 model: None,
                 working_dir: None,
                 lark_encrypt_key: None,
@@ -15230,7 +15502,9 @@ mod tests {
                 lark_app_secret: "secret".to_string(),
                 cli_id: "codex".to_string(),
                 cli_bin: None,
-                model: None,
+            cli_args: Vec::new(),
+            skip_working_dir_prompt: false,
+            model: None,
                 working_dir: None,
                     lark_encrypt_key: None,
                 lark_verification_token: None,
@@ -15301,6 +15575,8 @@ mod tests {
                 lark_app_secret: "secret".to_string(),
                 cli_id: "opencode".to_string(),
                 cli_bin: None,
+                cli_args: Vec::new(),
+                skip_working_dir_prompt: false,
                 model: None,
                 working_dir: None,
                 lark_encrypt_key: None,
@@ -18722,6 +18998,7 @@ mod tests {
     #[test]
     fn zellij_cli_id_detection_is_command_based() {
         assert_eq!(cli_id_from_zellij_command("/usr/bin/codex"), "codex");
+        assert_eq!(cli_id_from_zellij_command("/usr/bin/traex"), "traex");
         assert_eq!(cli_id_from_zellij_command("claude"), "claude-code");
         assert_eq!(cli_id_from_zellij_command("custom-tool"), "custom-tool");
     }
@@ -19003,6 +19280,8 @@ mod tests {
             lark_app_secret: "secret".to_string(),
             cli_id: "codex".to_string(),
             cli_bin: None,
+            cli_args: Vec::new(),
+            skip_working_dir_prompt: false,
             model: None,
             working_dir: None,
             lark_encrypt_key: None,
@@ -19108,6 +19387,8 @@ mod tests {
             lark_app_secret: "secret".to_string(),
             cli_id: "codex".to_string(),
             cli_bin: None,
+            cli_args: Vec::new(),
+            skip_working_dir_prompt: false,
             model: None,
             working_dir: None,
             lark_encrypt_key: None,
@@ -19605,6 +19886,8 @@ mod tests {
                 lark_app_secret: "secret".to_string(),
                 cli_id: "codex".to_string(),
                 cli_bin: None,
+                cli_args: Vec::new(),
+                skip_working_dir_prompt: false,
                 model: None,
                 working_dir: None,
                 lark_encrypt_key: None,
@@ -19679,6 +19962,8 @@ mod tests {
                 lark_app_secret: "secret".to_string(),
                 cli_id: "codex".to_string(),
                 cli_bin: None,
+                cli_args: Vec::new(),
+                skip_working_dir_prompt: false,
                 model: None,
                 working_dir: None,
                 lark_encrypt_key: None,
@@ -19729,6 +20014,8 @@ mod tests {
                 lark_app_secret: "secret".to_string(),
                 cli_id: "codex".to_string(),
                 cli_bin: None,
+                cli_args: Vec::new(),
+                skip_working_dir_prompt: false,
                 model: None,
                 working_dir: None,
                 lark_encrypt_key: None,
@@ -19807,6 +20094,8 @@ mod tests {
                 lark_app_secret: "secret".to_string(),
                 cli_id: "codex".to_string(),
                 cli_bin: None,
+                cli_args: Vec::new(),
+                skip_working_dir_prompt: false,
                 model: None,
                 working_dir: None,
                 lark_encrypt_key: None,

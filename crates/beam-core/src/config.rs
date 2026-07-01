@@ -73,10 +73,14 @@ pub struct BotConfig {
     pub cli_id: String,
     #[serde(rename = "cliBin", default)]
     pub cli_bin: Option<String>,
+    #[serde(rename = "cliArgs", default)]
+    pub cli_args: Vec<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(rename = "workingDir", default)]
     pub working_dir: Option<String>,
+    #[serde(rename = "skipWorkingDirPrompt", default)]
+    pub skip_working_dir_prompt: bool,
     #[serde(rename = "larkEncryptKey", default)]
     pub lark_encrypt_key: Option<String>,
     #[serde(rename = "larkVerificationToken", default)]
@@ -192,5 +196,34 @@ impl Default for LarkConfig {
             verification_token: None,
             encrypt_key: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BotConfig;
+
+    #[test]
+    fn bot_config_defaults_missing_cli_args_and_skip_prompt_fields() {
+        let raw = r#"{
+            "larkAppId":"app-1",
+            "larkAppSecret":"secret",
+            "cliId":"codex"
+        }"#;
+        let bot: BotConfig = serde_json::from_str(raw).expect("deserialize bot");
+        assert!(bot.cli_args.is_empty());
+        assert!(!bot.skip_working_dir_prompt);
+    }
+
+    #[test]
+    fn bot_config_deserializes_traex_cli_args() {
+        let raw = r#"{
+            "larkAppId":"app-1",
+            "larkAppSecret":"secret",
+            "cliId":"traex",
+            "cliArgs":["-y"]
+        }"#;
+        let bot: BotConfig = serde_json::from_str(raw).expect("deserialize bot");
+        assert_eq!(bot.cli_args, vec!["-y".to_string()]);
     }
 }

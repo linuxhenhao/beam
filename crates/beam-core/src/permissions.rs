@@ -165,6 +165,8 @@ mod tests {
             lark_app_secret: "secret".to_string(),
             cli_id: "codex".to_string(),
             cli_bin: None,
+            cli_args: Vec::new(),
+            skip_working_dir_prompt: false,
             model: None,
             working_dir: None,
             lark_encrypt_key: None,

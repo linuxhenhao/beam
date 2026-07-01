@@ -21,6 +21,9 @@ pub fn create_adapter(init: &InitConfig) -> Result<CliAdapter> {
         "codex" => CliAdapter {
             kind: AdapterKind::Codex(codex::create_state(init)),
         },
+        "traex" => CliAdapter {
+            kind: AdapterKind::Codex(codex::create_state(init)),
+        },
         "opencode" => CliAdapter {
             kind: AdapterKind::OpenCode(opencode::create_state(init)),
         },
@@ -137,5 +140,28 @@ mod tests {
     fn create_adapter_rejects_unknown_cli_ids() {
         let err = create_adapter(&init("unknown-cli")).expect_err("unknown cli should fail");
         assert!(err.to_string().contains("unsupported cli adapter"));
+    }
+
+    #[test]
+    fn create_adapter_accepts_traex() {
+        let adapter = create_adapter(&InitConfig {
+            cli_id: "traex".to_string(),
+            cli_bin: "traex".to_string(),
+            cli_args: vec!["-y".to_string()],
+            ..init("traex")
+        })
+        .expect("traex should be supported");
+
+        let spec = crate::adapters::build_spawn_spec(
+            &adapter,
+            &InitConfig {
+                cli_id: "traex".to_string(),
+                cli_bin: "traex".to_string(),
+                cli_args: vec!["-y".to_string()],
+                ..init("traex")
+            },
+        );
+        assert_eq!(spec.bin, "traex");
+        assert!(spec.args.iter().any(|arg| arg == "-y"));
     }
 }
