@@ -821,9 +821,9 @@ fn spawn_background_daemon(exe: &Path, paths: &BeamPaths) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BotInfoEntry, Cli, Command, SessionCommand, active_sessions, default_cli_args_for_cli_id,
-        discover_session_id_from_pid, format_bot_info_entries_for_cli, format_duration,
-        parse_migrate_flags, setup_backup_file,
+        BotInfoEntry, Cli, Command, SessionCommand, active_sessions, bin_candidates_for_cli_id,
+        default_cli_args_for_cli_id, discover_session_id_from_pid, format_bot_info_entries_for_cli,
+        format_duration, parse_migrate_flags, resolve_allowed_users, setup_backup_file,
     };
     use beam_core::{BeamPaths, SessionStatus, SessionSummary};
     use chrono::Utc;
@@ -1063,6 +1063,65 @@ mod tests {
         assert_eq!(format_duration(3_660_000), "1h1m");
         assert_eq!(format_duration(86_400_000), "1d0h");
         assert_eq!(format_duration(90_000_000), "1d1h");
+    }
+
+    #[test]
+    fn bin_candidates_for_cli_id_returns_candidates() {
+        // opencode has multiple candidates
+        assert_eq!(
+            bin_candidates_for_cli_id("opencode"),
+            Some(&["opencode-cli", "opencode"][..])
+        );
+        // single-candidate CLIs
+        assert_eq!(bin_candidates_for_cli_id("codex"), Some(&["codex"][..]));
+        assert_eq!(bin_candidates_for_cli_id("claude-code"), Some(&["claude"][..]));
+        assert_eq!(bin_candidates_for_cli_id("antigravity"), Some(&["agy"][..]));
+    }
+
+    #[test]
+    fn bin_candidates_for_cli_id_returns_none_for_unknown_id() {
+        assert_eq!(bin_candidates_for_cli_id("unknown-cli"), None);
+    }
+
+    #[test]
+    fn resolve_allowed_users_empty_input_no_owner_returns_empty() {
+        let result = resolve_allowed_users("", None);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn resolve_allowed_users_empty_input_with_owner_inserts_owner() {
+        let result = resolve_allowed_users("", Some("ou_owner"));
+        assert_eq!(result, vec!["ou_owner"]);
+    }
+
+    #[test]
+    fn resolve_allowed_users_parses_comma_separated_and_inserts_owner() {
+        let result = resolve_allowed_users("ou_peer, ou_colleague", Some("ou_owner"));
+        assert_eq!(result.len(), 3);
+        assert!(result.contains(&"ou_owner".to_string()));
+        assert!(result.contains(&"ou_peer".to_string()));
+        assert!(result.contains(&"ou_colleague".to_string()));
+    }
+
+    #[test]
+    fn resolve_allowed_users_does_not_duplicate_owner() {
+        let result = resolve_allowed_users("ou_owner, ou_peer", Some("ou_owner"));
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&"ou_owner".to_string()));
+        assert!(result.contains(&"ou_peer".to_string()));
+    }
+
+    #[test]
+    fn resolve_allowed_users_parses_without_owner_open_id() {
+        let result = resolve_allowed_users("ou_peer, ou_colleague", None);
+        assert_eq!(result, vec!["ou_peer", "ou_colleague"]);
+    }
+
+    #[test]
+    fn resolve_allowed_users_trims_whitespace_and_filters_empty() {
+        let result = resolve_allowed_users("  ou_a  ,  , ou_b , ", None);
+        assert_eq!(result, vec!["ou_a", "ou_b"]);
     }
 }
 
@@ -1643,15 +1702,15 @@ async fn validate_setup_credentials(app_id: &str, app_secret: &str) -> Result<()
     }
 }
 
-const CLI_CHOICES: &[(&str, &str, &str)] = &[
-    ("claude-code", "Claude", "claude"),
-    ("codex", "Codex", "codex"),
-    ("traex", "Traex", "traex"),
-    ("coco", "CoCo", "coco"),
-    ("gemini", "Gemini", "gemini"),
-    ("opencode", "OpenCode", "opencode-cli"),
-    ("hermes", "Hermes", "hermes"),
-    ("antigravity", "Antigravity", "agy"),
+const CLI_CHOICES: &[(&str, &str, &[&str])] = &[
+    ("claude-code", "Claude", &["claude"]),
+    ("codex", "Codex", &["codex"]),
+    ("traex", "Traex", &["traex"]),
+    ("coco", "CoCo", &["coco"]),
+    ("gemini", "Gemini", &["gemini"]),
+    ("opencode", "OpenCode", &["opencode-cli", "opencode"]),
+    ("hermes", "Hermes", &["hermes"]),
+    ("antigravity", "Antigravity", &["agy"]),
 ];
 
 fn default_cli_args_for_cli_id(cli_id: &str) -> Vec<String> {
@@ -1661,11 +1720,38 @@ fn default_cli_args_for_cli_id(cli_id: &str) -> Vec<String> {
     }
 }
 
-fn detect_installed_clis() -> Vec<&'static (&'static str, &'static str, &'static str)> {
+fn detect_installed_clis() -> Vec<&'static (&'static str, &'static str, &'static [&'static str])> {
     CLI_CHOICES
         .iter()
-        .filter(|(_, _, bin)| which_exists(bin))
+        .filter(|(_, _, bins)| bins.iter().any(|b| which_exists(b)))
         .collect()
+}
+
+fn bin_candidates_for_cli_id(cli_id: &str) -> Option<&'static [&'static str]> {
+    CLI_CHOICES
+        .iter()
+        .find(|(id, _, _)| *id == cli_id)
+        .map(|(_, _, bins)| *bins)
+}
+
+fn probe_cli_bin(cli_id: &str) -> Option<String> {
+    bin_candidates_for_cli_id(cli_id)
+        .and_then(|bins| bins.iter().find(|b| which_exists(b)).copied())
+        .map(String::from)
+}
+
+fn resolve_allowed_users(input: &str, user_open_id: Option<&str>) -> Vec<String> {
+    let mut allowed: Vec<String> = input
+        .split(',')
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .collect();
+    if let Some(open_id) = user_open_id {
+        if !allowed.iter().any(|item| item == open_id) {
+            allowed.push(open_id.to_string());
+        }
+    }
+    allowed
 }
 
 fn which_exists(bin: &str) -> bool {
@@ -1700,8 +1786,9 @@ fn prompt_cli_id() -> Result<String> {
     }
 
     println!("已检测到以下 CLI 工具:");
-    for (i, (_id, label, bin)) in installed.iter().enumerate() {
-        println!("  {}) {}  ({})", i + 1, label, bin);
+    for (i, (_id, label, bins)) in installed.iter().enumerate() {
+        let bin_str = bins.join(" / ");
+        println!("  {}) {}  ({})", i + 1, label, bin_str);
     }
 
     let value = ask_line("CLI 适配器 [1]: ")?;
@@ -1733,6 +1820,8 @@ async fn prompt_setup_bot() -> Result<BotConfig> {
     let credentials = register_app::prompt_credentials().await?;
     let cli_id = prompt_cli_id()?;
     let cli_args = default_cli_args_for_cli_id(&cli_id);
+    let cli_bin = probe_cli_bin(&cli_id)
+        .filter(|bin| bin != &cli_id);
     let working_dir = {
         let value = ask_line("默认工作目录 [~]: ")?;
         if value.trim().is_empty() {
@@ -1745,19 +1834,20 @@ async fn prompt_setup_bot() -> Result<BotConfig> {
         let value = ask_line("是否跳过工作目录选择？[y/N]: ")?;
         matches!(value.trim().to_lowercase().as_str(), "y" | "yes")
     };
-    let mut allowed_users = {
-        let value = ask_line("允许用户（逗号分隔，留空=不限制）: ")?;
-        value
-            .split(',')
-            .map(|item| item.trim().to_string())
-            .filter(|item| !item.is_empty())
-            .collect::<Vec<_>>()
-    };
-    if let Some(open_id) = credentials.user_open_id {
-        if !allowed_users.iter().any(|item| item == &open_id) {
-            allowed_users.push(open_id);
+    let allowed_users = {
+        let hint = if credentials.user_open_id.is_some() {
+            "允许用户 open_id（逗号分隔，留空=仅限自己，你的 open_id 已自动加入）: "
+        } else {
+            "允许用户 open_id（逗号分隔，例如 ou_xxxxx；留空=不限制，任何人都可对话⚠️）: "
+        };
+        let value = ask_line(hint)?;
+        let resolved = resolve_allowed_users(&value, credentials.user_open_id.as_deref());
+        if credentials.user_open_id.is_none() && resolved.is_empty() {
+            println!("   ⚠️  未设置允许用户：当前为开放模式，任何人都可以和机器人对话。");
+            println!("   💡 可在 bots.json 中手动填写 allowedUsers 字段（open_id 以 ou_ 开头），或后续用 /grant 命令授权。");
         }
-    }
+        resolved
+    };
 
     Ok(BotConfig {
         name: if name.trim().is_empty() {
@@ -1768,7 +1858,7 @@ async fn prompt_setup_bot() -> Result<BotConfig> {
         lark_app_id: credentials.app_id,
         lark_app_secret: credentials.app_secret,
         cli_id,
-        cli_bin: None,
+        cli_bin,
         cli_args,
         model: None,
         working_dir,
