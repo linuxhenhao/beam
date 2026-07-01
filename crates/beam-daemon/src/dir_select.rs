@@ -90,6 +90,8 @@ pub struct PendingCreateSession {
     // Bot info for session creation
     pub cli_id: String,
     pub cli_bin: String,
+    #[serde(default)]
+    pub cli_args: Vec<String>,
     pub root_working_dir: String,
     /// All scanned candidate dirs (relative paths from root)
     pub candidate_dirs: Vec<String>,
@@ -1978,6 +1980,7 @@ mod tests {
                 created_at: created_at_ms,
                 cli_id: "codex".to_string(),
                 cli_bin: "codex".to_string(),
+                cli_args: Vec::new(),
                 root_working_dir: "/tmp".to_string(),
                 candidate_dirs: vec![".".to_string()],
                 card_message_id: None,
@@ -2016,6 +2019,27 @@ mod tests {
         assert!(map.contains_key("borderline"));
         assert!(!map.contains_key("expired"));
         assert!(!map.contains_key("old"));
+    }
+
+    #[test]
+    fn test_pending_create_session_defaults_missing_cli_args() {
+        let raw = r#"{
+            "pending_id":"pid",
+            "lark_app_id":"app",
+            "chat_id":"chat",
+            "message_id":"msg",
+            "anchor":"anchor",
+            "scope":"chat",
+            "title":"title",
+            "text":"",
+            "created_at":123,
+            "cli_id":"codex",
+            "cli_bin":"codex",
+            "root_working_dir":"/tmp",
+            "candidate_dirs":["."]
+        }"#;
+        let pending: PendingCreateSession = serde_json::from_str(raw).expect("deserialize");
+        assert!(pending.cli_args.is_empty());
     }
 
     #[test]
