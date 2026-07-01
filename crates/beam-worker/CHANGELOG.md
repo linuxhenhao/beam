@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.3.3...beam-worker-v0.4.0) - 2026-07-01
+
+### Added
+
+- *(beam)* 添加 Traex CLI 支持，支持 cliArgs 和跳过工作目录选择
+
 ## [0.3.3](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.3.2...beam-worker-v0.3.3) - 2026-06-30
 
 ### Fixed
