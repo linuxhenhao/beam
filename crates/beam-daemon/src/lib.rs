@@ -770,6 +770,7 @@ struct ParsedLarkInboundMessage {
     parent_id: Option<String>,
     root_id: Option<String>,
     thread_id: Option<String>,
+    locale: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1412,6 +1413,7 @@ async fn spawn_worker(state: AppState, session: Session, init: InitConfig) -> Re
                                         &options,
                                         multi_select,
                                         &[],
+                                        session.locale.as_deref(),
                                     ),
                                     session.scope == SessionScope::Thread,
                                 )
@@ -1454,7 +1456,10 @@ async fn spawn_worker(state: AppState, session: Session, init: InitConfig) -> Re
                                         &state,
                                         bot,
                                         card_id,
-                                        &build_tui_prompt_resolved_card(selected_text.as_deref()),
+                                        &build_tui_prompt_resolved_card(
+                                            selected_text.as_deref(),
+                                            session.locale.as_deref(),
+                                        ),
                                     )
                                     .await;
                                 }
@@ -3980,7 +3985,12 @@ fn truncate_card_screen(screen: &str) -> String {
     out.trim_end().to_string()
 }
 
+fn card_text<'a>(locale: Option<&str>, zh: &'a str, en: &'a str) -> &'a str {
+    if prompt::is_zh_locale(locale) { zh } else { en }
+}
+
 fn build_writable_session_card(session: &Session, write_url: &str) -> String {
+    let locale = session.locale.as_deref();
     let title = if session.title.trim().is_empty() {
         session
             .cli_id
@@ -3992,7 +4002,7 @@ fn build_writable_session_card(session: &Session, write_url: &str) -> String {
     let card_nonce = session.stream_card_nonce.clone().unwrap_or_default();
     let mut actions = vec![serde_json::json!({
         "tag": "button",
-        "text": { "tag": "plain_text", "content": "Open writable terminal" },
+        "text": { "tag": "plain_text", "content": card_text(locale, "打开可写终端", "Open writable terminal") },
         "type": "primary",
         "multi_url": {
             "url": write_url,
@@ -4004,7 +4014,7 @@ fn build_writable_session_card(session: &Session, write_url: &str) -> String {
     if session.adopted_from.is_none() {
         actions.push(serde_json::json!({
             "tag": "button",
-            "text": { "tag": "plain_text", "content": "Restart" },
+            "text": { "tag": "plain_text", "content": card_text(locale, "重启", "Restart") },
             "type": "default",
             "value": {
                 "action": "restart",
@@ -4017,9 +4027,9 @@ fn build_writable_session_card(session: &Session, write_url: &str) -> String {
         }));
     }
     let close_label = if session.adopted_from.is_some() {
-        "Disconnect"
+        card_text(locale, "断开连接", "Disconnect")
     } else {
-        "Close session"
+        card_text(locale, "关闭会话", "Close session")
     };
     actions.push(serde_json::json!({
         "tag": "button",
@@ -4037,7 +4047,7 @@ fn build_writable_session_card(session: &Session, write_url: &str) -> String {
     serde_json::json!({
         "config": { "wide_screen_mode": true },
         "header": {
-            "title": { "tag": "plain_text", "content": format!("terminal · {}", title) },
+            "title": { "tag": "plain_text", "content": format!("{} · {}", card_text(locale, "终端", "terminal"), title) },
             "template": "blue"
         },
         "elements": [
@@ -4048,12 +4058,14 @@ fn build_writable_session_card(session: &Session, write_url: &str) -> String {
 }
 
 fn build_readonly_link_card(session: &Session, ro_url: &str, _ro_token: &str) -> String {
+    let locale = session.locale.as_deref();
     let title = session
         .cli_id
         .clone()
         .unwrap_or_else(|| session.session_id.clone());
     let header = format!(
-        "Read-only terminal · {}",
+        "{} · {}",
+        card_text(locale, "只读终端", "Read-only terminal"),
         if session.title.trim().is_empty() {
             &title
         } else {
@@ -4069,14 +4081,18 @@ fn build_readonly_link_card(session: &Session, ro_url: &str, _ro_token: &str) ->
         "elements": [
             {
                 "tag": "markdown",
-                "content": "**Read-only access**\n\nClick the button below to open the terminal in read-only mode. The link is single-use."
+                "content": card_text(
+                    locale,
+                    "**只读访问**\n\n点击下方按钮以只读模式打开终端。链接仅可使用一次。",
+                    "**Read-only access**\n\nClick the button below to open the terminal in read-only mode. The link is single-use."
+                )
             },
             {
                 "tag": "action",
                 "actions": [
                     {
                         "tag": "button",
-                        "text": { "tag": "plain_text", "content": "Open read-only terminal" },
+                        "text": { "tag": "plain_text", "content": card_text(locale, "打开只读终端", "Open read-only terminal") },
                         "type": "primary",
                         "multi_url": {
                             "url": ro_url,
@@ -4145,12 +4161,31 @@ fn streaming_card_template(status: &str) -> &'static str {
     }
 }
 
-fn build_usage_limit_notice(usage_limit: &CliUsageLimitState) -> String {
+fn status_card_text<'a>(locale: Option<&str>, status: &'a str) -> &'a str {
+    match status {
+        "closed" => card_text(locale, "已关闭", "closed"),
+        "starting" => card_text(locale, "启动中", "starting"),
+        "idle" => card_text(locale, "空闲", "idle"),
+        "retry_ready" => card_text(locale, "可重试", "retry ready"),
+        "limited" => card_text(locale, "受限", "limited"),
+        "working" => card_text(locale, "工作中", "working"),
+        "analyzing" => card_text(locale, "分析中", "analyzing"),
+        _ => status,
+    }
+}
+
+fn build_usage_limit_notice(usage_limit: &CliUsageLimitState, locale: Option<&str>) -> String {
     if usage_limit.retry_ready {
-        format!(
-            "limit cleared. Retry is ready after {}.",
-            usage_limit.retry_label
-        )
+        if prompt::is_zh_locale(locale) {
+            format!("限制已解除。{} 后可重试。", usage_limit.retry_label)
+        } else {
+            format!(
+                "limit cleared. Retry is ready after {}.",
+                usage_limit.retry_label
+            )
+        }
+    } else if prompt::is_zh_locale(locale) {
+        format!("用量受限。请在 {} 后重试。", usage_limit.retry_label)
     } else {
         format!("usage limited. Try again at {}.", usage_limit.retry_label)
     }
@@ -4232,6 +4267,7 @@ fn build_terminal_url_with_ticket(
 }
 
 fn build_streaming_card(session: &Session, status: &str) -> String {
+    let locale = session.locale.as_deref();
     let title = if session.title.trim().is_empty() {
         session.session_id.clone()
     } else {
@@ -4268,7 +4304,7 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
     let mut elements = vec![
         serde_json::json!({
             "tag": "markdown",
-            "content": format!("session `{}`", session.session_id)
+            "content": format!("{} `{}`", card_text(locale, "会话", "session"), session.session_id)
         }),
         serde_json::json!({ "tag": "hr" }),
     ];
@@ -4276,7 +4312,7 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
         if let Some(usage_limit) = session.usage_limit.as_ref() {
             elements.push(serde_json::json!({
                 "tag": "markdown",
-                "content": build_usage_limit_notice(usage_limit)
+                "content": build_usage_limit_notice(usage_limit, locale)
             }));
             elements.push(serde_json::json!({ "tag": "hr" }));
         }
@@ -4293,13 +4329,13 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
         } else {
             elements.push(serde_json::json!({
                 "tag": "markdown",
-                "content": "waiting for screenshot"
+                "content": card_text(locale, "等待截图", "waiting for screenshot")
             }));
         }
     }
     let toggle_label = match display_mode {
-        DisplayMode::Hidden => "Show screenshot",
-        DisplayMode::Screenshot => "Hide screenshot",
+        DisplayMode::Hidden => card_text(locale, "显示截图", "Show screenshot"),
+        DisplayMode::Screenshot => card_text(locale, "隐藏截图", "Hide screenshot"),
     };
     let action_nonce = card_nonce.clone();
     let mut actions: Vec<serde_json::Value> = Vec::new();
@@ -4307,7 +4343,7 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
     if display_mode == DisplayMode::Screenshot {
         actions.push(serde_json::json!({
             "tag": "button",
-            "text": { "tag": "plain_text", "content": "Refresh screenshot" },
+            "text": { "tag": "plain_text", "content": card_text(locale, "刷新截图", "Refresh screenshot") },
             "type": "default",
             "value": {
                 "action": "refresh_screenshot",
@@ -4332,7 +4368,7 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
     }));
     actions.push(serde_json::json!({
         "tag": "button",
-        "text": { "tag": "plain_text", "content": "Open read-only terminal" },
+        "text": { "tag": "plain_text", "content": card_text(locale, "打开只读终端", "Open read-only terminal") },
         "type": "primary",
         "multi_url": {
             "url": terminal,
@@ -4344,7 +4380,7 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
 
     actions.push(serde_json::json!({
         "tag": "button",
-        "text": { "tag": "plain_text", "content": "Send write link privately" },
+        "text": { "tag": "plain_text", "content": card_text(locale, "私发可写链接", "Send write link privately") },
         "type": "default",
         "value": {
             "action": "get_write_link",
@@ -4362,7 +4398,7 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
     {
         actions.push(serde_json::json!({
             "tag": "button",
-            "text": { "tag": "plain_text", "content": "Retry last task" },
+            "text": { "tag": "plain_text", "content": card_text(locale, "重试上次任务", "Retry last task") },
             "type": "primary",
             "value": {
                 "action": "retry_last_task",
@@ -4376,7 +4412,7 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
     if session.adopted_from.is_none() {
         actions.push(serde_json::json!({
             "tag": "button",
-            "text": { "tag": "plain_text", "content": "Restart" },
+            "text": { "tag": "plain_text", "content": card_text(locale, "重启", "Restart") },
             "type": "default",
             "value": {
                 "action": "restart",
@@ -4388,9 +4424,9 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
         }));
     }
     let close_label = if session.adopted_from.is_some() {
-        "Disconnect"
+        card_text(locale, "断开连接", "Disconnect")
     } else {
-        "Close session"
+        card_text(locale, "关闭会话", "Close session")
     };
     actions.push(serde_json::json!({
         "tag": "button",
@@ -4414,7 +4450,7 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
             "actions": [
                 serde_json::json!({
                     "tag": "button",
-                    "text": { "tag": "plain_text", "content": "Export text" },
+                    "text": { "tag": "plain_text", "content": card_text(locale, "导出文本", "Export text") },
                     "type": "default",
                     "value": {
                         "action": "export_text",
@@ -4454,12 +4490,12 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
         elements.push(serde_json::json!({
             "tag": "action",
             "actions": [
-                key_button("Left", "left"),
-                key_button("Up", "up"),
-                key_button("Down", "down"),
-                key_button("Right", "right"),
-                key_button("Half Pg Up", "half_page_up"),
-                key_button("Half Pg Down", "half_page_down"),
+                key_button(card_text(locale, "左", "Left"), "left"),
+                key_button(card_text(locale, "上", "Up"), "up"),
+                key_button(card_text(locale, "下", "Down"), "down"),
+                key_button(card_text(locale, "右", "Right"), "right"),
+                key_button(card_text(locale, "上半页", "Half Pg Up"), "half_page_up"),
+                key_button(card_text(locale, "下半页", "Half Pg Down"), "half_page_down"),
             ]
         }));
     }
@@ -4467,7 +4503,7 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
         "config": { "wide_screen_mode": true, "enable_forward": true },
         "header": {
             "template": streaming_card_template(effective_status),
-            "title": { "tag": "plain_text", "content": format!("{} · {}", title, effective_status) }
+            "title": { "tag": "plain_text", "content": format!("{} · {}", title, status_card_text(locale, effective_status)) }
         },
         "elements": elements
     })
@@ -4923,6 +4959,7 @@ fn build_closed_session_reply(session: &Session) -> String {
 }
 
 fn build_closed_session_card(session: &Session) -> String {
+    let locale = session.locale.as_deref();
     let title = if session.title.trim().is_empty() {
         session
             .cli_id
@@ -4935,9 +4972,21 @@ fn build_closed_session_card(session: &Session) -> String {
     let resume_cmd = format!("beam session resume {}", session.session_id);
     let working_dir = session.working_dir.clone().unwrap_or_default();
     let body = if working_dir.is_empty() {
+        if prompt::is_zh_locale(locale) {
+            format!(
+                "**{}**\n{} 已终止。\n恢复命令：\n```bash\n{}\n```",
+                title, cli_name, resume_cmd
+            )
+        } else {
+            format!(
+                "**{}**\n{} terminated.\nresume with:\n```bash\n{}\n```",
+                title, cli_name, resume_cmd
+            )
+        }
+    } else if prompt::is_zh_locale(locale) {
         format!(
-            "**{}**\n{} terminated.\nresume with:\n```bash\n{}\n```",
-            title, cli_name, resume_cmd
+            "**{}**\n{} 已终止。\n恢复命令：\n```bash\n{}\n```\n工作目录：`{}`",
+            title, cli_name, resume_cmd, working_dir
         )
     } else {
         format!(
@@ -4948,7 +4997,7 @@ fn build_closed_session_card(session: &Session) -> String {
     serde_json::json!({
         "config": { "wide_screen_mode": true },
         "header": {
-            "title": { "tag": "plain_text", "content": "session closed" },
+            "title": { "tag": "plain_text", "content": card_text(locale, "会话已关闭", "session closed") },
             "template": "grey"
         },
         "elements": [
@@ -4957,7 +5006,7 @@ fn build_closed_session_card(session: &Session) -> String {
                 "tag": "action",
                 "actions": [{
                     "tag": "button",
-                    "text": { "tag": "plain_text", "content": "Resume session" },
+                    "text": { "tag": "plain_text", "content": card_text(locale, "恢复会话", "Resume session") },
                     "type": "primary",
                     "value": {
                         "action": "resume",
@@ -5020,6 +5069,7 @@ fn build_tui_prompt_card(
     options: &[TuiPromptOption],
     multi_select: bool,
     toggled_indices: &[usize],
+    locale: Option<&str>,
 ) -> String {
     let toggled = toggled_indices
         .iter()
@@ -5096,11 +5146,11 @@ fn build_tui_prompt_card(
                 {
                     "tag": "input",
                     "name": "tui_custom_input",
-                    "placeholder": { "tag": "plain_text", "content": "Type something" }
+                    "placeholder": { "tag": "plain_text", "content": card_text(locale, "输入内容", "Type something") }
                 },
                 {
                     "tag": "button",
-                    "text": { "tag": "plain_text", "content": "Send custom text" },
+                    "text": { "tag": "plain_text", "content": card_text(locale, "发送自定义文本", "Send custom text") },
                     "type": "primary",
                     "name": "tui_input_submit",
                     "action_type": "form_submit",
@@ -5126,15 +5176,21 @@ fn build_tui_prompt_card(
     .to_string()
 }
 
-fn build_tui_prompt_processing_card(selected_text: Option<&str>) -> String {
+fn build_tui_prompt_processing_card(selected_text: Option<&str>, locale: Option<&str>) -> String {
     let content = selected_text
         .filter(|text| !text.trim().is_empty())
-        .map(|text| format!("processing selection: `{}`", text))
-        .unwrap_or_else(|| "processing selection".to_string());
+        .map(|text| {
+            format!(
+                "{}: `{}`",
+                card_text(locale, "正在处理选择", "processing selection"),
+                text
+            )
+        })
+        .unwrap_or_else(|| card_text(locale, "正在处理选择", "processing selection").to_string());
     serde_json::json!({
         "config": { "wide_screen_mode": true },
         "header": {
-            "title": { "tag": "plain_text", "content": "processing" },
+            "title": { "tag": "plain_text", "content": card_text(locale, "处理中", "processing") },
             "template": "blue"
         },
         "elements": [
@@ -5144,15 +5200,21 @@ fn build_tui_prompt_processing_card(selected_text: Option<&str>) -> String {
     .to_string()
 }
 
-fn build_tui_prompt_resolved_card(selected_text: Option<&str>) -> String {
+fn build_tui_prompt_resolved_card(selected_text: Option<&str>, locale: Option<&str>) -> String {
     let content = selected_text
         .filter(|text| !text.trim().is_empty())
-        .map(|text| format!("selection applied: `{}`", text))
-        .unwrap_or_else(|| "prompt resolved".to_string());
+        .map(|text| {
+            format!(
+                "{}: `{}`",
+                card_text(locale, "已应用选择", "selection applied"),
+                text
+            )
+        })
+        .unwrap_or_else(|| card_text(locale, "提示已完成", "prompt resolved").to_string());
     serde_json::json!({
         "config": { "wide_screen_mode": true },
         "header": {
-            "title": { "tag": "plain_text", "content": "resolved" },
+            "title": { "tag": "plain_text", "content": card_text(locale, "已完成", "resolved") },
             "template": "green"
         },
         "elements": [
@@ -5731,6 +5793,7 @@ fn parse_lark_inbound_message(
         .filter(|v| !v.is_empty())
         .map(ToOwned::to_owned);
     let chat_type = message.get("chat_type").and_then(Value::as_str);
+    let locale = extract_lark_message_locale(payload);
     let (scope, anchor) = decide_lark_routing(message_id, chat_id, chat_type, root_id, thread_id);
     let content_raw = message
         .get("content")
@@ -5762,7 +5825,54 @@ fn parse_lark_inbound_message(
         parent_id,
         root_id: root_id_owned,
         thread_id: thread_id_owned,
+        locale,
     })
+}
+
+fn normalize_lark_locale(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
+    if normalized == "zh" || normalized.starts_with("zh_") {
+        Some("zh".to_string())
+    } else if normalized == "en" || normalized.starts_with("en_") {
+        Some("en".to_string())
+    } else {
+        None
+    }
+}
+
+fn extract_lark_message_locale(payload: &Value) -> Option<String> {
+    [
+        "/event/message/locale",
+        "/event/message/language",
+        "/event/message/i18n_locale",
+        "/event/message/message_locale",
+        "/event/locale",
+        "/header/locale",
+    ]
+    .iter()
+    .filter_map(|pointer| payload.pointer(pointer).and_then(Value::as_str))
+    .find_map(normalize_lark_locale)
+}
+
+fn lark_locale_or_english(locale: Option<&str>) -> &'static str {
+    match locale.and_then(normalize_lark_locale).as_deref() {
+        Some("zh") => "zh",
+        _ => "en",
+    }
+}
+
+fn update_session_from_lark_message(session: &mut Session, parsed: &ParsedLarkInboundMessage) {
+    session.quote_target_id = Some(parsed.message_id.clone());
+    // Backfill thread_id for p2p: the first p2p message creates a session
+    // with thread_id=None. Follow-up p2p messages may carry thread_id.
+    if session.thread_id.is_none() {
+        if let Some(ref tid) = parsed.thread_id {
+            session.thread_id = Some(tid.clone());
+        }
+    }
+    if session.locale.is_none() {
+        session.locale = Some(lark_locale_or_english(parsed.locale.as_deref()).to_string());
+    }
 }
 
 fn resolve_existing_lark_session(
@@ -5880,6 +5990,7 @@ struct SessionCreateSpec {
     prompt: String,
     lark_app_id: String,
     owner_open_id: Option<String>,
+    locale: Option<String>,
     adopted_from: Option<AdoptedFrom>,
 }
 
@@ -5896,6 +6007,7 @@ fn build_session_create_spec_from_bot(
     prompt: String,
     lark_app_id: String,
     owner_open_id: Option<String>,
+    locale: Option<String>,
     adopted_from: Option<AdoptedFrom>,
 ) -> SessionCreateSpec {
     SessionCreateSpec {
@@ -5913,6 +6025,7 @@ fn build_session_create_spec_from_bot(
         prompt,
         lark_app_id,
         owner_open_id,
+        locale,
         adopted_from,
     }
 }
@@ -5930,6 +6043,7 @@ fn build_session_create_spec_from_pending(
     prompt: String,
     lark_app_id: String,
     owner_open_id: Option<String>,
+    locale: Option<String>,
     adopted_from: Option<AdoptedFrom>,
 ) -> SessionCreateSpec {
     SessionCreateSpec {
@@ -5947,6 +6061,7 @@ fn build_session_create_spec_from_pending(
         prompt,
         lark_app_id,
         owner_open_id,
+        locale,
         adopted_from,
     }
 }
@@ -5968,6 +6083,7 @@ fn build_direct_create_session_spec_from_bot(
     prompt: String,
     lark_app_id: String,
     owner_open_id: Option<String>,
+    locale: Option<String>,
     adopted_from: Option<AdoptedFrom>,
 ) -> SessionCreateSpec {
     let working_dir = resolve_direct_create_working_dir(bot, daemon_working_dirs);
@@ -5986,6 +6102,7 @@ fn build_direct_create_session_spec_from_bot(
         prompt,
         lark_app_id,
         owner_open_id,
+        locale,
         adopted_from,
     }
 }
@@ -6040,7 +6157,7 @@ async fn create_session_internal(
         disable_cli_bypass: false,
         initial_prompt: None,
         model: None,
-        locale: None,
+        locale: spec.locale.clone(),
         resume_session_id: None,
     };
     {
@@ -6079,7 +6196,7 @@ async fn create_session_internal(
         disable_cli_bypass: false,
         initial_prompt: (!spec.prompt.is_empty()).then_some(spec.prompt),
         model: None,
-        locale: None,
+        locale: spec.locale,
         resume_session_id: None,
     };
     spawn_worker(state.clone(), session.clone(), init).await?;
@@ -7226,17 +7343,7 @@ async fn handle_lark_event_payload(
                 let snapshot = {
                     let mut sessions = state.sessions.lock().await;
                     if let Some(entry) = sessions.get_mut(&session.session_id) {
-                        entry.quote_target_id = Some(message_id.to_string());
-                        // Backfill thread_id for p2p: the first p2p message
-                        // creates a session with thread_id=None.  When a
-                        // follow-up p2p message carries a thread_id, persist it
-                        // so future events that only have thread_id (no root_id)
-                        // can also match this session.
-                        if entry.thread_id.is_none() {
-                            if let Some(ref tid) = parsed.thread_id {
-                                entry.thread_id = Some(tid.clone());
-                            }
-                        }
+                        update_session_from_lark_message(entry, &parsed);
                     }
                     sessions.clone()
                 };
@@ -7268,21 +7375,15 @@ async fn handle_lark_event_payload(
                 let snapshot = {
                     let mut sessions = state.sessions.lock().await;
                     if let Some(entry) = sessions.get_mut(&session.session_id) {
-                        entry.quote_target_id = Some(message_id.to_string());
-                        // Backfill thread_id for p2p: the first p2p message
-                        // creates a session with thread_id=None.  When a
-                        // follow-up p2p message carries a thread_id, persist it
-                        // so future events that only have thread_id (no root_id)
-                        // can also match this session.
-                        if entry.thread_id.is_none() {
-                            if let Some(ref tid) = parsed.thread_id {
-                                entry.thread_id = Some(tid.clone());
-                            }
-                        }
+                        update_session_from_lark_message(entry, &parsed);
                     }
                     sessions.clone()
                 };
                 let _ = persist_sessions(&state.paths, &snapshot).await;
+                let session_locale = snapshot
+                    .get(&session.session_id)
+                    .and_then(|entry| entry.locale.as_deref())
+                    .unwrap_or_else(|| lark_locale_or_english(parsed.locale.as_deref()));
                 let reuse_content = {
                     // Use session's root_message_id for quote hint suppression,
                     // not the dispatch anchor (which may be thread_id for topics).
@@ -7301,6 +7402,7 @@ async fn handle_lark_event_payload(
                             sender_type: parsed.sender_type.as_deref(),
                             mentions: &parsed.mentions,
                             cli_id: session.cli_id.as_deref().unwrap_or("codex"),
+                            locale: Some(session_locale),
                         },
                     )
                 };
@@ -7357,6 +7459,7 @@ async fn handle_lark_event_payload(
                         bot_open_id: bot_open_id.as_deref(),
                         observed_bots: &observed_bots,
                         follow_ups: &Vec::new(),
+                        locale: parsed.locale.as_deref(),
                     })
                 } else {
                     prompt::build_follow_up_content(
@@ -7367,6 +7470,7 @@ async fn handle_lark_event_payload(
                             sender_type: parsed.sender_type.as_deref(),
                             mentions: &mentions,
                             cli_id: bot.cli_id.as_str(),
+                            locale: parsed.locale.as_deref(),
                         },
                     )
                 };
@@ -7396,6 +7500,7 @@ async fn handle_lark_event_payload(
                         prompt,
                         app_id.clone(),
                         sender_open_id.clone(),
+                        Some(lark_locale_or_english(parsed.locale.as_deref()).to_string()),
                         None,
                     ),
                 )
@@ -7477,6 +7582,7 @@ async fn handle_lark_event_payload(
                 text: text.clone(),
                 sender_open_id: sender_open_id.clone(),
                 sender_type: parsed.sender_type.clone(),
+                locale: Some(lark_locale_or_english(parsed.locale.as_deref()).to_string()),
                 parent_id: parsed.parent_id.clone(),
                 mentions_json: serde_json::to_string(&parsed.mentions).unwrap_or_default(),
                 quota_key,
@@ -8169,6 +8275,7 @@ async fn handle_lark_card_action_payload(
                 bot_open_id: bot_open_id.as_deref(),
                 observed_bots: &observed_bots,
                 follow_ups: &Vec::new(),
+                locale: pending.locale.as_deref(),
             })
         } else {
             prompt::build_follow_up_content(
@@ -8179,6 +8286,7 @@ async fn handle_lark_card_action_payload(
                     sender_type: pending.sender_type.as_deref(),
                     mentions: &mentions,
                     cli_id: pending.cli_id.as_str(),
+                    locale: pending.locale.as_deref(),
                 },
             )
         };
@@ -8198,6 +8306,7 @@ async fn handle_lark_card_action_payload(
                 prompt,
                 pending.lark_app_id.clone(),
                 pending.sender_open_id.clone(),
+                pending.locale.clone(),
                 None,
             ),
         )
@@ -9130,6 +9239,7 @@ async fn handle_lark_card_action_payload(
                     &session_snapshot.tui_prompt_options,
                     session_snapshot.tui_prompt_multi_select.unwrap_or(false),
                     &session_snapshot.tui_toggled_indices,
+                    session_snapshot.locale.as_deref(),
                 ))
                 .unwrap_or_else(|_| serde_json::json!({}));
                 return Ok(Json(serde_json::json!({
@@ -9138,7 +9248,7 @@ async fn handle_lark_card_action_payload(
                 })));
             }
 
-            let (all_keys, is_final, resolved_text, prompt_card_id, delay_ms) = {
+            let (all_keys, is_final, resolved_text, prompt_card_id, delay_ms, locale) = {
                 let sessions = state.sessions.lock().await;
                 let Some(session) = sessions.get(&session_id) else {
                     return Ok(Json(build_lark_card_action_toast(
@@ -9165,6 +9275,7 @@ async fn handle_lark_card_action_payload(
                     resolve_tui_prompt_final_text(session, action.selected_text.as_deref()),
                     session.tui_prompt_card_id.clone(),
                     delay_ms,
+                    session.locale.clone(),
                 )
             };
             if is_final {
@@ -9216,15 +9327,19 @@ async fn handle_lark_card_action_payload(
                             &state,
                             &bot,
                             &card_id,
-                            &build_tui_prompt_resolved_card(Some(resolved_text.as_str())),
+                            &build_tui_prompt_resolved_card(
+                                Some(resolved_text.as_str()),
+                                session.locale.as_deref(),
+                            ),
                         )
                         .await;
                     });
                 }
             }
-            let card = serde_json::from_str::<Value>(&build_tui_prompt_processing_card(Some(
-                &processing_text,
-            )))
+            let card = serde_json::from_str::<Value>(&build_tui_prompt_processing_card(
+                Some(&processing_text),
+                locale.as_deref(),
+            ))
             .unwrap_or_else(|_| serde_json::json!({}));
             Ok(Json(serde_json::json!({
                 "toast": {
@@ -9256,22 +9371,27 @@ async fn handle_lark_card_action_payload(
                 },
             )
             .await;
-            let snapshot = {
+            let (snapshot, locale) = {
                 let mut sessions = state.sessions.lock().await;
+                let locale = sessions
+                    .get(&session_id)
+                    .and_then(|entry| entry.locale.clone());
                 if let Some(entry) = sessions.get_mut(&session_id) {
                     entry.tui_prompt_card_id = None;
                     entry.tui_prompt_options.clear();
                     entry.tui_prompt_multi_select = None;
                     entry.tui_toggled_indices.clear();
                 }
-                sessions.clone()
+                (sessions.clone(), locale)
             };
             persist_sessions(&state.paths, &snapshot)
                 .await
                 .map_err(internal_error)?;
-            let card =
-                serde_json::from_str::<Value>(&build_tui_prompt_resolved_card(Some(&input_text)))
-                    .unwrap_or_else(|_| serde_json::json!({}));
+            let card = serde_json::from_str::<Value>(&build_tui_prompt_resolved_card(
+                Some(&input_text),
+                locale.as_deref(),
+            ))
+            .unwrap_or_else(|_| serde_json::json!({}));
             Ok(Json(serde_json::json!({
                 "toast": {
                     "type": "success",
@@ -12073,6 +12193,7 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
                 bot_id.clone(),
                 None,
                 None,
+                None,
             ),
         )
         .await
@@ -13521,6 +13642,7 @@ mod tests {
             "app-spec".to_string(),
             Some("ou_owner".to_string()),
             None,
+            None,
         );
         assert_eq!(spec.cli_id, "traex");
         assert_eq!(spec.cli_bin, "traex");
@@ -13551,6 +13673,7 @@ mod tests {
             Some("omt_1".to_string()),
             "prompt".to_string(),
             "app-spec-fallback".to_string(),
+            None,
             None,
             None,
         );
@@ -15258,6 +15381,38 @@ mod tests {
             "url should start with base: {url}"
         );
         assert!(card.pointer("/elements/3").is_none());
+    }
+
+    #[test]
+    fn build_streaming_card_uses_chinese_labels_for_zh_locale() {
+        let mut session = make_session("sess-zh");
+        session.status = SessionStatus::Active;
+        session.closed_at = None;
+        session.locale = Some("zh".to_string());
+        session.terminal_url = Some("http://127.0.0.1:9000/s/sess-zh".to_string());
+        let card: Value =
+            serde_json::from_str(&build_streaming_card(&session, "idle")).expect("valid card json");
+        assert_eq!(
+            card.pointer("/header/title/content")
+                .and_then(Value::as_str),
+            Some("session sess-zh · 空闲")
+        );
+        let actions = card
+            .pointer("/elements/2/actions")
+            .and_then(Value::as_array)
+            .expect("actions array");
+        assert_eq!(
+            actions[0].pointer("/text/content").and_then(Value::as_str),
+            Some("显示截图")
+        );
+        assert_eq!(
+            actions[1].pointer("/text/content").and_then(Value::as_str),
+            Some("打开只读终端")
+        );
+        assert_eq!(
+            actions[2].pointer("/text/content").and_then(Value::as_str),
+            Some("私发可写链接")
+        );
     }
 
     #[test]
@@ -17993,6 +18148,7 @@ mod tests {
             }],
             false,
             &[],
+            None,
         ))
         .expect("valid card json");
         assert_eq!(
@@ -18044,6 +18200,7 @@ mod tests {
             }],
             false,
             &[],
+            None,
         ))
         .expect("valid card json");
         assert_eq!(
@@ -18533,6 +18690,7 @@ mod tests {
             parent_id: None,
             root_id: None,
             thread_id: None,
+            locale: None,
         };
 
         let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
@@ -18567,6 +18725,7 @@ mod tests {
             parent_id: None,
             root_id: None,
             thread_id: None,
+            locale: None,
         };
 
         let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
@@ -18602,6 +18761,7 @@ mod tests {
             parent_id: None,
             root_id: None,
             thread_id: None,
+            locale: None,
         };
 
         let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
@@ -18636,6 +18796,7 @@ mod tests {
             parent_id: None,
             root_id: None,
             thread_id: None,
+            locale: None,
         };
 
         let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
@@ -18673,6 +18834,7 @@ mod tests {
             parent_id: None,
             root_id: Some("first-topic-msg".to_string()),
             thread_id: None,
+            locale: None,
         };
 
         let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
@@ -18709,6 +18871,7 @@ mod tests {
             parent_id: None,
             root_id: Some("topic-root-msg".to_string()),
             thread_id: Some("omt_thread".to_string()),
+            locale: None,
         };
 
         let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
@@ -18748,6 +18911,7 @@ mod tests {
             parent_id: None,
             root_id: None,
             thread_id: None,
+            locale: None,
         };
 
         let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
@@ -18793,6 +18957,7 @@ mod tests {
             parent_id: None,
             root_id: Some("topic-b-root".to_string()),
             thread_id: None,
+            locale: None,
         };
 
         let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
@@ -19449,6 +19614,29 @@ mod tests {
     }
 
     #[test]
+    fn parse_lark_inbound_message_uses_locale_field_not_text() {
+        let payload = serde_json::json!({
+            "header": { "event_id": "evt-locale" },
+            "event": {
+                "sender": {
+                    "sender_type": "user",
+                    "sender_id": { "open_id": "ou_user" }
+                },
+                "message": {
+                    "message_id": "msg-locale",
+                    "chat_id": "chat-locale",
+                    "chat_type": "group",
+                    "locale": "zh-CN",
+                    "content": "{\"text\":\"please investigate this\"}"
+                }
+            }
+        });
+        let parsed = parse_lark_inbound_message(&payload).expect("valid lark message");
+        assert_eq!(parsed.text, "please investigate this");
+        assert_eq!(parsed.locale.as_deref(), Some("zh"));
+    }
+
+    #[test]
     fn decide_lark_routing_topic_group_should_be_thread_scoped_with_message_id() {
         assert_eq!(
             decide_lark_routing("msg-1", "chat-a", Some("group"), None, None),
@@ -19597,6 +19785,7 @@ mod tests {
             parent_id: None,
             root_id: Some("topic-b-root".to_string()),
             thread_id: Some("omt_topic_b".to_string()),
+            locale: None,
         };
 
         let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
@@ -19640,6 +19829,7 @@ mod tests {
             parent_id: Some("msg-p2p-1".to_string()),
             root_id: Some("msg-p2p-1".to_string()),
             thread_id: None,
+            locale: None,
         };
 
         let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
@@ -19686,6 +19876,7 @@ mod tests {
             parent_id: Some("msg-p2p-2".to_string()),
             root_id: Some("first-msg".to_string()),
             thread_id: Some("omt_thread".to_string()),
+            locale: None,
         };
 
         let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
@@ -19726,6 +19917,7 @@ mod tests {
             parent_id: None,
             root_id: None,
             thread_id: None,
+            locale: None,
         };
 
         let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
@@ -19826,6 +20018,7 @@ mod tests {
             sender_type: None,
             mentions: &mentions,
             cli_id: "codex",
+            locale: None,
         };
         let result = prompt::build_follow_up_content("hello", &opts);
         assert!(result.contains("<user_message>"));
@@ -19844,6 +20037,7 @@ mod tests {
             sender_type: None,
             mentions: &mentions,
             cli_id: "codex",
+            locale: None,
         };
         let result = prompt::build_follow_up_content("hi", &opts);
         assert!(result.contains("<mentions>"));
@@ -19860,6 +20054,7 @@ mod tests {
             sender_type: None,
             mentions: &mentions,
             cli_id: "mira",
+            locale: None,
         };
         let result = prompt::build_follow_up_content("hi", &opts);
         assert!(!result.contains("beam_reminder"));

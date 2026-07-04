@@ -81,6 +81,8 @@ pub struct PendingCreateSession {
     pub text: String,
     pub sender_open_id: Option<String>,
     pub sender_type: Option<String>,
+    #[serde(default)]
+    pub locale: Option<String>,
     pub parent_id: Option<String>,
     /// Serialized Vec<LarkEventMention>
     #[serde(default)]
@@ -1974,6 +1976,7 @@ mod tests {
                 text: "".to_string(),
                 sender_open_id: None,
                 sender_type: None,
+                locale: None,
                 parent_id: None,
                 mentions_json: "[]".to_string(),
                 quota_key: None,

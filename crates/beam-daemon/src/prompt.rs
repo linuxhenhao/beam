@@ -6,16 +6,31 @@ pub struct ObservedBot {
     pub name: String,
 }
 
-pub fn build_beam_shell_hints() -> Vec<String> {
+pub fn is_zh_locale(locale: Option<&str>) -> bool {
+    locale
+        .map(|value| {
+            let normalized = value.to_ascii_lowercase().replace('-', "_");
+            normalized == "zh" || normalized.starts_with("zh_")
+        })
+        .unwrap_or(false)
+}
+
+pub fn build_beam_shell_hints(locale: Option<&str>) -> Vec<String> {
+    if is_zh_locale(locale) {
+        return vec![
+            "你正在飞书话题中通过 Beam 与用户协作；用户消息会转发给你，但终端输出不会自动发给用户。".to_string(),
+            "回复用户必须执行 `beam send`，并明确选择 `--mention-back`、`--mention <open_id>` 或 `--no-mention`。".to_string(),
+            "常用回复格式：\n```sh\nbeam send --mention-back <<'EOF'\n<回复内容>\nEOF\n```".to_string(),
+            "得出结论、完成修改、需要确认、遇到阻塞时，主动发送消息。".to_string(),
+            "辅助命令：`beam history`、`beam quoted <id>`、`beam bots list`、`beam send --file <path>`。".to_string(),
+        ];
+    }
     vec![
-        "你运行在飞书话题群中。发出的消息会被 beam 转发给用户，用户回复也会回传给你。".to_string(),
-        "beam 是一条 SHELL 命令，不是 MCP 工具。不要假设你能调用 MCP beam，直接执行 shell 命令即可。".to_string(),
-        "使用 `beam send <消息>` 回复用户。回显文本和 JSON 只对你自己可见，必须用 beam send 才能发到群里。".to_string(),
-        "多行消息请用 heredoc：\n```sh\nbeam send <<'EOF'\n<多行内容>\nEOF\n```".to_string(),
-        "示例：\n```sh\nbeam send <<'EOF'\n好的，这个问题我这样解决：\n1. 先检查配置...\n2. 再修改代码...\nEOF\n```".to_string(),
-        "辅助命令：\n- `beam history` 查看对话历史\n- `beam quoted <id>` 查看被引用的消息\n- `beam bots list` 查看群内可用 bot\n- `beam send --file <path>` 发送文件".to_string(),
-        "以下情况请主动发送消息：得出结论或方案时、完成代码修改时、需要用户确认或选择时、遇到需要用户介入的问题时。".to_string(),
-        "beam send 必须带以下参数之一：--mention 提及发送者、--mention-back 引用并提及、--no-mention 静默发送。明确选择一个，不要省略。".to_string(),
+        "You are collaborating with the user in a Feishu/Lark thread through Beam. User messages are forwarded to you, but terminal output is not sent to the user automatically.".to_string(),
+        "To reply, run `beam send` and explicitly choose `--mention-back`, `--mention <open_id>`, or `--no-mention`.".to_string(),
+        "Common reply format:\n```sh\nbeam send --mention-back <<'EOF'\n<reply content>\nEOF\n```".to_string(),
+        "Send a message when you reach a conclusion, finish changes, need confirmation, or hit a blocker.".to_string(),
+        "Helpful commands: `beam history`, `beam quoted <id>`, `beam bots list`, `beam send --file <path>`.".to_string(),
     ]
 }
 
@@ -29,6 +44,7 @@ pub struct InitialPromptOptions<'a> {
     pub bot_open_id: Option<&'a str>,
     pub observed_bots: &'a [ObservedBot],
     pub follow_ups: &'a [String],
+    pub locale: Option<&'a str>,
 }
 
 pub fn build_initial_prompt(opts: &InitialPromptOptions) -> String {
@@ -55,7 +71,7 @@ pub fn build_initial_prompt(opts: &InitialPromptOptions) -> String {
         xml_escape(opts.session_id)
     ));
 
-    let hints = build_beam_shell_hints();
+    let hints = build_beam_shell_hints(opts.locale);
     blocks.push(format!(
         "<beam_routing>\n{}\n</beam_routing>",
         hints.join("\n")
@@ -108,8 +124,14 @@ pub fn build_initial_prompt(opts: &InitialPromptOptions) -> String {
             })
             .collect();
         if !unmentioned.is_empty() {
+            let hint = if is_zh_locale(opts.locale) {
+                "你可以用 beam send --mention <bot_id> 让群里其他 bot 帮你"
+            } else {
+                "Use beam send --mention <bot_id> to ask another bot in the chat for help"
+            };
             blocks.push(format!(
-                "<available_bots hint=\"你可以用 beam send --mention <bot_id> 让群里其他 bot 帮你\">\n{}\n</available_bots>",
+                "<available_bots hint=\"{}\">\n{}\n</available_bots>",
+                hint,
                 unmentioned.join("\n")
             ));
         }
@@ -153,6 +175,7 @@ pub struct FollowUpContentOptions<'a> {
     pub sender_type: Option<&'a str>,
     pub mentions: &'a [LarkEventMention],
     pub cli_id: &'a str,
+    pub locale: Option<&'a str>,
 }
 
 pub fn build_follow_up_content(content: &str, opts: &FollowUpContentOptions) -> String {
@@ -193,8 +216,12 @@ pub fn build_follow_up_content(content: &str, opts: &FollowUpContentOptions) -> 
     }
 
     if opts.cli_id != "mira" {
-        blocks
-            .push("<beam_reminder>你可以继续对话，或使用 Ctrl+C 返回</beam_reminder>".to_string());
+        let reminder = if is_zh_locale(opts.locale) {
+            "如果这条消息改变了计划，请继续处理；如果需要回复用户，请使用 beam send。"
+        } else {
+            "If this message changes the plan, continue working. If you need to reply to the user, use beam send."
+        };
+        blocks.push(format!("<beam_reminder>{}</beam_reminder>", reminder));
     }
 
     blocks.join("\n\n")

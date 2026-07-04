@@ -11,7 +11,7 @@
       "type": "subagent",
       "bot": "cli_canary_PLACEHOLDER",
       "description": "subagent.bot is a larkAppId placeholder (cli_*); replace with the real bot id from `beam bots list` before running.",
-      "prompt": "Write a short, friendly greeting message. Return JSON with two fields: `preview` (the greeting text shown to the human approver) and `finalPrompt` (a string instructing the next node to echo the greeting back verbatim as the final signed-off message). Schema: {\"preview\": string, \"finalPrompt\": string}.",
+      "prompt": "Write a short, friendly greeting message.\n\nReturn JSON:\n{\"preview\":\"greeting shown to the human approver\",\"finalPrompt\":\"instruction for the next node to echo the approved greeting verbatim\"}",
       "outputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",

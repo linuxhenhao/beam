@@ -37,7 +37,20 @@ fn render_screen_for_display_mode(screen: &str, mode: DisplayMode) -> String {
     }
 }
 
-const SCREEN_ANALYZER_SYSTEM_PROMPT: &str = "You are a terminal screen analyzer. Determine whether the CLI is showing a blocking interactive prompt. Return only JSON with fields needsInteraction, description, options, multiSelect, toggleKey, confirmKey, checkAgainWhen. checkAgainWhen must be one of content_changed, after_5s, after_10s, not_needed.";
+const SCREEN_ANALYZER_SYSTEM_PROMPT: &str = r#"You analyze a terminal screen from an AI coding CLI.
+
+Decide whether the CLI is waiting for user interaction, such as a menu choice, permission prompt, confirmation, text input, or multi-select. If the CLI is still working, printing output, or only showing status text, set needsInteraction=false.
+
+Return only JSON:
+{
+  "needsInteraction": boolean,
+  "description": string,
+  "options": [{"label": string, "text": string, "selected": boolean}],
+  "multiSelect": boolean,
+  "toggleKey": string|null,
+  "confirmKey": string|null,
+  "checkAgainWhen": "content_changed"|"after_5s"|"after_10s"|"not_needed"
+}"#;
 
 #[derive(Debug, Clone, Default)]
 struct AnalyzerRuntime {

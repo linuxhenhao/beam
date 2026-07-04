@@ -9,7 +9,7 @@ pub fn with_workflow_output_protocol(prompt: &str) -> String {
         return prompt.to_string();
     }
     format!(
-        "{prompt}\n\n---\nWhen you finish, emit your final structured output between the markers below as a single valid JSON value. Do not include anything else inside the markers.\n\n{begin}\n{{\"...your JSON output...\"}}\n{end}\n",
+        "{prompt}\n\n---\nReturn the final workflow result as exactly one JSON value between these markers:\n\n{begin}\n{{\"...your JSON output...\"}}\n{end}\n\nDo not put commentary inside the markers.\n",
         prompt = prompt,
         begin = WORKFLOW_OUTPUT_BEGIN,
         end = WORKFLOW_OUTPUT_END
