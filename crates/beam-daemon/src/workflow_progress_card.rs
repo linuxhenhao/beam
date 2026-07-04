@@ -1,6 +1,8 @@
 use beam_core::{ActivityStatus, NodeStatus, RunSnapshotDTO, RunStatus};
 use serde_json::json;
 
+use crate::card_i18n;
+
 pub fn build_workflow_progress_card(
     snapshot: &RunSnapshotDTO,
     _run_id: &str,
@@ -21,7 +23,8 @@ pub fn build_workflow_progress_card(
         })
         .count();
 
-    let progress_text = format!("{}/{} nodes completed", completed, total_nodes);
+    let progress_text_en = format!("{}/{} nodes completed", completed, total_nodes);
+    let progress_text_zh = format!("{}/{} 个节点已完成", completed, total_nodes);
 
     let status_emoji = match &snapshot.run.status {
         RunStatus::Running => "\u{1f504}",
@@ -55,23 +58,46 @@ pub fn build_workflow_progress_card(
 
     let mut elements = Vec::new();
 
-    let header_text = format!("{} Workflow Run: {}", status_emoji, workflow_id);
+    let header_text_en = format!("{} Workflow Run: {}", status_emoji, workflow_id);
+    let header_text_zh = format!("{} 工作流运行：{}", status_emoji, workflow_id);
     if !running_nodes.is_empty() {
         let running_str = running_nodes.join("\n");
+        let running_zh = running_nodes
+            .iter()
+            .map(|line| line.replace(" (awaiting approval)", "（等待审批）"))
+            .collect::<Vec<_>>()
+            .join("\n");
         elements.push(json!({
             "tag": "markdown",
-            "content": format!("{}\n\nRunning:\n{}", header_text, running_str),
+            "content": format!("{}\n\nRunning:\n{}", header_text_en, running_str),
+            "i18n_content": {
+                "zh_cn": format!("{}\n\n运行中：\n{}", header_text_zh, running_zh),
+                "en_us": format!("{}\n\nRunning:\n{}", header_text_en, running_str),
+            }
         }));
     } else if !waiting_nodes.is_empty() {
         let waiting_str = waiting_nodes.join("\n");
+        let waiting_zh = waiting_nodes
+            .iter()
+            .map(|line| line.replace(" (awaiting approval)", "（等待审批）"))
+            .collect::<Vec<_>>()
+            .join("\n");
         elements.push(json!({
             "tag": "markdown",
-            "content": format!("{}\n\nAwaiting:\n{}", header_text, waiting_str),
+            "content": format!("{}\n\nAwaiting:\n{}", header_text_en, waiting_str),
+            "i18n_content": {
+                "zh_cn": format!("{}\n\n等待中：\n{}", header_text_zh, waiting_zh),
+                "en_us": format!("{}\n\nAwaiting:\n{}", header_text_en, waiting_str),
+            }
         }));
     } else {
         elements.push(json!({
             "tag": "markdown",
-            "content": header_text,
+            "content": header_text_en,
+            "i18n_content": {
+                "zh_cn": header_text_zh,
+                "en_us": header_text_en,
+            }
         }));
     }
 
@@ -81,7 +107,11 @@ pub fn build_workflow_progress_card(
 
     elements.push(json!({
         "tag": "markdown",
-        "content": progress_text,
+        "content": progress_text_en,
+        "i18n_content": {
+            "zh_cn": progress_text_zh,
+            "en_us": progress_text_en,
+        }
     }));
 
     if !snapshot.activities.is_empty() {
@@ -103,16 +133,25 @@ pub fn build_workflow_progress_card(
         elements.push(json!({
             "tag": "markdown",
             "content": format!("Activities:\n{}", activity_lines.join("\n")),
+            "i18n_content": {
+                "zh_cn": format!("活动：\n{}", activity_lines.join("\n")),
+                "en_us": format!("Activities:\n{}", activity_lines.join("\n")),
+            }
         }));
     }
 
     json!({
         "config": { "wide_screen_mode": true },
+        "locales": card_i18n::card_locales(),
         "header": {
             "template": status_color,
             "title": {
                 "tag": "plain_text",
                 "content": format!("Workflow {}", workflow_id),
+                "i18n_content": {
+                    "zh_cn": format!("工作流 {}", workflow_id),
+                    "en_us": format!("Workflow {}", workflow_id),
+                },
             },
         },
         "elements": elements,

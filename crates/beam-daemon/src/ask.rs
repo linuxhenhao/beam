@@ -9,6 +9,7 @@ use tokio::sync::oneshot;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::card_i18n;
 use crate::{
     AppState, build_lark_card_action_toast, internal_error, lark_reply_card, send_lark_card_in_chat,
 };
@@ -187,7 +188,7 @@ pub async fn create_ask(
         persist_ask_pending_now(&state.paths, &pending).await;
     }
 
-    let card = build_ask_card(&ask_id, &nonce, &request.questions, &[], false, None);
+    let card = build_ask_card(&ask_id, &nonce, &request.questions, &[], false, None, None);
     let message_id = if let Some(root_message_id) = request
         .root_message_id
         .as_deref()
@@ -452,6 +453,31 @@ mod tests {
         assert_eq!(approvers, HashSet::from(["ou_owner".to_string()]));
     }
 
+    #[test]
+    fn build_ask_card_localizes_pending_header() {
+        let card: serde_json::Value = serde_json::from_str(&build_ask_card(
+            "ask-1",
+            "nonce-1",
+            &[],
+            &[],
+            false,
+            None,
+            None,
+        ))
+        .expect("valid card json");
+
+        assert_eq!(
+            card.pointer("/header/title/i18n_content/zh_cn")
+                .and_then(serde_json::Value::as_str),
+            Some("提问")
+        );
+        assert_eq!(
+            card.pointer("/header/title/i18n_content/en_us")
+                .and_then(serde_json::Value::as_str),
+            Some("Ask question")
+        );
+    }
+
     #[tokio::test]
     async fn resolve_ask_approvers_uses_explicit_approvers_first() {
         let state = make_state(Some("ou_owner"), vec!["ou_allowed"]);
@@ -480,19 +506,32 @@ fn build_ask_card(
     questions: &[AskQuestion],
     selections: &[HashSet<String>],
     settled: bool,
-    settled_text: Option<&str>,
+    settled_text_zh: Option<&str>,
+    settled_text_en: Option<&str>,
 ) -> String {
+    let settled_title_zh = "问答已完成";
+    let settled_title_en = "Ask answered";
+    let settled_body_zh = settled_text_zh.unwrap_or("答复已提交");
+    let settled_body_en = settled_text_en.unwrap_or("Answer submitted");
     let mut elements = Vec::new();
     if settled {
         elements.push(serde_json::json!({
             "tag": "markdown",
-            "content": settled_text.unwrap_or("ask resolved"),
+            "content": settled_body_en,
+            "i18n_content": {
+                "zh_cn": settled_body_zh,
+                "en_us": settled_body_en,
+            },
         }));
     }
     for (idx, question) in questions.iter().enumerate() {
         elements.push(serde_json::json!({
             "tag": "markdown",
             "content": format!("**{}**", question.prompt),
+            "i18n_content": {
+                "zh_cn": format!("**{}**", question.prompt),
+                "en_us": format!("**{}**", question.prompt),
+            },
         }));
         let mut buttons = Vec::new();
         let selected = selections.get(idx);
@@ -502,14 +541,19 @@ fn build_ask_card(
                 .unwrap_or(false);
             buttons.push(serde_json::json!({
                 "tag": "button",
-                "text": {
-                    "tag": "plain_text",
-                    "content": if checked {
+                "text": card_i18n::plain_text(
+                    None,
+                    if checked {
+                        format!("✓ {}", option.label)
+                    } else {
+                        option.label.clone()
+                    },
+                    if checked {
                         format!("✓ {}", option.label)
                     } else {
                         option.label.clone()
                     }
-                },
+                ),
                 "type": "default",
                 "value": {
                     "action": "ask_toggle",
@@ -530,7 +574,7 @@ fn build_ask_card(
             "tag": "action",
             "actions": [{
                 "tag": "button",
-                "text": { "tag": "plain_text", "content": "Submit" },
+                "text": card_i18n::plain_text(None, "提交", "Submit"),
                 "type": "primary",
                 "value": {
                     "action": "ask_submit",
@@ -542,11 +586,16 @@ fn build_ask_card(
     }
     serde_json::json!({
         "config": { "wide_screen_mode": true },
+        "locales": card_i18n::card_locales(),
         "header": {
             "template": if settled { "green" } else { "blue" },
             "title": {
                 "tag": "plain_text",
-                "content": if settled { "Ask answered" } else { "Ask question" },
+                "content": if settled { settled_title_en } else { "Ask question" },
+                "i18n_content": {
+                    "zh_cn": if settled { settled_title_zh } else { "提问" },
+                    "en_us": if settled { settled_title_en } else { "Ask question" },
+                },
             },
         },
         "elements": elements,
@@ -625,6 +674,7 @@ pub async fn handle_ask_card_action(
             &entry.request.questions,
             &selections,
             true,
+            Some("答复已提交"),
             Some("Answer submitted"),
         );
         pending.remove(&ask_id);
@@ -680,6 +730,7 @@ pub async fn handle_ask_card_action(
         &entry.request.questions,
         &entry.selections,
         false,
+        None,
         None,
     );
     let card_json =

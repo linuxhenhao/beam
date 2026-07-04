@@ -74,6 +74,8 @@ Streaming cards represent session state. The daemon should create and refresh te
 
 Card actions include display toggle, screenshot refresh, read-only terminal open, write-link request, close/restart, export text, and workflow actions. Handlers must validate session identity and stale-card state.
 
+For the full card inventory and the multi-language card contract, see [beam-cards.en.md](beam-cards.en.md).
+
 ## CLI Passthrough
 
 Daemon slash-command classification should only intercept Beam daemon commands. Unknown slash commands are forwarded to the CLI through `raw_input`, preserving the user's ability to use CLI-native commands.

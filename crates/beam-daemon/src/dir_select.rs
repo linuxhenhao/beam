@@ -12,6 +12,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::card_i18n;
 use beam_core::SessionScope;
 
 // --- Constants ---
@@ -469,6 +470,19 @@ pub(crate) async fn save_pending_creates(
 
 // --- Card Building ---
 
+fn is_zh_locale(locale: Option<&str>) -> bool {
+    locale
+        .map(|value| {
+            let normalized = value.to_ascii_lowercase().replace('-', "_");
+            normalized == "zh" || normalized.starts_with("zh_")
+        })
+        .unwrap_or(false)
+}
+
+fn card_text<'a>(locale: Option<&str>, zh: &'a str, en: &'a str) -> &'a str {
+    if is_zh_locale(locale) { zh } else { en }
+}
+
 /// Build the directory selection card JSON string.
 ///
 /// The card has two directory-picking entry points:
@@ -496,6 +510,7 @@ pub fn build_dir_select_card(
     filter_result: Option<&[String]>,
     search_keyword: Option<&str>,
     message: Option<&str>,
+    locale: Option<&str>,
 ) -> String {
     let mut elements: Vec<Value> = Vec::new();
 
@@ -505,7 +520,11 @@ pub fn build_dir_select_card(
         "tag": "div",
         "text": {
             "tag": "lark_md",
-            "content": format!("📁 **根目录：** {}", display_root)
+            "content": format!("📁 **{}:** {}", card_text(locale, "根目录", "Root"), display_root),
+            "i18n_content": {
+                "zh_cn": format!("📁 **{}:** {}", "根目录", display_root),
+                "en_us": format!("📁 **{}:** {}", "Root", display_root),
+            }
         }
     }));
 
@@ -515,7 +534,11 @@ pub fn build_dir_select_card(
         "tag": "div",
         "text": {
             "tag": "lark_md",
-            "content": format!("💬 **消息：** {}", display_title)
+            "content": format!("💬 **{}:** {}", card_text(locale, "消息", "Message"), display_title),
+            "i18n_content": {
+                "zh_cn": format!("💬 **{}:** {}", "消息", display_title),
+                "en_us": format!("💬 **{}:** {}", "Message", display_title),
+            }
         }
     }));
 
@@ -525,7 +548,11 @@ pub fn build_dir_select_card(
             "tag": "div",
             "text": {
                 "tag": "lark_md",
-                "content": msg
+                "content": msg,
+                "i18n_content": {
+                    "zh_cn": msg,
+                    "en_us": msg,
+                }
             }
         }));
     }
@@ -553,15 +580,29 @@ pub fn build_dir_select_card(
     };
     let section_label = if is_filtered {
         if total_count > MAX_BUTTON_DIRS && button_dirs.len() < select_dirs.len() {
-            format!(
-                "📋 **当前结果（共 {} 个，按钮显示前 {} 个）：**",
-                total_count, MAX_BUTTON_DIRS
-            )
+            if is_zh_locale(locale) {
+                format!(
+                    "📋 **当前结果（共 {} 个，按钮显示前 {} 个）：**",
+                    total_count, MAX_BUTTON_DIRS
+                )
+            } else {
+                format!(
+                    "📋 **Current results ({} total, showing first {} as buttons):**",
+                    total_count, MAX_BUTTON_DIRS
+                )
+            }
         } else {
-            format!("📋 **当前结果（{} 个）：**", total_count)
+            if is_zh_locale(locale) {
+                format!("📋 **当前结果（{} 个）：**", total_count)
+            } else {
+                format!("📋 **Current results ({}):**", total_count)
+            }
         }
     } else {
-        "📋 **推荐目录：**".to_string()
+        format!(
+            "📋 **{}:**",
+            card_text(locale, "推荐目录", "Recommended directories")
+        )
     };
 
     // --- Build button labels with smart display ---
@@ -582,7 +623,27 @@ pub fn build_dir_select_card(
             "tag": "div",
             "text": {
                 "tag": "lark_md",
-                "content": section_label
+                "content": section_label,
+                "i18n_content": {
+                    "zh_cn": if is_filtered {
+                        if total_count > MAX_BUTTON_DIRS && button_dirs.len() < select_dirs.len() {
+                            format!("📋 **当前结果（共 {} 个，按钮显示前 {} 个）：**", total_count, MAX_BUTTON_DIRS)
+                        } else {
+                            format!("📋 **当前结果（{} 个）：**", total_count)
+                        }
+                    } else {
+                        "📋 **推荐目录：**".to_string()
+                    },
+                    "en_us": if is_filtered {
+                        if total_count > MAX_BUTTON_DIRS && button_dirs.len() < select_dirs.len() {
+                            format!("📋 **Current results ({} total, showing first {} as buttons):**", total_count, MAX_BUTTON_DIRS)
+                        } else {
+                            format!("📋 **Current results ({}):**", total_count)
+                        }
+                    } else {
+                        "📋 **Recommended directories:**".to_string()
+                    },
+                }
             }
         }));
 
@@ -609,10 +670,7 @@ pub fn build_dir_select_card(
                 "actions": [
                     {
                         "tag": "button",
-                        "text": {
-                            "tag": "plain_text",
-                            "content": truncated
-                        },
+                        "text": card_i18n::plain_text(locale, truncated.clone(), truncated),
                         "type": if dir.as_str() == "." { "primary" } else { "default" },
                         "value": pick_value
                     }
@@ -624,7 +682,15 @@ pub fn build_dir_select_card(
             "tag": "div",
             "text": {
                 "tag": "lark_md",
-                "content": "⚠️ 没有匹配的目录，请尝试其他关键词。"
+                "content": card_text(
+                    locale,
+                    "⚠️ 没有匹配的目录，请尝试其他关键词。",
+                    "⚠️ No matching directories. Try another keyword."
+                ),
+                "i18n_content": {
+                    "zh_cn": "⚠️ 没有匹配的目录，请尝试其他关键词。",
+                    "en_us": "⚠️ No matching directories. Try another keyword.",
+                }
             }
         }));
     }
@@ -641,31 +707,43 @@ pub fn build_dir_select_card(
             all_candidates.len()
         };
         let select_shown = select_dirs.len();
-        let select_label = if is_filtered {
+        let select_label_zh = if is_filtered {
             if select_total > select_shown {
                 format!(
                     "📋 **更多匹配（共 {} 个，下拉显示前 {} 个）：**",
                     select_total, select_shown
                 )
             } else {
-                "📋 **下拉选择：**".to_string()
+                format!("📋 **{}:**", "下拉选择")
             }
+        } else if select_total > select_shown {
+            format!(
+                "📋 **更多目录（共 {} 个，下拉显示前 {} 个）：**",
+                select_total, select_shown
+            )
         } else {
+            format!("📋 **更多目录（共 {} 个）：**", select_total)
+        };
+        let select_label_en = if is_filtered {
             if select_total > select_shown {
                 format!(
-                    "📋 **更多目录（共 {} 个，下拉显示前 {} 个）：**",
+                    "📋 **More matches ({} total, showing first {} in dropdown):**",
                     select_total, select_shown
                 )
             } else {
-                format!("📋 **更多目录（共 {} 个）：**", select_total)
+                format!("📋 **{}:**", "Dropdown selection")
             }
+        } else if select_total > select_shown {
+            format!(
+                "📋 **More directories ({} total, showing first {} in dropdown):**",
+                select_total, select_shown
+            )
+        } else {
+            format!("📋 **More directories ({} total):**", select_total)
         };
         elements.push(serde_json::json!({
             "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": select_label
-            }
+            "text": card_i18n::lark_md(locale, select_label_zh, select_label_en)
         }));
 
         let select_labels = build_dir_labels(
@@ -692,10 +770,7 @@ pub fn build_dir_select_card(
             let option_value_str = serde_json::to_string(&option_value).unwrap_or_default();
 
             options.push(serde_json::json!({
-                "text": {
-                    "tag": "plain_text",
-                    "content": label
-                },
+                "text": card_i18n::plain_text(locale, label.clone(), label),
                 "value": option_value_str
             }));
         }
@@ -707,13 +782,17 @@ pub fn build_dir_select_card(
             "tag": "action",
             "actions": [
                 {
-                    "tag": "select_static",
-                    "placeholder": {
-                        "tag": "plain_text",
-                        "content": "请选择目录..."
-                    },
-                    "options": options
-                }
+                "tag": "select_static",
+                "placeholder": {
+                    "tag": "plain_text",
+                    "content": card_text(locale, "请选择目录...", "Select a directory..."),
+                    "i18n_content": {
+                        "zh_cn": "请选择目录...",
+                        "en_us": "Select a directory...",
+                    }
+                },
+                "options": options
+            }
             ]
         }));
     }
@@ -729,7 +808,15 @@ pub fn build_dir_select_card(
         "tag": "div",
         "text": {
             "tag": "lark_md",
-            "content": "🔍 在下方输入关键词，点击「筛选」过滤目录，或点击「使用最优匹配启动」自动选择最佳目录"
+            "content": card_text(
+                locale,
+                "🔍 在下方输入关键词，点击「筛选」过滤目录，或点击「使用最优匹配启动」自动选择最佳目录",
+                "🔍 Enter a keyword below, click \"Filter\" to narrow directories, or click \"Start with best match\" to choose automatically"
+            ),
+            "i18n_content": {
+                "zh_cn": "🔍 在下方输入关键词，点击「筛选」过滤目录，或点击「使用最优匹配启动」自动选择最佳目录",
+                "en_us": "🔍 Enter a keyword below, click \"Filter\" to narrow directories, or click \"Start with best match\" to choose automatically",
+            }
         }
     }));
 
@@ -743,7 +830,11 @@ pub fn build_dir_select_card(
         "name": "dir_search_keyword",
         "placeholder": {
             "tag": "plain_text",
-            "content": "输入关键词筛选目录..."
+            "content": card_text(locale, "输入关键词筛选目录...", "Type a keyword to filter directories..."),
+            "i18n_content": {
+                "zh_cn": "输入关键词筛选目录...",
+                "en_us": "Type a keyword to filter directories...",
+            }
         },
         "default_value": search_keyword.unwrap_or("")
     }));
@@ -752,7 +843,11 @@ pub fn build_dir_select_card(
         "tag": "button",
         "text": {
             "tag": "plain_text",
-            "content": "🔍 筛选"
+            "content": card_text(locale, "🔍 筛选", "🔍 Filter"),
+            "i18n_content": {
+                "zh_cn": "🔍 筛选",
+                "en_us": "🔍 Filter",
+            }
         },
         "type": "primary",
         "action_type": "form_submit",
@@ -767,7 +862,11 @@ pub fn build_dir_select_card(
         "tag": "button",
         "text": {
             "tag": "plain_text",
-            "content": "🚀 使用最优匹配启动"
+            "content": card_text(locale, "🚀 使用最优匹配启动", "🚀 Start with best match"),
+            "i18n_content": {
+                "zh_cn": "🚀 使用最优匹配启动",
+                "en_us": "🚀 Start with best match",
+            }
         },
         "type": "default",
         "action_type": "form_submit",
@@ -789,10 +888,15 @@ pub fn build_dir_select_card(
         "config": {
             "wide_screen_mode": true
         },
+        "locales": card_i18n::card_locales(),
         "header": {
             "title": {
                 "tag": "plain_text",
-                "content": "请选择工作目录"
+                "content": card_text(locale, "请选择工作目录", "Choose a working directory"),
+                "i18n_content": {
+                    "zh_cn": "请选择工作目录",
+                    "en_us": "Choose a working directory",
+                }
             },
             "template": "blue"
         },
@@ -803,15 +907,34 @@ pub fn build_dir_select_card(
 }
 
 /// Build a simple "session starting" card to replace the dir select card.
-pub fn build_dir_session_starting_card(working_dir: &str, title: &str) -> String {
+pub fn build_dir_session_starting_card(
+    working_dir: &str,
+    title: &str,
+    locale: Option<&str>,
+) -> String {
+    let body_zh = format!(
+        "✅ 已选择工作目录：{}\n\n正在启动会话：_{}_\n\n等待终端就绪...",
+        sanitize_lark_md(working_dir),
+        sanitize_lark_md(title)
+    );
+    let body_en = format!(
+        "✅ Selected working directory: {}\n\nStarting session: _{}_\n\nWaiting for terminal readiness...",
+        sanitize_lark_md(working_dir),
+        sanitize_lark_md(title)
+    );
     let card = serde_json::json!({
         "config": {
             "wide_screen_mode": true
         },
+        "locales": card_i18n::card_locales(),
         "header": {
             "title": {
                 "tag": "plain_text",
-                "content": "正在启动会话"
+                "content": card_text(locale, "正在启动会话", "Starting session"),
+                "i18n_content": {
+                    "zh_cn": "正在启动会话",
+                    "en_us": "Starting session",
+                }
             },
             "template": "blue"
         },
@@ -820,7 +943,11 @@ pub fn build_dir_session_starting_card(working_dir: &str, title: &str) -> String
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": format!("✅ 已选择工作目录：{}\n\n正在启动会话：_{}_\n\n等待终端就绪...", sanitize_lark_md(working_dir), sanitize_lark_md(title))
+                    "content": body_en,
+                    "i18n_content": {
+                        "zh_cn": body_zh,
+                        "en_us": body_en,
+                    }
                 }
             }
         ]
@@ -1272,6 +1399,7 @@ mod tests {
             None,
             None,
             None,
+            Some("zh"),
         );
         // Card should be valid JSON
         let _v: Value = serde_json::from_str(&card).expect("card should be valid JSON");
@@ -1427,6 +1555,54 @@ mod tests {
     }
 
     #[test]
+    fn test_build_dir_select_card_uses_english_for_en_locale() {
+        let recommended = vec![".".to_string(), "project-a".to_string()];
+        let all = recommended.clone();
+        let card: Value = serde_json::from_str(&build_dir_select_card(
+            "pending-1",
+            "/home/user/projects",
+            "你好",
+            &recommended,
+            &all,
+            None,
+            None,
+            None,
+            Some("en"),
+        ))
+        .expect("valid dir select card");
+        assert_eq!(
+            card.pointer("/elements/0/text/content")
+                .and_then(Value::as_str),
+            Some("📁 **Root:** /home/user/projects")
+        );
+        assert_eq!(
+            card.pointer("/elements/0/text/i18n_content/zh_cn")
+                .and_then(Value::as_str),
+            Some("📁 **根目录:** /home/user/projects")
+        );
+        assert_eq!(
+            card.pointer("/elements/1/text/content")
+                .and_then(Value::as_str),
+            Some("💬 **Message:** 你好")
+        );
+        assert_eq!(
+            card.pointer("/elements/1/text/i18n_content/zh_cn")
+                .and_then(Value::as_str),
+            Some("💬 **消息:** 你好")
+        );
+        assert_eq!(
+            card.pointer("/elements/2/text/content")
+                .and_then(Value::as_str),
+            Some("📋 **Recommended directories:**")
+        );
+        assert_eq!(
+            card.pointer("/elements/2/text/i18n_content/zh_cn")
+                .and_then(Value::as_str),
+            Some("📋 **推荐目录：**")
+        );
+    }
+
+    #[test]
     fn test_build_dir_select_card_with_message() {
         let card = build_dir_select_card(
             "p1",
@@ -1437,13 +1613,14 @@ mod tests {
             None,
             None,
             Some("请先选择目录"),
+            Some("zh"),
         );
         assert!(card.contains("请先选择目录"));
     }
 
     #[test]
     fn test_build_dir_session_starting_card() {
-        let card = build_dir_session_starting_card("/home/user/projects", "my title");
+        let card = build_dir_session_starting_card("/home/user/projects", "my title", Some("zh"));
         assert!(card.contains("正在启动会话"));
         assert!(card.contains("/home/user/projects"));
         assert!(card.contains("my title"));
@@ -1492,6 +1669,7 @@ mod tests {
             None,
             None,
             None,
+            Some("zh"),
         );
         // Should be valid JSON
         let _v: Value = serde_json::from_str(&card).expect("card should be valid JSON");
@@ -1505,7 +1683,15 @@ mod tests {
         // dropdown shows up to MAX_SELECT_DIRS (150).
         let many_dirs: Vec<String> = (0..200).map(|i| format!("project-{:03}", i)).collect();
         let card = build_dir_select_card(
-            "pid", "/root", "test", &many_dirs, &many_dirs, None, None, None,
+            "pid",
+            "/root",
+            "test",
+            &many_dirs,
+            &many_dirs,
+            None,
+            None,
+            None,
+            Some("zh"),
         );
         let v: Value = serde_json::from_str(&card).expect("valid card JSON");
 
@@ -1547,6 +1733,7 @@ mod tests {
             Some(&many_dirs),
             Some("proj"),
             None,
+            Some("zh"),
         );
         // Section label should mention total count and button cap
         assert!(card.contains("共 200"), "label should show total count");
@@ -1607,6 +1794,7 @@ mod tests {
             Some(&few_dirs),
             Some("proj"),
             None,
+            Some("zh"),
         );
         // No "显示前" message when under limit (10 <= 40)
         assert!(
@@ -1650,6 +1838,7 @@ mod tests {
             Some(&dirs),
             Some("proj"),
             None,
+            Some("zh"),
         );
         let v: Value = serde_json::from_str(&card).expect("valid card JSON");
         // Filter only action elements that contain buttons (exclude select_static wrapper)
@@ -1741,6 +1930,7 @@ mod tests {
             Some(&dirs),
             Some("proj"),
             None,
+            Some("zh"),
         );
         let v: Value = serde_json::from_str(&card).expect("valid card JSON");
         // Filter only action elements that contain buttons (exclude select_static wrapper)
@@ -1809,8 +1999,15 @@ mod tests {
         // recommended section should keep showing short names.
         let dirs = vec!["group-a/project".to_string(), "group-b/project".to_string()];
         let card = build_dir_select_card(
-            "pid", "/root", "test", &dirs, &dirs, None, // recommended section
-            None, None,
+            "pid",
+            "/root",
+            "test",
+            &dirs,
+            &dirs,
+            None, // recommended section
+            None,
+            None,
+            Some("zh"),
         );
         let v: Value = serde_json::from_str(&card).expect("valid card JSON");
         let all_buttons: Vec<&Value> = v["elements"]
@@ -1858,6 +2055,7 @@ mod tests {
             Some(&dirs),
             Some("api"),
             None,
+            Some("zh"),
         );
         let v: Value = serde_json::from_str(&card).expect("valid card JSON");
         // Filter only action elements that contain buttons (exclude select_static wrapper)
@@ -2059,7 +2257,17 @@ mod tests {
         // inside an action.actions array, NOT as a bare top-level element.
         // A bare select_static would not render in Feishu cards.
         let dirs: Vec<String> = (0..10).map(|i| format!("project-{:03}", i)).collect();
-        let card = build_dir_select_card("pid", "/root", "test", &dirs, &dirs, None, None, None);
+        let card = build_dir_select_card(
+            "pid",
+            "/root",
+            "test",
+            &dirs,
+            &dirs,
+            None,
+            None,
+            None,
+            Some("zh"),
+        );
         let v: Value = serde_json::from_str(&card).expect("valid card JSON");
         let elements = v["elements"].as_array().unwrap();
 
@@ -2128,6 +2336,7 @@ mod tests {
             None,
             Some("test"),
             None,
+            Some("zh"),
         );
         let v: Value = serde_json::from_str(&card).expect("valid card JSON");
         let elements = v["elements"].as_array().unwrap();

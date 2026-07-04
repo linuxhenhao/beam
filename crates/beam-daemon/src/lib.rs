@@ -7,6 +7,7 @@ use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
 mod ask;
+mod card_i18n;
 mod connector_store;
 mod dir_select;
 mod grant;
@@ -1579,8 +1580,10 @@ async fn spawn_worker(state: AppState, session: Session, init: InitConfig) -> Re
                                     final_output_footer_recipient_open_id(&state.paths, &session);
                                 let card = build_contextual_reply_card(
                                     "📜 /adopt 前最后一轮",
+                                    "📜 Last turn before /adopt",
                                     Some(&user_text),
                                     &assistant_text,
+                                    session.cli_id.as_deref().unwrap_or("助手"),
                                     session.cli_id.as_deref().unwrap_or("Assistant"),
                                     recipient_open_id.as_deref(),
                                 );
@@ -3383,46 +3386,76 @@ fn build_final_output_footer(recipient_open_id: Option<&str>) -> Option<String> 
 }
 
 fn build_contextual_reply_card(
-    title: &str,
+    title_zh: &str,
+    title_en: &str,
     user_text: Option<&str>,
     assistant_text: &str,
-    assistant_label: &str,
+    assistant_label_zh: &str,
+    assistant_label_en: &str,
     recipient_open_id: Option<&str>,
 ) -> String {
     let mut elements = vec![serde_json::json!({
         "tag": "markdown",
         "text_size": "heading_2_v2",
-        "content": title,
+        "content": title_en,
+        "i18n_content": {
+            "zh_cn": title_zh,
+            "en_us": title_en,
+        },
     })];
     if let Some(user_text) = user_text {
         elements.push(serde_json::json!({
             "tag": "markdown",
             "content": format!(
-                "**👤 你**\n\n> {}",
-                if user_text.trim().is_empty() { "(空)" } else { user_text.trim() }
+                "**👤 You**\n\n> {}",
+                if user_text.trim().is_empty() { "(empty)" } else { user_text.trim() }
             ),
+            "i18n_content": {
+                "zh_cn": format!(
+                    "**👤 你**\n\n> {}",
+                    if user_text.trim().is_empty() { "(空)" } else { user_text.trim() }
+                ),
+                "en_us": format!(
+                    "**👤 You**\n\n> {}",
+                    if user_text.trim().is_empty() { "(empty)" } else { user_text.trim() }
+                ),
+            },
         }));
     }
     elements.push(serde_json::json!({ "tag": "hr" }));
     elements.push(serde_json::json!({
         "tag": "markdown",
-        "content": format!("**🤖 {}**", assistant_label),
+        "content": format!("**🤖 {}**", assistant_label_en),
+        "i18n_content": {
+            "zh_cn": format!("**🤖 {}**", assistant_label_zh),
+            "en_us": format!("**🤖 {}**", assistant_label_en),
+        },
     }));
     elements.push(serde_json::json!({
         "tag": "markdown",
-        "content": if assistant_text.trim().is_empty() { "*(空)*" } else { assistant_text },
+        "content": if assistant_text.trim().is_empty() { "*(empty)*" } else { assistant_text },
+        "i18n_content": {
+            "zh_cn": if assistant_text.trim().is_empty() { "*(空)*" } else { assistant_text },
+            "en_us": if assistant_text.trim().is_empty() { "*(empty)*" } else { assistant_text },
+        },
     }));
     if let Some(footer) = build_final_output_footer(recipient_open_id) {
+        let footer_text = footer.clone();
         elements.push(serde_json::json!({ "tag": "hr" }));
         elements.push(serde_json::json!({
             "tag": "markdown",
             "text_size": "notation_small_v2",
-            "content": footer,
+            "content": footer_text,
+            "i18n_content": {
+                "zh_cn": footer.clone(),
+                "en_us": footer,
+            },
         }));
     }
     serde_json::json!({
         "schema": "2.0",
         "config": { "update_multi": true },
+        "locales": card_i18n::card_locales(),
         "body": {
             "direction": "vertical",
             "elements": elements,
@@ -3507,13 +3540,19 @@ fn build_final_output_card(
             elements.push(serde_json::json!({
                 "tag": "markdown",
                 "content": content,
+                "i18n_content": {
+                    "zh_cn": content,
+                    "en_us": content,
+                },
             }));
         }
         FinalOutputKind::LocalTurn => {
             return build_contextual_reply_card(
                 "🖥️ 终端本地对话（在 adopted pane 中直接输入，已同步至飞书）",
+                "🖥️ Local terminal conversation (type directly in the adopted pane; synced to Feishu)",
                 user_text,
                 content,
+                cli_label.unwrap_or("助手"),
                 cli_label.unwrap_or("Assistant"),
                 recipient_open_id,
             );
@@ -3521,19 +3560,26 @@ fn build_final_output_card(
         FinalOutputKind::LocalTurnHeadless => {
             return build_contextual_reply_card(
                 "🖥️ 终端本地对话续传（daemon 重启时模型正在输出）",
+                "🖥️ Local terminal conversation resumed (model was still streaming when daemon restarted)",
                 None,
                 content,
+                cli_label.unwrap_or("助手"),
                 cli_label.unwrap_or("Assistant"),
                 recipient_open_id,
             );
         }
     }
     if let Some(footer) = build_final_output_footer(recipient_open_id) {
+        let footer_text = footer.clone();
         elements.push(serde_json::json!({ "tag": "hr" }));
         elements.push(serde_json::json!({
             "tag": "markdown",
             "text_size": "notation_small_v2",
-            "content": footer,
+            "content": footer_text,
+            "i18n_content": {
+                "zh_cn": footer.clone(),
+                "en_us": footer,
+            },
         }));
     }
     serde_json::json!({
@@ -3541,6 +3587,7 @@ fn build_final_output_card(
         "config": {
             "update_multi": true,
         },
+        "locales": card_i18n::card_locales(),
         "body": {
             "direction": "vertical",
             "elements": elements,
@@ -4013,7 +4060,7 @@ fn build_writable_session_card(session: &Session, write_url: &str) -> String {
     let card_nonce = session.stream_card_nonce.clone().unwrap_or_default();
     let mut actions = vec![serde_json::json!({
         "tag": "button",
-        "text": { "tag": "plain_text", "content": card_text(locale, "打开可写终端", "Open writable terminal") },
+        "text": card_i18n::plain_text(locale, "打开可写终端", "Open writable terminal"),
         "type": "primary",
         "multi_url": {
             "url": write_url,
@@ -4025,7 +4072,7 @@ fn build_writable_session_card(session: &Session, write_url: &str) -> String {
     if session.adopted_from.is_none() {
         actions.push(serde_json::json!({
             "tag": "button",
-            "text": { "tag": "plain_text", "content": card_text(locale, "重启", "Restart") },
+            "text": card_i18n::plain_text(locale, "重启", "Restart"),
             "type": "default",
             "value": {
                 "action": "restart",
@@ -4037,14 +4084,14 @@ fn build_writable_session_card(session: &Session, write_url: &str) -> String {
             }
         }));
     }
-    let close_label = if session.adopted_from.is_some() {
-        card_text(locale, "断开连接", "Disconnect")
+    let (close_label_zh, close_label_en) = if session.adopted_from.is_some() {
+        ("断开连接", "Disconnect")
     } else {
-        card_text(locale, "关闭会话", "Close session")
+        ("关闭会话", "Close session")
     };
     actions.push(serde_json::json!({
         "tag": "button",
-        "text": { "tag": "plain_text", "content": close_label },
+        "text": card_i18n::plain_text(locale, close_label_zh, close_label_en),
         "type": "danger",
         "value": {
             "action": "close",
@@ -4057,8 +4104,9 @@ fn build_writable_session_card(session: &Session, write_url: &str) -> String {
     }));
     serde_json::json!({
         "config": { "wide_screen_mode": true },
+        "locales": card_i18n::card_locales(),
         "header": {
-            "title": { "tag": "plain_text", "content": format!("{} · {}", card_text(locale, "终端", "terminal"), title) },
+            "title": card_i18n::plain_text(locale, format!("{} · {}", "终端", title), format!("{} · {}", "terminal", title)),
             "template": "blue"
         },
         "elements": [
@@ -4074,19 +4122,20 @@ fn build_readonly_link_card(session: &Session, ro_url: &str, _ro_token: &str) ->
         .cli_id
         .clone()
         .unwrap_or_else(|| session.session_id.clone());
-    let header = format!(
-        "{} · {}",
-        card_text(locale, "只读终端", "Read-only terminal"),
-        if session.title.trim().is_empty() {
-            &title
-        } else {
-            &session.title
-        }
-    );
+    let display_title = if session.title.trim().is_empty() {
+        title.clone()
+    } else {
+        session.title.clone()
+    };
     serde_json::json!({
         "config": { "wide_screen_mode": true },
+        "locales": card_i18n::card_locales(),
         "header": {
-            "title": { "tag": "plain_text", "content": header },
+            "title": card_i18n::plain_text(
+                locale,
+                format!("只读终端 · {}", display_title),
+                format!("Read-only terminal · {}", display_title),
+            ),
             "template": "blue"
         },
         "elements": [
@@ -4096,14 +4145,18 @@ fn build_readonly_link_card(session: &Session, ro_url: &str, _ro_token: &str) ->
                     locale,
                     "**只读访问**\n\n点击下方按钮以只读模式打开终端。链接仅可使用一次。",
                     "**Read-only access**\n\nClick the button below to open the terminal in read-only mode. The link is single-use."
-                )
+                ),
+                "i18n_content": {
+                    "zh_cn": "**只读访问**\n\n点击下方按钮以只读模式打开终端。链接仅可使用一次。",
+                    "en_us": "**Read-only access**\n\nClick the button below to open the terminal in read-only mode. The link is single-use.",
+                },
             },
             {
                 "tag": "action",
                 "actions": [
                     {
                         "tag": "button",
-                        "text": { "tag": "plain_text", "content": card_text(locale, "打开只读终端", "Open read-only terminal") },
+                        "text": card_i18n::plain_text(locale, "打开只读终端", "Open read-only terminal"),
                         "type": "primary",
                         "multi_url": {
                             "url": ro_url,
@@ -4315,15 +4368,34 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
     let mut elements = vec![
         serde_json::json!({
             "tag": "markdown",
-            "content": format!("{} `{}`", card_text(locale, "会话", "session"), session.session_id)
+            "content": format!("{} `{}`", "session", session.session_id),
+            "i18n_content": {
+                "zh_cn": format!("{} `{}`", "会话", session.session_id),
+                "en_us": format!("{} `{}`", "session", session.session_id),
+            }
         }),
         serde_json::json!({ "tag": "hr" }),
     ];
     if status == "limited" {
         if let Some(usage_limit) = session.usage_limit.as_ref() {
+            let retry_label = &usage_limit.retry_label;
+            let usage_zh = if usage_limit.retry_ready {
+                format!("限制已解除。{} 后可重试。", retry_label)
+            } else {
+                format!("用量受限。请在 {} 后重试。", retry_label)
+            };
+            let usage_en = if usage_limit.retry_ready {
+                format!("limit cleared. Retry is ready after {}.", retry_label)
+            } else {
+                format!("usage limited. Try again at {}.", retry_label)
+            };
             elements.push(serde_json::json!({
                 "tag": "markdown",
-                "content": build_usage_limit_notice(usage_limit, locale)
+                "content": usage_en,
+                "i18n_content": {
+                    "zh_cn": usage_zh,
+                    "en_us": usage_en,
+                }
             }));
             elements.push(serde_json::json!({ "tag": "hr" }));
         }
@@ -4340,13 +4412,17 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
         } else {
             elements.push(serde_json::json!({
                 "tag": "markdown",
-                "content": card_text(locale, "等待截图", "waiting for screenshot")
+                "content": "waiting for screenshot",
+                "i18n_content": {
+                    "zh_cn": "等待截图",
+                    "en_us": "waiting for screenshot",
+                }
             }));
         }
     }
-    let toggle_label = match display_mode {
-        DisplayMode::Hidden => card_text(locale, "显示截图", "Show screenshot"),
-        DisplayMode::Screenshot => card_text(locale, "隐藏截图", "Hide screenshot"),
+    let (toggle_label_zh, toggle_label_en) = match display_mode {
+        DisplayMode::Hidden => ("显示截图", "Show screenshot"),
+        DisplayMode::Screenshot => ("隐藏截图", "Hide screenshot"),
     };
     let action_nonce = card_nonce.clone();
     let mut actions: Vec<serde_json::Value> = Vec::new();
@@ -4354,7 +4430,7 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
     if display_mode == DisplayMode::Screenshot {
         actions.push(serde_json::json!({
             "tag": "button",
-            "text": { "tag": "plain_text", "content": card_text(locale, "刷新截图", "Refresh screenshot") },
+            "text": card_i18n::plain_text(locale, "刷新截图", "Refresh screenshot"),
             "type": "default",
             "value": {
                 "action": "refresh_screenshot",
@@ -4367,7 +4443,7 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
     }
     actions.push(serde_json::json!({
         "tag": "button",
-        "text": { "tag": "plain_text", "content": toggle_label },
+        "text": card_i18n::plain_text(locale, toggle_label_zh, toggle_label_en),
         "type": "default",
         "value": {
             "action": "toggle_display",
@@ -4379,7 +4455,7 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
     }));
     actions.push(serde_json::json!({
         "tag": "button",
-        "text": { "tag": "plain_text", "content": card_text(locale, "打开只读终端", "Open read-only terminal") },
+        "text": card_i18n::plain_text(locale, "打开只读终端", "Open read-only terminal"),
         "type": "primary",
         "multi_url": {
             "url": terminal,
@@ -4391,7 +4467,7 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
 
     actions.push(serde_json::json!({
         "tag": "button",
-        "text": { "tag": "plain_text", "content": card_text(locale, "私发可写链接", "Send write link privately") },
+        "text": card_i18n::plain_text(locale, "私发可写链接", "Send write link privately"),
         "type": "default",
         "value": {
             "action": "get_write_link",
@@ -4409,7 +4485,7 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
     {
         actions.push(serde_json::json!({
             "tag": "button",
-            "text": { "tag": "plain_text", "content": card_text(locale, "重试上次任务", "Retry last task") },
+            "text": card_i18n::plain_text(locale, "重试上次任务", "Retry last task"),
             "type": "primary",
             "value": {
                 "action": "retry_last_task",
@@ -4423,7 +4499,7 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
     if session.adopted_from.is_none() {
         actions.push(serde_json::json!({
             "tag": "button",
-            "text": { "tag": "plain_text", "content": card_text(locale, "重启", "Restart") },
+            "text": card_i18n::plain_text(locale, "重启", "Restart"),
             "type": "default",
             "value": {
                 "action": "restart",
@@ -4434,14 +4510,13 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
             }
         }));
     }
-    let close_label = if session.adopted_from.is_some() {
-        card_text(locale, "断开连接", "Disconnect")
-    } else {
-        card_text(locale, "关闭会话", "Close session")
-    };
     actions.push(serde_json::json!({
         "tag": "button",
-        "text": { "tag": "plain_text", "content": close_label },
+        "text": card_i18n::plain_text(
+            locale,
+            if session.adopted_from.is_some() { "断开连接" } else { "关闭会话" },
+            if session.adopted_from.is_some() { "Disconnect" } else { "Close session" },
+        ),
         "type": "danger",
         "value": {
             "action": "close",
@@ -4461,7 +4536,7 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
             "actions": [
                 serde_json::json!({
                     "tag": "button",
-                    "text": { "tag": "plain_text", "content": card_text(locale, "导出文本", "Export text") },
+                    "text": card_i18n::plain_text(locale, "导出文本", "Export text"),
                     "type": "default",
                     "value": {
                         "action": "export_text",
@@ -4473,10 +4548,10 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
                 }),
             ]
         }));
-        let key_button = |label: &str, key: &str| {
+        let key_button = |label_zh: &str, label_en: &str, key: &str| {
             serde_json::json!({
                 "tag": "button",
-                "text": { "tag": "plain_text", "content": label },
+                "text": card_i18n::plain_text(locale, label_zh, label_en),
                 "type": "default",
                 "value": {
                     "action": "term_action",
@@ -4491,30 +4566,35 @@ fn build_streaming_card(session: &Session, status: &str) -> String {
         elements.push(serde_json::json!({
             "tag": "action",
             "actions": [
-                key_button("Esc", "esc"),
-                key_button("^C", "ctrlc"),
-                key_button("Tab", "tab"),
-                key_button("Space", "space"),
-                key_button("Enter", "enter"),
+                key_button("Esc", "Esc", "esc"),
+                key_button("^C", "^C", "ctrlc"),
+                key_button("Tab", "Tab", "tab"),
+                key_button("Space", "Space", "space"),
+                key_button("Enter", "Enter", "enter"),
             ]
         }));
         elements.push(serde_json::json!({
             "tag": "action",
             "actions": [
-                key_button(card_text(locale, "左", "Left"), "left"),
-                key_button(card_text(locale, "上", "Up"), "up"),
-                key_button(card_text(locale, "下", "Down"), "down"),
-                key_button(card_text(locale, "右", "Right"), "right"),
-                key_button(card_text(locale, "上半页", "Half Pg Up"), "half_page_up"),
-                key_button(card_text(locale, "下半页", "Half Pg Down"), "half_page_down"),
+                key_button("左", "Left", "left"),
+                key_button("上", "Up", "up"),
+                key_button("下", "Down", "down"),
+                key_button("右", "Right", "right"),
+                key_button("上半页", "Half Pg Up", "half_page_up"),
+                key_button("下半页", "Half Pg Down", "half_page_down"),
             ]
         }));
     }
     serde_json::json!({
         "config": { "wide_screen_mode": true, "enable_forward": true },
+        "locales": card_i18n::card_locales(),
         "header": {
             "template": streaming_card_template(effective_status),
-            "title": { "tag": "plain_text", "content": format!("{} · {}", title, status_card_text(locale, effective_status)) }
+            "title": card_i18n::plain_text(
+                locale,
+                format!("{} · {}", title, status_card_text(Some("zh"), effective_status)),
+                format!("{} · {}", title, status_card_text(Some("en"), effective_status)),
+            )
         },
         "elements": elements
     })
@@ -4982,22 +5062,21 @@ fn build_closed_session_card(session: &Session) -> String {
     let cli_name = session.cli_id.clone().unwrap_or_else(|| "cli".to_string());
     let resume_cmd = format!("beam session resume {}", session.session_id);
     let working_dir = session.working_dir.clone().unwrap_or_default();
-    let body = if working_dir.is_empty() {
-        if prompt::is_zh_locale(locale) {
-            format!(
-                "**{}**\n{} 已终止。\n恢复命令：\n```bash\n{}\n```",
-                title, cli_name, resume_cmd
-            )
-        } else {
-            format!(
-                "**{}**\n{} terminated.\nresume with:\n```bash\n{}\n```",
-                title, cli_name, resume_cmd
-            )
-        }
-    } else if prompt::is_zh_locale(locale) {
+    let body_zh = if working_dir.is_empty() {
+        format!(
+            "**{}**\n{} 已终止。\n恢复命令：\n```bash\n{}\n```",
+            title, cli_name, resume_cmd
+        )
+    } else {
         format!(
             "**{}**\n{} 已终止。\n恢复命令：\n```bash\n{}\n```\n工作目录：`{}`",
             title, cli_name, resume_cmd, working_dir
+        )
+    };
+    let body_en = if working_dir.is_empty() {
+        format!(
+            "**{}**\n{} terminated.\nresume with:\n```bash\n{}\n```",
+            title, cli_name, resume_cmd
         )
     } else {
         format!(
@@ -5007,17 +5086,18 @@ fn build_closed_session_card(session: &Session) -> String {
     };
     serde_json::json!({
         "config": { "wide_screen_mode": true },
+        "locales": card_i18n::card_locales(),
         "header": {
-            "title": { "tag": "plain_text", "content": card_text(locale, "会话已关闭", "session closed") },
+            "title": card_i18n::plain_text(locale, "会话已关闭", "session closed"),
             "template": "grey"
         },
         "elements": [
-            { "tag": "markdown", "content": body },
+            { "tag": "markdown", "content": body_en, "i18n_content": { "zh_cn": body_zh, "en_us": body_en } },
             {
                 "tag": "action",
                 "actions": [{
                     "tag": "button",
-                    "text": { "tag": "plain_text", "content": card_text(locale, "恢复会话", "Resume session") },
+                    "text": card_i18n::plain_text(locale, "恢复会话", "Resume session"),
                     "type": "primary",
                     "value": {
                         "action": "resume",
@@ -5138,7 +5218,14 @@ fn build_tui_prompt_card(
         .collect::<Vec<_>>();
 
     let mut elements = vec![
-        serde_json::json!({ "tag": "markdown", "content": option_lines }),
+        serde_json::json!({
+            "tag": "markdown",
+            "content": option_lines,
+            "i18n_content": {
+                "zh_cn": option_lines.clone(),
+                "en_us": option_lines,
+            }
+        }),
         serde_json::json!({ "tag": "hr" }),
         serde_json::json!({ "tag": "action", "actions": actions }),
     ];
@@ -5157,11 +5244,11 @@ fn build_tui_prompt_card(
                 {
                     "tag": "input",
                     "name": "tui_custom_input",
-                    "placeholder": { "tag": "plain_text", "content": card_text(locale, "输入内容", "Type something") }
+                    "placeholder": card_i18n::plain_text(locale, "输入内容", "Type something")
                 },
                 {
                     "tag": "button",
-                    "text": { "tag": "plain_text", "content": card_text(locale, "发送自定义文本", "Send custom text") },
+                    "text": card_i18n::plain_text(locale, "发送自定义文本", "Send custom text"),
                     "type": "primary",
                     "name": "tui_input_submit",
                     "action_type": "form_submit",
@@ -5178,8 +5265,9 @@ fn build_tui_prompt_card(
 
     serde_json::json!({
         "config": { "wide_screen_mode": true },
+        "locales": card_i18n::card_locales(),
         "header": {
-            "title": { "tag": "plain_text", "content": description },
+            "title": card_i18n::plain_text(locale, description, description),
             "template": "orange"
         },
         "elements": elements
@@ -5188,48 +5276,46 @@ fn build_tui_prompt_card(
 }
 
 fn build_tui_prompt_processing_card(selected_text: Option<&str>, locale: Option<&str>) -> String {
-    let content = selected_text
+    let content_zh = selected_text
         .filter(|text| !text.trim().is_empty())
-        .map(|text| {
-            format!(
-                "{}: `{}`",
-                card_text(locale, "正在处理选择", "processing selection"),
-                text
-            )
-        })
-        .unwrap_or_else(|| card_text(locale, "正在处理选择", "processing selection").to_string());
+        .map(|text| format!("{}: `{}`", "正在处理选择", text))
+        .unwrap_or_else(|| "正在处理选择".to_string());
+    let content_en = selected_text
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| format!("{}: `{}`", "processing selection", text))
+        .unwrap_or_else(|| "processing selection".to_string());
     serde_json::json!({
         "config": { "wide_screen_mode": true },
+        "locales": card_i18n::card_locales(),
         "header": {
-            "title": { "tag": "plain_text", "content": card_text(locale, "处理中", "processing") },
+            "title": card_i18n::plain_text(locale, "处理中", "processing"),
             "template": "blue"
         },
         "elements": [
-            { "tag": "markdown", "content": content }
+            { "tag": "markdown", "content": content_en, "i18n_content": { "zh_cn": content_zh, "en_us": content_en } }
         ]
     })
     .to_string()
 }
 
 fn build_tui_prompt_resolved_card(selected_text: Option<&str>, locale: Option<&str>) -> String {
-    let content = selected_text
+    let content_zh = selected_text
         .filter(|text| !text.trim().is_empty())
-        .map(|text| {
-            format!(
-                "{}: `{}`",
-                card_text(locale, "已应用选择", "selection applied"),
-                text
-            )
-        })
-        .unwrap_or_else(|| card_text(locale, "提示已完成", "prompt resolved").to_string());
+        .map(|text| format!("{}: `{}`", "已应用选择", text))
+        .unwrap_or_else(|| "提示已完成".to_string());
+    let content_en = selected_text
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| format!("{}: `{}`", "selection applied", text))
+        .unwrap_or_else(|| "prompt resolved".to_string());
     serde_json::json!({
         "config": { "wide_screen_mode": true },
+        "locales": card_i18n::card_locales(),
         "header": {
-            "title": { "tag": "plain_text", "content": card_text(locale, "已完成", "resolved") },
+            "title": card_i18n::plain_text(locale, "已完成", "resolved"),
             "template": "green"
         },
         "elements": [
-            { "tag": "markdown", "content": content }
+            { "tag": "markdown", "content": content_en, "i18n_content": { "zh_cn": content_zh, "en_us": content_en } }
         ]
     })
     .to_string()
@@ -5246,18 +5332,18 @@ fn build_workflow_approval_resolved_card(
     operator_open_id: &str,
     comment: Option<&str>,
 ) -> String {
-    let (title, template, label) = match action {
-        "wf_approve" => ("已通过", "green", "✅ 已通过"),
-        "wf_reject" => ("已拒绝", "red", "❌ 已拒绝"),
-        "wf_cancel" => ("已取消", "grey", "🛑 已取消"),
-        _ => ("workflow", "blue", "Workflow"),
+    let (title_zh, title_en, template, label_zh, label_en) = match action {
+        "wf_approve" => ("已通过", "Approved", "green", "✅ 已通过", "✅ Approved"),
+        "wf_reject" => ("已拒绝", "Rejected", "red", "❌ 已拒绝", "❌ Rejected"),
+        "wf_cancel" => ("已取消", "Cancelled", "grey", "🛑 已取消", "🛑 Cancelled"),
+        _ => ("workflow", "workflow", "blue", "Workflow", "Workflow"),
     };
     let workflow = workflow_id
         .filter(|value| !value.trim().is_empty())
         .map(|value| format!("{} @ {}", value, revision_id.unwrap_or("unknown")))
         .unwrap_or_else(|| format!("unknown @ {}", revision_id.unwrap_or("unknown")));
-    let mut content = vec![
-        format!("**{}**", label),
+    let mut content_zh = vec![
+        format!("**{}**", label_zh),
         format!("**Workflow**\n{}", workflow),
         format!("**Run**\n{}", run_id),
         format!("**Step**\n{}", node_id),
@@ -5265,21 +5351,36 @@ fn build_workflow_approval_resolved_card(
         format!("**Attempt**\n{}", attempt_id),
         format!("**操作人**\n{}", operator_open_id),
     ];
+    let mut content_en = vec![
+        format!("**{}**", label_en),
+        format!("**Workflow**\n{}", workflow),
+        format!("**Run**\n{}", run_id),
+        format!("**Step**\n{}", node_id),
+        format!("**Activity**\n{}", activity_id),
+        format!("**Attempt**\n{}", attempt_id),
+        format!("**Operator**\n{}", operator_open_id),
+    ];
     if let Some(comment) = comment.filter(|value| !value.trim().is_empty()) {
-        content.push(format!("**备注**\n{}", comment));
+        content_zh.push(format!("**备注**\n{}", comment));
+        content_en.push(format!("**Comment**\n{}", comment));
     }
     serde_json::json!({
         "config": { "wide_screen_mode": true },
+        "locales": card_i18n::card_locales(),
         "header": {
             "template": template,
-            "title": { "tag": "plain_text", "content": format!("{}：{}", title, node_id) }
+            "title": card_i18n::plain_text(None, format!("{}：{}", title_zh, node_id), format!("{}: {}", title_en, node_id))
         },
         "elements": [
             {
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": content.join("\n\n"),
+                    "content": content_en.join("\n\n"),
+                    "i18n_content": {
+                        "zh_cn": content_zh.join("\n\n"),
+                        "en_us": content_en.join("\n\n"),
+                    }
                 }
             }
         ]
@@ -7183,6 +7284,7 @@ async fn handle_lark_event_payload(
         root_id = ?parsed.root_id,
         parent_id = ?parsed.parent_id,
         thread_id = ?parsed.thread_id,
+        locale = ?parsed.locale,
         scope = ?parsed.scope,
         anchor = %parsed.anchor,
         existing_session_id = ?existing.as_ref().map(|s| s.session_id.as_str()),
@@ -7616,6 +7718,7 @@ async fn handle_lark_event_payload(
                 None,
                 None,
                 None,
+                pending.locale.as_deref(),
             );
 
             let reply_in_thread = scope == SessionScope::Thread;
@@ -8060,10 +8163,17 @@ async fn handle_lark_card_action_payload(
 
                 let message = if let Some(ref f) = filtered {
                     if f.is_empty() {
-                        Some(format!(
-                            "⚠️ 没有目录匹配关键词 \"{}\"，请尝试其他关键词。",
-                            keyword
-                        ))
+                        if prompt::is_zh_locale(pending.locale.as_deref()) {
+                            Some(format!(
+                                "⚠️ 没有目录匹配关键词 \"{}\"，请尝试其他关键词。",
+                                keyword
+                            ))
+                        } else {
+                            Some(format!(
+                                "⚠️ No directory matches keyword \"{}\". Try another keyword.",
+                                keyword
+                            ))
+                        }
                     } else if f.len() == 1 {
                         None
                     } else {
@@ -8086,6 +8196,7 @@ async fn handle_lark_card_action_payload(
                         Some(keyword)
                     },
                     message.as_deref(),
+                    pending.locale.as_deref(),
                 );
 
                 // PATCH the card message as a fallback (primary update is via response card field)
@@ -8100,9 +8211,17 @@ async fn handle_lark_card_action_payload(
 
                 let card_data = serde_json::from_str::<Value>(&card).unwrap_or(Value::Null);
                 let toast_msg = if keyword.is_empty() {
-                    "已显示全部目录".to_string()
+                    if prompt::is_zh_locale(pending.locale.as_deref()) {
+                        "已显示全部目录".to_string()
+                    } else {
+                        "Showing all directories".to_string()
+                    }
                 } else {
-                    format!("已筛选 \"{}\"", keyword)
+                    if prompt::is_zh_locale(pending.locale.as_deref()) {
+                        format!("已筛选 \"{}\"", keyword)
+                    } else {
+                        format!("Filtered \"{}\"", keyword)
+                    }
                 };
                 Ok(Json(serde_json::json!({
                     "toast": { "type": "success", "content": toast_msg },
@@ -8197,16 +8316,31 @@ async fn handle_lark_card_action_payload(
                         // No unique match: DON'T remove pending, just refresh card
                         let filtered = dir_select::filter_dirs(&pending.candidate_dirs, keyword);
                         let message = if filtered.is_empty() {
-                            Some(format!(
-                                "⚠️ 没有目录匹配 \"{}\"，请尝试其他关键词。",
-                                keyword
-                            ))
+                            if prompt::is_zh_locale(pending.locale.as_deref()) {
+                                Some(format!(
+                                    "⚠️ 没有目录匹配 \"{}\"，请尝试其他关键词。",
+                                    keyword
+                                ))
+                            } else {
+                                Some(format!(
+                                    "⚠️ No directory matches \"{}\". Try another keyword.",
+                                    keyword
+                                ))
+                            }
                         } else {
-                            Some(format!(
-                                "⚠️ 多个目录匹配 \"{}\"（共 {} 个），请选择其中一个。",
-                                keyword,
-                                filtered.len()
-                            ))
+                            if prompt::is_zh_locale(pending.locale.as_deref()) {
+                                Some(format!(
+                                    "⚠️ 多个目录匹配 \"{}\"（共 {} 个），请选择其中一个。",
+                                    keyword,
+                                    filtered.len()
+                                ))
+                            } else {
+                                Some(format!(
+                                    "⚠️ Multiple directories match \"{}\" ({} total). Choose one.",
+                                    keyword,
+                                    filtered.len()
+                                ))
+                            }
                         };
 
                         let card = dir_select::build_dir_select_card(
@@ -8218,6 +8352,7 @@ async fn handle_lark_card_action_payload(
                             Some(&filtered),
                             Some(keyword),
                             message.as_deref(),
+                            pending.locale.as_deref(),
                         );
 
                         // PATCH the card message as a fallback (primary update is via response card field)
@@ -8231,8 +8366,13 @@ async fn handle_lark_card_action_payload(
                         }
 
                         let card_data = serde_json::from_str::<Value>(&card).unwrap_or(Value::Null);
+                        let toast_content = if prompt::is_zh_locale(pending.locale.as_deref()) {
+                            "无法确定唯一最佳匹配，请从列表中选择"
+                        } else {
+                            "Could not determine a unique best match. Choose one from the list."
+                        };
                         Ok(Json(serde_json::json!({
-                            "toast": { "type": "warning", "content": "无法确定唯一最佳匹配，请从列表中选择" },
+                            "toast": { "type": "warning", "content": toast_content },
                             "card": { "type": "raw", "data": card_data }
                         })))
                     }
@@ -8339,8 +8479,11 @@ async fn handle_lark_card_action_payload(
 
         // Update the dir select card to show success
         if let Some(card_msg_id) = &pending.card_message_id {
-            let success_card =
-                dir_select::build_dir_session_starting_card(working_dir, &pending.title);
+            let success_card = dir_select::build_dir_session_starting_card(
+                working_dir,
+                &pending.title,
+                pending.locale.as_deref(),
+            );
             let _ = lark_update_card(state, bot, card_msg_id, &success_card).await;
         }
 
@@ -15480,6 +15623,16 @@ mod tests {
             Some("half_page_down")
         );
         assert_eq!(
+            card.pointer("/elements/6/actions/5/text/i18n_content/zh_cn")
+                .and_then(Value::as_str),
+            Some("下半页")
+        );
+        assert_eq!(
+            card.pointer("/elements/6/actions/5/text/i18n_content/en_us")
+                .and_then(Value::as_str),
+            Some("Half Pg Down")
+        );
+        assert_eq!(
             card.pointer("/elements/3/actions/0/value/action")
                 .and_then(Value::as_str),
             Some("refresh_screenshot")
@@ -16241,11 +16394,25 @@ mod tests {
             local_turn
                 .pointer("/body/elements/0/content")
                 .and_then(Value::as_str),
+            Some(
+                "🖥️ Local terminal conversation (type directly in the adopted pane; synced to Feishu)"
+            )
+        );
+        assert_eq!(
+            local_turn
+                .pointer("/body/elements/0/i18n_content/zh_cn")
+                .and_then(Value::as_str),
             Some("🖥️ 终端本地对话（在 adopted pane 中直接输入，已同步至飞书）")
         );
         assert_eq!(
             local_turn
                 .pointer("/body/elements/1/content")
+                .and_then(Value::as_str),
+            Some("**👤 You**\n\n> user prompt")
+        );
+        assert_eq!(
+            local_turn
+                .pointer("/body/elements/1/i18n_content/zh_cn")
                 .and_then(Value::as_str),
             Some("**👤 你**\n\n> user prompt")
         );
@@ -16268,6 +16435,14 @@ mod tests {
             headless
                 .pointer("/body/elements/0/content")
                 .and_then(Value::as_str),
+            Some(
+                "🖥️ Local terminal conversation resumed (model was still streaming when daemon restarted)"
+            )
+        );
+        assert_eq!(
+            headless
+                .pointer("/body/elements/0/i18n_content/zh_cn")
+                .and_then(Value::as_str),
             Some("🖥️ 终端本地对话续传（daemon 重启时模型正在输出）")
         );
         assert_eq!(
@@ -16282,8 +16457,10 @@ mod tests {
     fn build_contextual_reply_card_supports_adopt_preamble_shape() {
         let card: Value = serde_json::from_str(&build_contextual_reply_card(
             "📜 /adopt 前最后一轮",
+            "📜 Last turn before /adopt",
             Some("previous user"),
             "previous assistant",
+            "Claude",
             "Claude",
             Some("ou_owner"),
         ))
@@ -16291,10 +16468,20 @@ mod tests {
         assert_eq!(
             card.pointer("/body/elements/0/content")
                 .and_then(Value::as_str),
+            Some("📜 Last turn before /adopt")
+        );
+        assert_eq!(
+            card.pointer("/body/elements/0/i18n_content/zh_cn")
+                .and_then(Value::as_str),
             Some("📜 /adopt 前最后一轮")
         );
         assert_eq!(
             card.pointer("/body/elements/1/content")
+                .and_then(Value::as_str),
+            Some("**👤 You**\n\n> previous user")
+        );
+        assert_eq!(
+            card.pointer("/body/elements/1/i18n_content/zh_cn")
                 .and_then(Value::as_str),
             Some("**👤 你**\n\n> previous user")
         );
@@ -17714,10 +17901,22 @@ mod tests {
         assert_eq!(
             card.pointer("/header/title/content")
                 .and_then(Value::as_str),
+            Some("Rejected: node-1")
+        );
+        assert_eq!(
+            card.pointer("/header/title/i18n_content/zh_cn")
+                .and_then(Value::as_str),
             Some("已拒绝：node-1")
         );
         assert_eq!(
             card.pointer("/elements/0/text/content")
+                .and_then(Value::as_str),
+            Some(
+                "**❌ Rejected**\n\n**Workflow**\nflow-a @ rev-9\n\n**Run**\nrun-1\n\n**Step**\nnode-1\n\n**Activity**\nact-1\n\n**Attempt**\natt-1\n\n**Operator**\nou_user\n\n**Comment**\nnot ready"
+            )
+        );
+        assert_eq!(
+            card.pointer("/elements/0/text/i18n_content/zh_cn")
                 .and_then(Value::as_str),
             Some(
                 "**❌ 已拒绝**\n\n**Workflow**\nflow-a @ rev-9\n\n**Run**\nrun-1\n\n**Step**\nnode-1\n\n**Activity**\nact-1\n\n**Attempt**\natt-1\n\n**操作人**\nou_user\n\n**备注**\nnot ready"
@@ -17826,6 +18025,7 @@ mod tests {
             Some(&["project-a".to_string()]),
             Some("project"),
             None,
+            Some("zh"),
         );
         let card_data: Value = serde_json::from_str(&card_json).expect("card should be valid JSON");
         let toast_msg = "已筛选 \"project\"";
@@ -17883,6 +18083,7 @@ mod tests {
             Some(&filtered),
             Some("project"),
             None,
+            Some("zh"),
         );
         let card_data: Value = serde_json::from_str(&card_json).expect("card should be valid JSON");
         let response = serde_json::json!({
@@ -17930,6 +18131,7 @@ mod tests {
             Some(&all_dirs),
             None,
             None,
+            Some("zh"),
         );
         let card_data: Value = serde_json::from_str(&card_json).expect("card should be valid JSON");
         let response = serde_json::json!({
@@ -17978,6 +18180,7 @@ mod tests {
             Some(&filtered),
             Some("nonexistent"),
             Some("⚠️ 没有目录匹配关键词 \"nonexistent\"，请尝试其他关键词。"),
+            Some("zh"),
         );
         let card_data: Value = serde_json::from_str(&card_json).expect("card should be valid JSON");
         let response = serde_json::json!({
@@ -18063,7 +18266,15 @@ mod tests {
         // AND a select_static dropdown as an alternative entry point.
         let all_dirs: Vec<String> = (0..10).map(|i| format!("project-{}", i)).collect();
         let card_json = dir_select::build_dir_select_card(
-            "pid", "/root", "test", &all_dirs, &all_dirs, None, None, None,
+            "pid",
+            "/root",
+            "test",
+            &all_dirs,
+            &all_dirs,
+            None,
+            None,
+            None,
+            Some("zh"),
         );
         let v: Value = serde_json::from_str(&card_json).expect("valid card JSON");
         let elements = v["elements"].as_array().unwrap();
