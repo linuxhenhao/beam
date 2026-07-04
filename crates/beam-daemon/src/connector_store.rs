@@ -176,10 +176,6 @@ pub fn delete_connector(paths: &BeamPaths, id: &str) -> Result<bool> {
     Ok(false)
 }
 
-pub fn new_connector_id() -> String {
-    format!("conn_{}", Uuid::new_v4())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

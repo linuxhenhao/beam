@@ -1074,7 +1074,10 @@ mod tests {
         );
         // single-candidate CLIs
         assert_eq!(bin_candidates_for_cli_id("codex"), Some(&["codex"][..]));
-        assert_eq!(bin_candidates_for_cli_id("claude-code"), Some(&["claude"][..]));
+        assert_eq!(
+            bin_candidates_for_cli_id("claude-code"),
+            Some(&["claude"][..])
+        );
         assert_eq!(bin_candidates_for_cli_id("antigravity"), Some(&["agy"][..]));
     }
 
@@ -1820,8 +1823,7 @@ async fn prompt_setup_bot() -> Result<BotConfig> {
     let credentials = register_app::prompt_credentials().await?;
     let cli_id = prompt_cli_id()?;
     let cli_args = default_cli_args_for_cli_id(&cli_id);
-    let cli_bin = probe_cli_bin(&cli_id)
-        .filter(|bin| bin != &cli_id);
+    let cli_bin = probe_cli_bin(&cli_id).filter(|bin| bin != &cli_id);
     let working_dir = {
         let value = ask_line("默认工作目录 [~]: ")?;
         if value.trim().is_empty() {
@@ -1844,7 +1846,9 @@ async fn prompt_setup_bot() -> Result<BotConfig> {
         let resolved = resolve_allowed_users(&value, credentials.user_open_id.as_deref());
         if credentials.user_open_id.is_none() && resolved.is_empty() {
             println!("   ⚠️  未设置允许用户：当前为开放模式，任何人都可以和机器人对话。");
-            println!("   💡 可在 bots.json 中手动填写 allowedUsers 字段（open_id 以 ou_ 开头），或后续用 /grant 命令授权。");
+            println!(
+                "   💡 可在 bots.json 中手动填写 allowedUsers 字段（open_id 以 ou_ 开头），或后续用 /grant 命令授权。"
+            );
         }
         resolved
     };
