@@ -1209,7 +1209,17 @@ fn write_json_blob(log: &mut EventLog, value: Value) -> Result<WorkflowOutputRef
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    lower_hex(&hasher.finalize())
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 /// Derive a deterministic idempotency key for a workflow host-executor attempt.
@@ -1235,7 +1245,7 @@ pub fn derive_workflow_idempotency_key(
     let mut hasher = Sha256::new();
     let canonical = serde_json::to_vec(&seed).expect("workflow idempotency seed serializable");
     hasher.update(&canonical);
-    let hash = format!("{:x}", hasher.finalize());
+    let hash = lower_hex(&hasher.finalize());
     let namespace = "wf_";
     let max_len = 50usize;
     let hash_len = max_len.saturating_sub(namespace.len());

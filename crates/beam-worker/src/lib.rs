@@ -581,6 +581,16 @@ fn is_fullwidth(ch: char) -> bool {
     matches!(UnicodeWidthChar::width(ch), Some(2))
 }
 
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
 fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -848,7 +858,7 @@ async fn maybe_send_screenshot_upload(
     if app_id == "local" || app_secret.is_empty() {
         return;
     }
-    let hash = format!("{:x}", Sha256::digest(strip_ansi(screen).as_bytes()));
+    let hash = lower_hex(&Sha256::digest(strip_ansi(screen).as_bytes()));
     {
         let guard = last_uploaded_hash.lock().await;
         if guard.as_deref() == Some(hash.as_str()) {
@@ -1153,7 +1163,7 @@ pub async fn run(init: InitConfig) -> Result<()> {
                         .lock()
                         .await
                         .classify(&screen, base_status, now_ms);
-                let rendered_hash = format!("{:x}", Sha256::digest(rendered.as_bytes()));
+                let rendered_hash = lower_hex(&Sha256::digest(rendered.as_bytes()));
                 {
                     let guard = sample_last_broadcast_hash.lock().await;
                     hash_changed = guard.as_deref() != Some(&rendered_hash);
@@ -1489,7 +1499,7 @@ pub async fn run(init: InitConfig) -> Result<()> {
                     },
                 )
                 .await?;
-                let rendered_hash = format!("{:x}", Sha256::digest(rendered.as_bytes()));
+                let rendered_hash = lower_hex(&Sha256::digest(rendered.as_bytes()));
                 *last_broadcast_hash.lock().await = Some(rendered_hash);
                 if mode == DisplayMode::Screenshot {
                     maybe_send_screenshot_upload(

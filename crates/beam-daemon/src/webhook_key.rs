@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use aes_gcm::aead::{AeadInPlace, KeyInit};
+use aes_gcm::aead::{AeadInOut, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{Context, Result, bail};
 use base64::Engine;
@@ -105,10 +105,10 @@ fn encrypt_secret(plaintext: &str, key: &[u8; 32]) -> Result<(String, String, St
     let cipher = Aes256Gcm::new_from_slice(key).context("failed to initialize webhook cipher")?;
     let mut iv = [0u8; 12];
     iv.copy_from_slice(&Uuid::new_v4().as_bytes()[..12]);
-    let nonce = Nonce::from_slice(&iv);
+    let nonce = Nonce::from(iv);
     let mut buf = plaintext.as_bytes().to_vec();
     let tag = cipher
-        .encrypt_in_place_detached(nonce, b"", &mut buf)
+        .encrypt_inout_detached(&nonce, b"", buf.as_mut_slice().into())
         .map_err(|_| anyhow::anyhow!("failed to encrypt webhook secret"))?;
     Ok((
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(iv),
@@ -131,9 +131,16 @@ fn decrypt_secret(record: &WebhookSecretRecord, key: &[u8; 32]) -> Result<String
     let mut buf = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(record.ciphertext.as_bytes())
         .context("failed to decode webhook ciphertext")?;
-    let nonce = Nonce::from_slice(&iv);
+    let iv: [u8; 12] = iv
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid webhook iv length"))?;
+    let tag: [u8; 16] = tag
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid webhook tag length"))?;
+    let nonce = Nonce::from(iv);
+    let tag = aes_gcm::Tag::from(tag);
     cipher
-        .decrypt_in_place_detached(nonce, b"", &mut buf, aes_gcm::Tag::from_slice(&tag))
+        .decrypt_inout_detached(&nonce, b"", buf.as_mut_slice().into(), &tag)
         .map_err(|_| anyhow::anyhow!("failed to decrypt webhook secret"))?;
     String::from_utf8(buf).context("webhook secret is not utf-8")
 }

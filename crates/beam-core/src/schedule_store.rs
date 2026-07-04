@@ -447,7 +447,17 @@ fn compute_input_hash(value: &serde_json::Value) -> Result<String, ScheduleStore
     let canonical = canonical_json(value);
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    Ok(format!("sha256:{}", lower_hex(&hasher.finalize())))
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 fn canonical_json(value: &serde_json::Value) -> String {
