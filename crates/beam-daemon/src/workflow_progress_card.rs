@@ -1,8 +1,6 @@
 use beam_core::{ActivityStatus, NodeStatus, RunSnapshotDTO, RunStatus};
 use serde_json::json;
 
-use crate::card_i18n;
-
 pub fn build_workflow_progress_card(
     snapshot: &RunSnapshotDTO,
     _run_id: &str,
@@ -142,7 +140,6 @@ pub fn build_workflow_progress_card(
 
     json!({
         "config": { "wide_screen_mode": true },
-        "locales": card_i18n::card_locales(),
         "header": {
             "template": status_color,
             "title": {

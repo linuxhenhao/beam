@@ -258,7 +258,6 @@ fn build_approval_card(
 
     serde_json::json!({
         "config": { "wide_screen_mode": true },
-        "locales": card_i18n::card_locales(),
         "header": {
             "template": "blue",
             "title": {

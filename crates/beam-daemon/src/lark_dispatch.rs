@@ -188,6 +188,12 @@ pub(crate) fn update_session_from_lark_message(
     parsed: &ParsedLarkInboundMessage,
 ) {
     session.quote_target_id = Some(parsed.message_id.clone());
+    // Update the mention-back target to the sender of the current
+    // trigger message.  In multi-user group chats this may differ
+    // from owner_open_id (the session creator).
+    if let Some(ref sender_id) = parsed.sender_open_id {
+        session.quote_target_sender_open_id = Some(sender_id.clone());
+    }
     if session.thread_id.is_none() {
         if let Some(ref tid) = parsed.thread_id {
             session.thread_id = Some(tid.clone());
@@ -196,6 +202,8 @@ pub(crate) fn update_session_from_lark_message(
     if session.locale.is_none() {
         session.locale = Some(lark_locale_or_english(parsed.locale.as_deref()).to_string());
     }
+    // Clear agent attention on next user inbound message (botmux parity).
+    clear_agent_attention(session);
 }
 
 pub(crate) fn resolve_existing_lark_session(
@@ -1772,5 +1780,40 @@ mod tests {
 
             maybe_remove_dir(&paths.root().to_path_buf());
         });
+    }
+
+    #[test]
+    fn update_session_from_lark_message_clears_agent_attention() {
+        let mut session = make_session("sess-attn-clear");
+        session.agent_attention = Some(AgentAttention {
+            kind: "blocked".to_string(),
+            reason: "test".to_string(),
+            at: Utc::now(),
+        });
+        let parsed = ParsedLarkInboundMessage {
+            event_id: "evt-1".to_string(),
+            message_id: "msg-1".to_string(),
+            chat_id: "chat-1".to_string(),
+            chat_type: Some("group".to_string()),
+            sender_type: Some("user".to_string()),
+            scope: SessionScope::Thread,
+            anchor: "root-1".to_string(),
+            text: "hello".to_string(),
+            sender_open_id: Some("ou_user".to_string()),
+            mentions: vec![],
+            parent_id: None,
+            root_id: Some("root-1".to_string()),
+            thread_id: None,
+            locale: None,
+        };
+        assert!(
+            session.agent_attention.is_some(),
+            "session should start with attention"
+        );
+        update_session_from_lark_message(&mut session, &parsed);
+        assert!(
+            session.agent_attention.is_none(),
+            "attention should be cleared on inbound"
+        );
     }
 }

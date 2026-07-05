@@ -23,7 +23,6 @@ The current implementation uses Feishu card-native i18n fields. It does not infe
 
 Every card follows the same rules:
 
-- Add `"locales": ["zh_cn", "en_us"]` at the root.
 - Put `"i18n_content"` on every visible field whenever possible.
 - `content` is the render fallback. When the caller knows the locale, it should pick that language; otherwise it falls back to English.
 - Keep both `i18n_content.zh_cn` and `i18n_content.en_us`.
@@ -33,7 +32,6 @@ Every card follows the same rules:
 
 The helper lives at [crates/beam-daemon/src/card_i18n.rs](../../crates/beam-daemon/src/card_i18n.rs).
 
-- `card_locales()` returns `["zh_cn", "en_us"]`.
 - `plain_text(locale, zh, en)` builds a `plain_text` node.
 - `lark_md(locale, zh, en)` builds a `lark_md` node.
 - `markdown(locale, zh, en)` builds a `markdown` node.
@@ -136,5 +134,5 @@ Traits:
 
 - `build_lark_card_action_toast` is a toast payload, not a card in the scope of this document.
 - `card_i18n::markdown` is currently not heavily used, but the helper is kept for future `tag: markdown` content.
+- Feishu cards no longer use a root-level `locales` field; multilingual rendering is expressed through field-level `i18n_content` only.
 - The source of truth is the Rust code under `beam-daemon`. When a new card is added, update the implementation first, then update this inventory.
-

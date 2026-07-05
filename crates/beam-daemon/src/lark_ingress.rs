@@ -134,6 +134,7 @@ pub(crate) async fn handle_lark_event_payload(
     } else {
         text
     };
+    let inferred_locale = prompt::infer_prompt_locale(&text);
     let scope = parsed.scope;
     let anchor = parsed.anchor.as_str();
     let sender_open_id = parsed.sender_open_id.clone();
@@ -660,6 +661,9 @@ pub(crate) async fn handle_lark_event_payload(
                     let mut sessions = state.sessions.lock().await;
                     if let Some(entry) = sessions.get_mut(&session.session_id) {
                         update_session_from_lark_message(entry, &parsed);
+                        if entry.locale.is_none() {
+                            entry.locale = Some(inferred_locale.to_string());
+                        }
                     }
                     sessions.clone()
                 };
@@ -692,6 +696,9 @@ pub(crate) async fn handle_lark_event_payload(
                     let mut sessions = state.sessions.lock().await;
                     if let Some(entry) = sessions.get_mut(&session.session_id) {
                         update_session_from_lark_message(entry, &parsed);
+                        if entry.locale.is_none() {
+                            entry.locale = Some(inferred_locale.to_string());
+                        }
                     }
                     sessions.clone()
                 };
@@ -699,7 +706,7 @@ pub(crate) async fn handle_lark_event_payload(
                 let session_locale = snapshot
                     .get(&session.session_id)
                     .and_then(|entry| entry.locale.as_deref())
-                    .unwrap_or_else(|| lark_locale_or_english(parsed.locale.as_deref()));
+                    .unwrap_or(inferred_locale);
                 let reuse_content = {
                     let session_root = &session.root_message_id;
                     let raw = prompt::build_quote_hint(
@@ -769,7 +776,7 @@ pub(crate) async fn handle_lark_event_payload(
                         bot_open_id: bot_open_id.as_deref(),
                         observed_bots: &observed_bots,
                         follow_ups: &Vec::new(),
-                        locale: parsed.locale.as_deref(),
+                        locale: Some(inferred_locale),
                     })
                 } else {
                     prompt::build_follow_up_content(
@@ -780,7 +787,7 @@ pub(crate) async fn handle_lark_event_payload(
                             sender_type: parsed.sender_type.as_deref(),
                             mentions: &mentions,
                             cli_id: bot.cli_id.as_str(),
-                            locale: parsed.locale.as_deref(),
+                            locale: Some(inferred_locale),
                         },
                     )
                 };
@@ -810,7 +817,7 @@ pub(crate) async fn handle_lark_event_payload(
                         prompt,
                         app_id.clone(),
                         sender_open_id.clone(),
-                        Some(lark_locale_or_english(parsed.locale.as_deref()).to_string()),
+                        Some(inferred_locale.to_string()),
                         None,
                     ),
                 )
@@ -884,7 +891,7 @@ pub(crate) async fn handle_lark_event_payload(
                 text: text.clone(),
                 sender_open_id: sender_open_id.clone(),
                 sender_type: parsed.sender_type.clone(),
-                locale: Some(lark_locale_or_english(parsed.locale.as_deref()).to_string()),
+                locale: Some(inferred_locale.to_string()),
                 parent_id: parsed.parent_id.clone(),
                 mentions_json: serde_json::to_string(&parsed.mentions).unwrap_or_default(),
                 quota_key,
@@ -2858,6 +2865,7 @@ pub(crate) async fn start_workflow_attempt_resume(
         working_dir: Some(working_dir.clone()),
         lark_app_id: "local".to_string(),
         owner_open_id: None,
+        quote_target_sender_open_id: None,
         worker_pid: None,
         cli_id: Some(bot.cli_id.clone()),
         cli_bin: Some(bot.cli_bin.clone().unwrap_or_else(|| bot.cli_id.clone())),
@@ -2881,6 +2889,7 @@ pub(crate) async fn start_workflow_attempt_resume(
         terminal_url: None,
         last_final_output_turn_id: None,
         last_final_output: None,
+        last_explicit_send_at: None,
         adopted_from: None,
         bot_name: None,
         bot_open_id: None,
@@ -2890,6 +2899,7 @@ pub(crate) async fn start_workflow_attempt_resume(
         locale: None,
         resume_session_id: None,
         thread_id: None,
+        agent_attention: None,
     };
     {
         let snapshot = {
@@ -3673,6 +3683,7 @@ pub(crate) async fn adopt_zellij_session(
         working_dir: Some(adopted_from.cwd.clone()),
         lark_app_id: lark_app_id.clone(),
         owner_open_id: req.owner_open_id.clone(),
+        quote_target_sender_open_id: req.owner_open_id.clone(),
         worker_pid: None,
         cli_id: Some(req.cli_id.clone()),
         cli_bin: Some(req.cli_bin.clone()),
@@ -3696,6 +3707,7 @@ pub(crate) async fn adopt_zellij_session(
         terminal_url: None,
         last_final_output_turn_id: None,
         last_final_output: None,
+        last_explicit_send_at: None,
         adopted_from: Some(adopted_from.clone()),
         bot_name: None,
         bot_open_id: None,
@@ -3705,6 +3717,7 @@ pub(crate) async fn adopt_zellij_session(
         locale: None,
         resume_session_id: None,
         thread_id: req.thread_id.clone(),
+        agent_attention: None,
     };
     {
         let snapshot = {
@@ -3755,15 +3768,15 @@ pub(crate) async fn final_output(
     AxumPath(session_id): AxumPath<String>,
     Json(req): Json<FinalOutputRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    if let Err(err) =
-        deliver_final_output_once(&state, &session_id, &req.content, None, None, None).await
-    {
-        warn!(
-            "failed to send final output to lark for {}: {}",
-            session_id, err
-        );
+    match handle_final_output_request(&state, &session_id, req).await {
+        Ok(()) => {
+            // For backward compatibility with old {content}-only requests,
+            // also run the legacy delivery path if the request has no mention
+            // decision and a non-empty content.
+            Ok(StatusCode::ACCEPTED)
+        }
+        Err(err) => Err((StatusCode::BAD_REQUEST, err.to_string())),
     }
-    Ok(StatusCode::ACCEPTED)
 }
 
 pub(crate) fn internal_error<E: std::fmt::Display>(err: E) -> (StatusCode, String) {

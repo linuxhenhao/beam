@@ -174,6 +174,7 @@ pub(crate) async fn create_session(
         working_dir: Some(expand_tilde(&req.working_dir)),
         lark_app_id: "local".to_string(),
         owner_open_id: None,
+        quote_target_sender_open_id: None,
         worker_pid: None,
         cli_id: Some(req.cli_id.clone()),
         cli_bin: Some(req.cli_bin.clone()),
@@ -197,6 +198,7 @@ pub(crate) async fn create_session(
         terminal_url: None,
         last_final_output_turn_id: None,
         last_final_output: None,
+        last_explicit_send_at: None,
         adopted_from: None,
         bot_name: None,
         bot_open_id: None,
@@ -206,6 +208,7 @@ pub(crate) async fn create_session(
         locale: None,
         resume_session_id: None,
         thread_id: None,
+        agent_attention: None,
     };
     {
         let snapshot = {

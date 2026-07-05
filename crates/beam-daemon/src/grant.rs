@@ -391,7 +391,6 @@ pub fn build_grant_card(
 
     serde_json::json!({
         "config": { "wide_screen_mode": true },
-        "locales": card_i18n::card_locales(),
         "header": {
             "template": "blue",
             "title": card_i18n::plain_text(None, "权限授权", "Permission Grant"),

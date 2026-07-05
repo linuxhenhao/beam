@@ -293,6 +293,7 @@ pub(crate) fn make_session(session_id: &str) -> Session {
         working_dir: Some("/tmp/project".to_string()),
         lark_app_id: "app-1".to_string(),
         owner_open_id: None,
+        quote_target_sender_open_id: None,
         worker_pid: None,
         cli_id: Some("codex".to_string()),
         cli_bin: Some("codex".to_string()),
@@ -316,6 +317,7 @@ pub(crate) fn make_session(session_id: &str) -> Session {
         terminal_url: None,
         last_final_output_turn_id: None,
         last_final_output: None,
+        last_explicit_send_at: None,
         adopted_from: None,
         bot_name: None,
         bot_open_id: None,
@@ -325,6 +327,7 @@ pub(crate) fn make_session(session_id: &str) -> Session {
         locale: None,
         resume_session_id: None,
         thread_id: None,
+        agent_attention: None,
     }
 }
 

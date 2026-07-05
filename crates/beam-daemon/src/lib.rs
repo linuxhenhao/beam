@@ -106,16 +106,16 @@ use axum::{
 };
 use base64::Engine;
 use beam_core::{
-    AdoptedFrom, ApiHealth, AttemptResumeRequest, BeamPaths, BotConfig, BotSummary, ChatMode,
-    CliUsageLimitState, ColdWorkflowRun, Config, CreateSessionRequest, DaemonOverview,
-    DaemonRuntimeState, DaemonToWorker, DisplayMode, EventDraft, EventLog, EventWindowOpts,
-    FinalOutputKind, FinalOutputRequest, InitConfig, PendingResponseCardState,
-    RestartSessionRequest, ResumeSessionRequest, RunChatBinding, RunStatus, ScheduleChatType,
-    ScreenStatus, Session, SessionGroup, SessionInputRequest, SessionLocateInfo, SessionScope,
-    SessionStatus, SessionSummary, TalkEvaluation, TermActionKey, TuiPromptOption, WaitResolution,
-    WorkerToDaemon, WorkflowActor, WorkflowOutputRef, can_operate, evaluate_talk, grant_restricted,
-    parse_workflow_definition, read_event_window, read_run_events_pure, read_run_snapshot,
-    scan_cold_workflow_runs,
+    AdoptedFrom, AgentAttention, ApiHealth, AttemptResumeRequest, AttentionRequest, BeamPaths,
+    BotConfig, BotSummary, ChatMode, CliUsageLimitState, ColdWorkflowRun, Config,
+    CreateSessionRequest, DaemonOverview, DaemonRuntimeState, DaemonToWorker, DisplayMode,
+    EventDraft, EventLog, EventWindowOpts, FinalOutputKind, FinalOutputRequest, InitConfig,
+    PendingResponseCardState, RestartSessionRequest, ResumeSessionRequest, RunChatBinding,
+    RunStatus, ScheduleChatType, ScreenStatus, Session, SessionGroup, SessionInputRequest,
+    SessionLocateInfo, SessionScope, SessionStatus, SessionSummary, TalkEvaluation, TermActionKey,
+    TuiPromptOption, WaitResolution, WorkerToDaemon, WorkflowActor, WorkflowOutputRef, can_operate,
+    evaluate_talk, grant_restricted, parse_workflow_definition, read_event_window,
+    read_run_events_pure, read_run_snapshot, scan_cold_workflow_runs,
 };
 use chrono::Utc;
 use connector_store::{
@@ -807,7 +807,8 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
             get(lark_history::quoted_message),
         )
         .route("/sessions/{session_id}/final-output", post(final_output))
-        .route("/api/asks", post(ask::create_ask));
+        .route("/api/asks", post(ask::create_ask))
+        .route("/api/attention", post(set_attention_route));
 
     // Start zellij web server and ensure tokens
     let zellij_web_port = state.config.web.proxy_base_port + 1;

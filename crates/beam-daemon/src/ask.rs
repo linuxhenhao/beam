@@ -346,6 +346,7 @@ mod tests {
                     working_dir: Some("/tmp".to_string()),
                     lark_app_id: "app-1".to_string(),
                     owner_open_id: Some(owner_open_id.to_string()),
+                    quote_target_sender_open_id: None,
                     worker_pid: None,
                     cli_id: Some("opencode".to_string()),
                     cli_bin: Some("opencode-cli".to_string()),
@@ -369,6 +370,7 @@ mod tests {
                     terminal_url: None,
                     last_final_output_turn_id: None,
                     last_final_output: None,
+                    last_explicit_send_at: None,
                     adopted_from: None,
                     model: None,
                     locale: None,
@@ -378,6 +380,7 @@ mod tests {
                     disable_cli_bypass: false,
                     initial_prompt: None,
                     thread_id: Some("omt_1".to_string()),
+                    agent_attention: None,
                 },
             );
         }
@@ -586,7 +589,6 @@ fn build_ask_card(
     }
     serde_json::json!({
         "config": { "wide_screen_mode": true },
-        "locales": card_i18n::card_locales(),
         "header": {
             "template": if settled { "green" } else { "blue" },
             "title": {

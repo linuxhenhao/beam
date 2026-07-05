@@ -23,7 +23,6 @@ English: [beam-cards.en.md](beam-cards.en.md)
 
 每张卡片都遵循同一组约定：
 
-- 根节点加入 `"locales": ["zh_cn", "en_us"]`。
 - 所有可见字段都尽量带 `"i18n_content"`。
 - `content` 是当前渲染兜底内容，通常按调用时传入的 locale 选择；如果调用方没有 locale，就默认英文。
 - `i18n_content.zh_cn` 和 `i18n_content.en_us` 同时保留。
@@ -33,7 +32,6 @@ English: [beam-cards.en.md](beam-cards.en.md)
 
 实现位于 [crates/beam-daemon/src/card_i18n.rs](../../crates/beam-daemon/src/card_i18n.rs)。
 
-- `card_locales()`：返回 `["zh_cn", "en_us"]`。
 - `plain_text(locale, zh, en)`：生成 `plain_text` 节点。
 - `lark_md(locale, zh, en)`：生成 `lark_md` 节点。
 - `markdown(locale, zh, en)`：生成 `markdown` 节点。
@@ -136,5 +134,5 @@ English: [beam-cards.en.md](beam-cards.en.md)
 
 - `build_lark_card_action_toast` 产生的是 toast，不算本文的“卡片”范围。
 - `card_i18n::markdown` 目前在仓库里未大规模使用，但作为 API 保留，便于以后把 `tag: markdown` 的内容统一收口。
+- Feishu 卡片当前不再使用根节点 `locales`；多语言只通过字段级 `i18n_content` 表达。
 - 文档和代码的真实来源都在 `beam-daemon`；如果后续新增卡片，优先在这里补双语字段，再更新本文清单。
-

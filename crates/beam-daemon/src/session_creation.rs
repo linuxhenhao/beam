@@ -142,6 +142,15 @@ pub(crate) async fn create_session_internal(
 ) -> Result<SessionSummary> {
     let session_id = Uuid::new_v4().to_string();
     let prompt_turn_id = (!spec.prompt.is_empty()).then(next_session_turn_id);
+
+    // Resolve bot identity for this session (P2-9 off-topic hint support).
+    // Skip for "local" sessions (no Lark backend).
+    let (bot_name, bot_open_id) = if spec.lark_app_id == "local" {
+        (None, None)
+    } else {
+        load_bot_identity(&state.paths, &spec.lark_app_id)
+    };
+
     let session = Session {
         session_id: session_id.clone(),
         title: spec.title.clone(),
@@ -157,6 +166,7 @@ pub(crate) async fn create_session_internal(
         working_dir: Some(spec.working_dir.clone()),
         lark_app_id: spec.lark_app_id.clone(),
         owner_open_id: spec.owner_open_id.clone(),
+        quote_target_sender_open_id: spec.owner_open_id.clone(),
         worker_pid: None,
         cli_id: Some(spec.cli_id.clone()),
         cli_bin: Some(spec.cli_bin.clone()),
@@ -180,14 +190,16 @@ pub(crate) async fn create_session_internal(
         terminal_url: None,
         last_final_output_turn_id: None,
         last_final_output: None,
+        last_explicit_send_at: None,
         adopted_from: spec.adopted_from.clone(),
-        bot_name: None,
-        bot_open_id: None,
+        bot_name: bot_name.clone(),
+        bot_open_id: bot_open_id.clone(),
         disable_cli_bypass: false,
         initial_prompt: None,
         model: None,
         locale: spec.locale.clone(),
         resume_session_id: None,
+        agent_attention: None,
     };
     {
         let snapshot = {
@@ -220,8 +232,8 @@ pub(crate) async fn create_session_internal(
         adopted_from: spec.adopted_from,
         adopt_restored_from_metadata: false,
         screen_analyzer: state.config.screen_analyzer.clone(),
-        bot_name: None,
-        bot_open_id: None,
+        bot_name: bot_name.clone(),
+        bot_open_id: bot_open_id.clone(),
         disable_cli_bypass: false,
         initial_prompt: (!spec.prompt.is_empty()).then_some(spec.prompt),
         model: None,
@@ -810,5 +822,96 @@ mod tests {
 
         let bad = parse_attempt_resume_request_body(b"{not-json");
         assert!(matches!(bad, Err((StatusCode::BAD_REQUEST, ref err)) if err == "bad_json"));
+    }
+
+    /// Verify that `create_session_internal` populates `bot_name` / `bot_open_id`
+    /// from `bots-info.json` when creating a Lark session. This is needed for the
+    /// P2-9 off-topic sub-bot hint to work at runtime.
+    #[tokio::test]
+    async fn create_session_internal_populates_bot_identity() {
+        let paths = temp_paths("bot-identity");
+        maybe_remove_dir(&paths.root().to_path_buf());
+
+        // Write bots-info.json with known bot identity
+        let bots_info = serde_json::json!([{
+            "larkAppId": "app-bot-id-test",
+            "botName": "TestBot",
+            "botOpenId": "ou_test_bot_789",
+        }]);
+        std::fs::create_dir_all(paths.root()).expect("create temp root");
+        std::fs::write(
+            paths.root().join("bots-info.json"),
+            serde_json::to_string_pretty(&bots_info).unwrap(),
+        )
+        .expect("write bots-info.json");
+
+        let state = AppState {
+            paths: paths.clone(),
+            started_at: Utc::now(),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            workers: Arc::new(Mutex::new(HashMap::new())),
+            attempt_resumes: Arc::new(Mutex::new(HashMap::new())),
+            shutdown: Arc::new(Mutex::new(None)),
+            options: RunOptions {
+                worker_exe: PathBuf::from("/bin/true"),
+            },
+            http: Client::new(),
+            config: Config::default(),
+            bots: Arc::new(HashMap::from([(
+                "app-bot-id-test".to_string(),
+                make_bot("app-bot-id-test"),
+            )])),
+            lark_tokens: Arc::new(Mutex::new(HashMap::new())),
+            chat_mode_cache: Arc::new(Mutex::new(HashMap::new())),
+            recent_lark_events: Arc::new(Mutex::new(HashMap::new())),
+            inflight_final_output_turns: Arc::new(Mutex::new(HashSet::new())),
+            workflow_progress_cards: Arc::new(Mutex::new(HashMap::new())),
+            ask_pending: Arc::new(Mutex::new(HashMap::new())),
+            grant_pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_creates: Arc::new(Mutex::new(HashMap::new())),
+            dashboard_token: Arc::new(Mutex::new(None)),
+            external_host: "localhost".to_string(),
+        };
+
+        let spec = SessionCreateSpec {
+            title: "Test Session".to_string(),
+            chat_id: "chat-test".to_string(),
+            chat_type: None,
+            root_message_id: "root-test".to_string(),
+            quote_target_id: None,
+            scope: SessionScope::Thread,
+            thread_id: None,
+            working_dir: "/tmp/test-bot-identity".to_string(),
+            cli_id: "codex".to_string(),
+            cli_bin: "codex".to_string(),
+            cli_args: vec![],
+            prompt: "hello".to_string(),
+            lark_app_id: "app-bot-id-test".to_string(),
+            owner_open_id: None,
+            locale: None,
+            adopted_from: None,
+        };
+
+        let summary = create_session_internal(&state, spec)
+            .await
+            .expect("create_session_internal should succeed");
+
+        // Verify session persisted with bot identity
+        let sessions = state.sessions.lock().await;
+        let session = sessions
+            .get(&summary.session_id)
+            .expect("session should exist in state");
+        assert_eq!(
+            session.bot_name.as_deref(),
+            Some("TestBot"),
+            "bot_name should be populated from bots-info.json"
+        );
+        assert_eq!(
+            session.bot_open_id.as_deref(),
+            Some("ou_test_bot_789"),
+            "bot_open_id should be populated from bots-info.json"
+        );
+
+        maybe_remove_dir(&paths.root().to_path_buf());
     }
 }

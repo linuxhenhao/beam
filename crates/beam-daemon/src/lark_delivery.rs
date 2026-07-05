@@ -69,9 +69,10 @@ pub(crate) async fn lark_reply_card_with_opts(
     card_json: &str,
     reply_in_thread: bool,
 ) -> Result<String> {
+    let cleaned_json = card_json.to_string();
     let token = lark_tenant_token(state, bot).await?;
     let mut body = serde_json::json!({
-        "content": card_json,
+        "content": cleaned_json,
         "msg_type": "interactive",
     });
     if reply_in_thread {
@@ -112,13 +113,15 @@ pub(crate) async fn lark_update_card(
     message_id: &str,
     card_json: &str,
 ) -> Result<()> {
+    let cleaned_json = card_json.to_string();
+
     let token = lark_tenant_token(state, bot).await?;
     let resp = state
         .http
         .patch(format!("{}/im/v1/messages/{}", lark_base_url(), message_id))
         .bearer_auth(token)
         .json(&serde_json::json!({
-            "content": card_json,
+            "content": cleaned_json,
             "msg_type": "interactive",
         }))
         .send()

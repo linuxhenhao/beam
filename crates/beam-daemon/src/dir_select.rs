@@ -888,7 +888,6 @@ pub fn build_dir_select_card(
         "config": {
             "wide_screen_mode": true
         },
-        "locales": card_i18n::card_locales(),
         "header": {
             "title": {
                 "tag": "plain_text",
@@ -926,7 +925,6 @@ pub fn build_dir_session_starting_card(
         "config": {
             "wide_screen_mode": true
         },
-        "locales": card_i18n::card_locales(),
         "header": {
             "title": {
                 "tag": "plain_text",

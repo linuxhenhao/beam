@@ -131,7 +131,6 @@ pub(crate) fn build_writable_session_card(session: &Session, write_url: &str) ->
     }));
     serde_json::json!({
         "config": { "wide_screen_mode": true },
-        "locales": card_i18n::card_locales(),
         "header": {
             "title": card_i18n::plain_text(locale, format!("{} · {}", "终端", title), format!("{} · {}", "terminal", title)),
             "template": "blue"
@@ -156,7 +155,6 @@ pub(crate) fn build_readonly_link_card(session: &Session, ro_url: &str, _ro_toke
     };
     serde_json::json!({
         "config": { "wide_screen_mode": true },
-        "locales": card_i18n::card_locales(),
         "header": {
             "title": card_i18n::plain_text(
                 locale,
@@ -595,7 +593,6 @@ pub(crate) fn build_streaming_card(session: &Session, status: &str) -> String {
     }
     serde_json::json!({
         "config": { "wide_screen_mode": true, "enable_forward": true },
-        "locales": card_i18n::card_locales(),
         "header": {
             "template": streaming_card_template(effective_status),
             "title": card_i18n::plain_text(

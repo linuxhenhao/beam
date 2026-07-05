@@ -2,10 +2,6 @@ use serde_json::{Value, json};
 
 use crate::prompt;
 
-pub fn card_locales() -> Value {
-    json!(["zh_cn", "en_us"])
-}
-
 pub fn plain_text(locale: Option<&str>, zh: impl AsRef<str>, en: impl AsRef<str>) -> Value {
     let zh = zh.as_ref();
     let en = en.as_ref();

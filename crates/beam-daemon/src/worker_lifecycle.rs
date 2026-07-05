@@ -46,6 +46,7 @@ pub(crate) async fn execute_schedule_task(
         cli_id: Some(bot.cli_id.clone()),
         cli_bin: bot.cli_bin.clone(),
         owner_open_id: Some(String::new()),
+        quote_target_sender_open_id: None,
         bot_name: None,
         bot_open_id: None,
         cli_session_id: None,
@@ -65,6 +66,7 @@ pub(crate) async fn execute_schedule_task(
         terminal_url: None,
         last_final_output_turn_id: None,
         last_final_output: None,
+        last_explicit_send_at: None,
         adopted_from: None,
         model: None,
         locale: None,
@@ -78,6 +80,7 @@ pub(crate) async fn execute_schedule_task(
         worker_pid: None,
         last_screen_status: None,
         closed_at: None,
+        agent_attention: None,
     };
 
     // Persist session
@@ -389,7 +392,12 @@ pub(crate) async fn spawn_worker(
                             let Some(entry) = sessions.get_mut(&session_id_for_task) else {
                                 continue;
                             };
-                            if should_skip_worker_final_output(entry, &turn_id) {
+                            if should_skip_worker_final_output(
+                                entry,
+                                &turn_id,
+                                &content,
+                                chrono::Utc::now(),
+                            ) {
                                 continue;
                             }
                             entry.last_screen_status = Some(ScreenStatus::Idle);

@@ -90,7 +90,6 @@ pub(crate) fn build_closed_session_card(session: &Session) -> String {
     };
     serde_json::json!({
         "config": { "wide_screen_mode": true },
-        "locales": card_i18n::card_locales(),
         "header": {
             "title": card_i18n::plain_text(locale, "会话已关闭", "session closed"),
             "template": "grey"

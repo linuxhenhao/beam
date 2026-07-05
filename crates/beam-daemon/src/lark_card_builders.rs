@@ -121,7 +121,6 @@ pub(crate) fn build_tui_prompt_card(
 
     serde_json::json!({
         "config": { "wide_screen_mode": true },
-        "locales": card_i18n::card_locales(),
         "header": {
             "title": card_i18n::plain_text(locale, description, description),
             "template": "orange"
@@ -145,7 +144,6 @@ pub(crate) fn build_tui_prompt_processing_card(
         .unwrap_or_else(|| "processing selection".to_string());
     serde_json::json!({
         "config": { "wide_screen_mode": true },
-        "locales": card_i18n::card_locales(),
         "header": {
             "title": card_i18n::plain_text(locale, "处理中", "processing"),
             "template": "blue"
@@ -171,7 +169,6 @@ pub(crate) fn build_tui_prompt_resolved_card(
         .unwrap_or_else(|| "prompt resolved".to_string());
     serde_json::json!({
         "config": { "wide_screen_mode": true },
-        "locales": card_i18n::card_locales(),
         "header": {
             "title": card_i18n::plain_text(locale, "已完成", "resolved"),
             "template": "green"
@@ -228,7 +225,6 @@ pub(crate) fn build_workflow_approval_resolved_card(
     }
     serde_json::json!({
         "config": { "wide_screen_mode": true },
-        "locales": card_i18n::card_locales(),
         "header": {
             "template": template,
             "title": card_i18n::plain_text(None, format!("{}：{}", title_zh, node_id), format!("{}: {}", title_en, node_id))
