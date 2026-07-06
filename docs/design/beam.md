@@ -13,6 +13,7 @@ English: [beam.en.md](beam.en.md)
 
 - 先读本文，建立运行时主模型。
 - 需要更细的实体、IPC、卡片生命周期和时序图时，再读 `docs/design/beam-architecture.md`。
+- 需要看仓库里所有 Feishu 卡片的分类、字段约定和多语言支持方式时，再读 `docs/design/beam-cards.md`。
 - 需要看“当前已经做到哪里、哪些仍未完全对标 TS”时，读 `docs/design/beam-parity-plan.md`。
 - 需要看 team/platform/federation 设计时，分别读 `docs/platform-design.md`、`docs/federation-design.md`。
 

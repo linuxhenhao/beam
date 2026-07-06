@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ipc::{CliUsageLimitState, ScreenStatus},
-    session::{AdoptedFrom, PendingResponseCardState, Session, SessionStatus},
+    session::{AdoptedFrom, AgentAttention, PendingResponseCardState, Session, SessionStatus},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -40,9 +40,79 @@ pub struct SessionInputRequest {
     pub raw: bool,
 }
 
+/// A mention target: an open_id with an optional human-readable name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MentionTarget {
+    pub open_id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// Structured request for beam send.
+///
+/// Only `content` is required; all other fields are optional with sensible defaults,
+/// providing backward compatibility with old `{ "content": "..." }` JSON payloads.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FinalOutputRequest {
     pub content: String,
+
+    // ---- mention / attention policy ----
+    /// Explicit mention targets (--mention <open_id[:name]>, repeatable).
+    #[serde(default)]
+    pub mentions: Vec<MentionTarget>,
+    /// Mention the sender who triggered the session (--mention-back).
+    #[serde(default)]
+    pub mention_back: bool,
+    /// Suppress all @-mentions in body and footer (--no-mention).
+    #[serde(default)]
+    pub no_mention: bool,
+
+    // ---- media attachments ----
+    /// Local file paths to upload and send as file messages (--files / --file, repeatable).
+    #[serde(default)]
+    pub files: Vec<String>,
+    /// Local image paths to upload and inline in an interactive card (--images / --image, repeatable).
+    #[serde(default)]
+    pub images: Vec<String>,
+
+    // ---- targeting / quoting ----
+    /// Force a top-level chat message instead of a reply (--top-level).
+    #[serde(default)]
+    pub top_level: bool,
+    /// Override target chat (--chat-id <oc_xxx>).
+    #[serde(default)]
+    pub chat_id: Option<String>,
+    /// Send into a specific thread (--into <message_id>).
+    #[serde(default)]
+    pub into: Option<String>,
+    /// Explicit quote target (--quote <message_id>).
+    #[serde(default)]
+    pub quote: Option<String>,
+    /// Disable automatic quoting (--no-quote).
+    #[serde(default)]
+    pub no_quote: bool,
+
+    // ---- voice ----
+    /// Request TTS/voice delivery (--voice).
+    #[serde(default)]
+    pub voice: bool,
+
+    // ---- attention (workflow) ----
+    /// Requesting attention with a specific kind (--attention[=kind]).
+    /// Valid: authz | decision | blocked | help. Default: blocked.
+    #[serde(default)]
+    pub attention: Option<String>,
+
+    // ---- compat flags ----
+    /// No-op (--card).
+    #[serde(default)]
+    pub card: bool,
+    /// No-op (--text).
+    #[serde(default)]
+    pub text: bool,
+    /// Passthrough (--anyway).
+    #[serde(default)]
+    pub anyway: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -137,6 +207,8 @@ pub struct SessionSummary {
     pub last_final_output_turn_id: Option<String>,
     pub last_final_output: Option<String>,
     pub adopted_from: Option<AdoptedFrom>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_attention: Option<AgentAttention>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -216,6 +288,17 @@ impl From<&Session> for SessionSummary {
             last_final_output_turn_id: value.last_final_output_turn_id.clone(),
             last_final_output: value.last_final_output.clone(),
             adopted_from: value.adopted_from.clone(),
+            agent_attention: value.agent_attention.clone(),
         }
     }
+}
+
+/// Request body for `POST /api/attention` — aligned with botmux parity.
+/// Accepts both camelCase (sessionId) and snake_case (session_id).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AttentionRequest {
+    #[serde(alias = "sessionId")]
+    pub session_id: String,
+    pub kind: String,
+    pub reason: String,
 }

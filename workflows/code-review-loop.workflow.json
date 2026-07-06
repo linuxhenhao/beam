@@ -17,8 +17,8 @@
     "implement": {
       "type": "subagent",
       "bot": "cli_canary_PLACEHOLDER",
-      "description": "Implementer agent. Produces a JSON {code, summary}. On second+ iterations, picks up `${reviewDecision.previous.comment}` from the prior reject as guidance.",
-      "prompt": "实现以下任务：${params.task}\n\n上一轮 review 反馈（如有）：${reviewDecision.previous.comment}\n\n返回 JSON: {\"code\": string, \"summary\": string}",
+      "description": "Implementer agent. Produces a JSON {summary, code}. On second+ iterations, picks up `${reviewDecision.previous.comment}` from the prior reject as guidance.",
+      "prompt": "任务：\n${params.task}\n\n上一轮 review 反馈（如有）：\n${reviewDecision.previous.comment}\n\n实现这个变更。返回 JSON：\n{\"summary\":\"简短实现总结\",\"code\":\"关键代码或补丁摘要\"}",
       "outputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -34,7 +34,7 @@
       "bot": "cli_canary_PLACEHOLDER",
       "depends": ["implement"],
       "description": "Reviewer agent. Produces preview (shown on approval card) + summary (full feedback). Stays a separate node from reviewDecision so reviewDecision's humanGate.before can $ref this output (designed in /tmp/wf-loop-v02.md §3.1 — humanGate.before cannot read same-node output).",
-      "prompt": "审查以下代码：\n\n${implement.output.code}\n\n实现总结：${implement.output.summary}\n\n返回 JSON: {\"preview\": string, \"summary\": string} — preview 用于审批卡片预览（<200 字符），summary 是详细评审意见。",
+      "prompt": "审查这个实现的正确性、遗漏边界和测试缺口。\n\n代码或补丁摘要：\n${implement.output.code}\n\n实现总结：\n${implement.output.summary}\n\n返回 JSON：\n{\"preview\":\"200 字以内的一句话审批摘要\",\"summary\":\"详细评审意见\"}",
       "outputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",

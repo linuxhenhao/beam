@@ -39,6 +39,17 @@ This file is a working queue, not a product spec. Before implementing an item, v
 - Ensure human gates, ask hooks, and external side effects write terminal events.
 - Avoid duplicate side-effect execution during retry or cold recovery.
 
+### Rust Send Parity
+
+- **Status:** ✅ Completed — key semantic gaps filled; known limitations below. Implemented: CLI flags, mention hard gates, target/quote rules, voice error, partial attachment failure, multilingual prompt, mention-back sender accuracy, attention state reporting/clearing and constraints, images inline in card, bot-to-bot auto mention, minimal human-first footer subset, send marker dedup, quote target withdrawn fallback, off-topic sub-bot hint. See "本轮实现完成" in `docs/plans/2026-07-05-beam-send-parity-plan.md` for details.
+- **Plan:** `docs/plans/2026-07-05-beam-send-parity-plan.md`
+- **Known limitations:** footer is a minimal human-first subset (full oncall/roster is future enhancement); off-topic hint is delivered via daemon warn log, not inline Lark message hint.
+- **CLI flags:** `--mention` / `--mention-back` / `--no-mention` / `--content-file` / `--files` / `--images` / `--top-level` / `--chat-id` / `--into` / `--quote` / `--no-quote` / `--card` / `--text` / `--anyway` / `--attention` / `--voice`
+- **Daemon delivery:** session/bot resolution, file/image upload, partial attachment failure handling (does not retry main message).
+- **Target/quote rules:** chat scope quote chain, thread scope default reply, `--top-level` forces top-level, `--no-quote` disables quoting.
+- **Voice:** explicitly rejected with a clear error when TTS is unavailable.
+- **Backward compatibility:** old `{ "content": "..." }` requests are delegated to the legacy delivery path.
+
 ### Release and Operations
 
 - Keep release workflow semantics aligned with `release-plz` and package-prefixed tags.

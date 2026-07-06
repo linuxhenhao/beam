@@ -5,8 +5,8 @@ use std::{os::unix::process::CommandExt, process::Command as StdCommand};
 use anyhow::{Context, Result, bail};
 use beam_core::{
     ApiHealth, BeamPaths, BotConfig, CreateSessionRequest, DaemonRuntimeState, FinalOutputRequest,
-    RestartSessionRequest, ResumeSessionRequest, Session, SessionInputRequest, SessionStatus,
-    SessionSummary,
+    MentionTarget, RestartSessionRequest, ResumeSessionRequest, Session, SessionInputRequest,
+    SessionStatus, SessionSummary,
 };
 use clap::{Args, Parser, Subcommand};
 use reqwest::Client;
@@ -47,9 +47,7 @@ enum Command {
         #[command(subcommand)]
         command: workflow_cli::WorkflowCommand,
     },
-    Send {
-        content: Option<String>,
-    },
+    Send(SendArgs),
     History(HistoryArgs),
     Quoted(QuotedArgs),
     Bots {
@@ -154,6 +152,237 @@ struct SessionAdoptArgs {
     cli_bin: String,
     #[arg(long)]
     title: Option<String>,
+}
+
+/// beam send — structured message delivery to Feishu.
+///
+/// Content can come from positional arg, stdin, or --content-file.
+/// Exactly one mention policy MUST be chosen: --mention-back, --mention, or --no-mention.
+#[derive(Debug, Args)]
+struct SendArgs {
+    /// Message body (positional). If omitted, reads from stdin.
+    content: Option<String>,
+
+    /// Mention someone by open_id[:name]; may be repeated.
+    #[arg(long = "mention", value_name = "OPEN_ID[:NAME]")]
+    mention: Vec<String>,
+
+    /// Mention the session's triggering sender.
+    #[arg(long = "mention-back")]
+    mention_back: bool,
+
+    /// Suppress all @-mentions in the message and footer.
+    #[arg(long = "no-mention")]
+    no_mention: bool,
+
+    /// Read message body from a file path.
+    #[arg(long = "content-file", value_name = "PATH")]
+    content_file: Option<PathBuf>,
+
+    /// Attach files (repeatable). Alias: --file.
+    #[arg(long = "files", visible_alias = "file", value_name = "PATH")]
+    files: Vec<String>,
+
+    /// Inline images in an interactive card (repeatable). Alias: --image.
+    #[arg(long = "images", visible_alias = "image", value_name = "PATH")]
+    images: Vec<String>,
+
+    /// Force sending as a top-level chat message (not a reply).
+    #[arg(long = "top-level")]
+    top_level: bool,
+
+    /// Target a specific chat by oc_xxx id.
+    #[arg(long = "chat-id", value_name = "OC_XXX")]
+    chat_id: Option<String>,
+
+    /// Send into a specific thread (message id).
+    #[arg(long = "into", value_name = "MESSAGE_ID")]
+    into: Option<String>,
+
+    /// Explicitly quote a specific message id.
+    #[arg(long = "quote", value_name = "MESSAGE_ID")]
+    quote: Option<String>,
+
+    /// Disable automatic quoting in chat scope.
+    #[arg(long = "no-quote")]
+    no_quote: bool,
+
+    /// (compat no-op) Explicitly send as interactive card.
+    #[arg(long = "card")]
+    card: bool,
+
+    /// (compat no-op) Explicitly send as text.
+    #[arg(long = "text")]
+    text: bool,
+
+    /// (compat) Pass through anyway flag.
+    #[arg(long = "anyway")]
+    anyway: bool,
+
+    /// Request attention with a specific kind (authz|decision|blocked|help).
+    /// Defaults to "blocked" when used without a value.
+    #[arg(long = "attention", value_name = "KIND", num_args = 0..=1, default_missing_value = "blocked")]
+    attention: Option<String>,
+
+    /// Request TTS/voice delivery. NOT YET SUPPORTED — daemon will reject with a clear error.
+    #[arg(long = "voice")]
+    voice: bool,
+}
+
+/// Parse a --mention value of the form "open_id[:name]" into a MentionTarget.
+fn parse_mention(raw: &str) -> Result<MentionTarget> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        bail!("--mention value must not be empty");
+    }
+    if let Some((open_id, name)) = trimmed.split_once(':') {
+        let open_id = open_id.trim();
+        let name = name.trim();
+        if open_id.is_empty() {
+            bail!("--mention open_id must not be empty in \"{}\"", trimmed);
+        }
+        Ok(MentionTarget {
+            open_id: open_id.to_string(),
+            name: if name.is_empty() {
+                None
+            } else {
+                Some(name.to_string())
+            },
+        })
+    } else {
+        Ok(MentionTarget {
+            open_id: trimmed.to_string(),
+            name: None,
+        })
+    }
+}
+
+/// Build a FinalOutputRequest from parsed CLI args, validating conflicts.
+fn build_send_request(args: SendArgs) -> Result<FinalOutputRequest> {
+    // --- validate mention policy conflicts ---
+    let has_explicit_mentions = !args.mention.is_empty();
+    let mention_count = [has_explicit_mentions, args.mention_back, args.no_mention]
+        .iter()
+        .filter(|&&v| v)
+        .count();
+    if mention_count > 1 {
+        bail!(
+            "incompatible mention flags: --no-mention cannot be combined with --mention or --mention-back. \
+             Choose exactly one mention policy."
+        );
+    }
+    if !has_explicit_mentions && !args.mention_back && !args.no_mention {
+        bail!(
+            "no mention decision: you must choose exactly one of --mention-back, \
+             --mention <open_id[:name]>, or --no-mention for every beam send. \
+             The daemon will refuse messages without an explicit mention policy."
+        );
+    }
+
+    // --- validate --attention kind ---
+    if let Some(ref kind) = args.attention {
+        let allowed = ["authz", "decision", "blocked", "help"];
+        if !allowed.contains(&kind.as_str()) {
+            bail!(
+                "invalid attention kind \"{}\": must be one of {}",
+                kind,
+                allowed.join("|")
+            );
+        }
+    }
+
+    // --- build mentions ---
+    let mentions: Vec<MentionTarget> = args
+        .mention
+        .iter()
+        .map(|raw| parse_mention(raw))
+        .collect::<Result<Vec<_>>>()?;
+
+    // --- read content ---
+    let content = read_send_content_v2(args.content, args.content_file.as_deref())?;
+
+    // --- validate --attention usage constraints (botmux parity: attentionUsageError) ---
+    if args.attention.is_some() {
+        if args.top_level {
+            bail!(
+                "--attention cannot be combined with --top-level. Attention is for the current session context only."
+            );
+        }
+        if args.chat_id.is_some() {
+            bail!(
+                "--attention cannot be combined with --chat-id. Attention is for the current session context only."
+            );
+        }
+        if args.into.is_some() {
+            bail!(
+                "--attention cannot be combined with --into. Attention is for the current session context only."
+            );
+        }
+        if args.voice {
+            bail!(
+                "--attention cannot be combined with --voice. Attention requires a text/card message."
+            );
+        }
+        if content.trim().is_empty() {
+            bail!("--attention requires a non-empty text reason in the message body.");
+        }
+    }
+
+    Ok(FinalOutputRequest {
+        content,
+        mentions,
+        mention_back: args.mention_back,
+        no_mention: args.no_mention,
+        files: args.files,
+        images: args.images,
+        top_level: args.top_level,
+        chat_id: args.chat_id,
+        into: args.into,
+        quote: args.quote,
+        no_quote: args.no_quote,
+        voice: args.voice,
+        attention: args.attention,
+        card: args.card,
+        text: args.text,
+        anyway: args.anyway,
+    })
+}
+
+fn read_send_content_v2(
+    content_arg: Option<String>,
+    content_file: Option<&Path>,
+) -> Result<String> {
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(ref file_path) = content_file {
+        let file_content = std::fs::read_to_string(file_path)
+            .with_context(|| format!("failed to read content file: {}", file_path.display()))?;
+        let trimmed = file_content.trim_end().to_string();
+        if !trimmed.is_empty() {
+            parts.push(trimmed);
+        }
+    }
+
+    if let Some(content) = content_arg {
+        let trimmed = content.trim().to_string();
+        if !trimmed.is_empty() {
+            parts.push(trimmed);
+        }
+    }
+
+    if !parts.is_empty() {
+        return Ok(parts.join("\n"));
+    }
+
+    // Neither --content-file nor positional: read from stdin.
+    let mut stdin_body = String::new();
+    use std::io::Read;
+    std::io::stdin().read_to_string(&mut stdin_body)?;
+    let stdin_body = stdin_body.trim_end().to_string();
+    if stdin_body.is_empty() {
+        bail!("send content is empty (provide positional arg, --content-file, or stdin)");
+    }
+    Ok(stdin_body)
 }
 
 #[derive(Debug, Args)]
@@ -821,16 +1050,43 @@ fn spawn_background_daemon(exe: &Path, paths: &BeamPaths) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BotInfoEntry, Cli, Command, SessionCommand, active_sessions, bin_candidates_for_cli_id,
-        default_cli_args_for_cli_id, discover_session_id_from_pid, format_bot_info_entries_for_cli,
-        format_duration, parse_migrate_flags, resolve_allowed_users, setup_backup_file,
+        BotInfoEntry, Cli, Command, SendArgs, SessionCommand, active_sessions,
+        bin_candidates_for_cli_id, build_send_request, default_cli_args_for_cli_id,
+        discover_session_id_from_pid, format_bot_info_entries_for_cli, format_duration,
+        parse_mention, parse_migrate_flags, resolve_allowed_users, setup_backup_file,
     };
     use beam_core::{BeamPaths, SessionStatus, SessionSummary};
     use chrono::Utc;
-    use clap::Parser;
+    use clap::{FromArgMatches, Parser};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Parse SendArgs from CLI-like args in tests without deriving Parser on SendArgs.
+    /// Callers pass args as if run from the shell, e.g. `["beam", "send", "--mention-back", "hello"]`.
+    fn parse_send_args<I, T>(args: I) -> Result<SendArgs, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        use clap::Args;
+        let raw: Vec<std::ffi::OsString> = args.into_iter().map(|a| a.into()).collect();
+        // Skip binary name (index 0) and optional "send" subcommand (index 1).
+        let start = if raw.len() > 1 && raw[1] == "send" {
+            2
+        } else {
+            1
+        };
+        // try_get_matches_from strips the first arg (binary name), so prepend a dummy.
+        let mut input: Vec<std::ffi::OsString> = vec!["_".into()];
+        if start < raw.len() {
+            input.extend(raw[start..].iter().cloned());
+        }
+        let cmd = clap::Command::new("send");
+        let cmd = SendArgs::augment_args(cmd);
+        let matches = cmd.try_get_matches_from(&input)?;
+        SendArgs::from_arg_matches(&matches).map_err(|e| e.format(&mut clap::Command::new("send")))
+    }
 
     fn temp_root(label: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -1016,6 +1272,7 @@ mod tests {
             last_final_output_turn_id: None,
             last_final_output: None,
             adopted_from: None,
+            agent_attention: None,
         }
     }
 
@@ -1074,7 +1331,10 @@ mod tests {
         );
         // single-candidate CLIs
         assert_eq!(bin_candidates_for_cli_id("codex"), Some(&["codex"][..]));
-        assert_eq!(bin_candidates_for_cli_id("claude-code"), Some(&["claude"][..]));
+        assert_eq!(
+            bin_candidates_for_cli_id("claude-code"),
+            Some(&["claude"][..])
+        );
         assert_eq!(bin_candidates_for_cli_id("antigravity"), Some(&["agy"][..]));
     }
 
@@ -1122,6 +1382,325 @@ mod tests {
     fn resolve_allowed_users_trims_whitespace_and_filters_empty() {
         let result = resolve_allowed_users("  ou_a  ,  , ou_b , ", None);
         assert_eq!(result, vec!["ou_a", "ou_b"]);
+    }
+
+    // ---- beam send CLI parse tests ----
+
+    #[test]
+    fn send_parse_mention_back_basic() {
+        let args = parse_send_args(["beam", "send", "--mention-back", "hello world"]);
+        let args = args.expect("parse send");
+        assert!(args.mention_back);
+        assert!(!args.no_mention);
+        assert!(args.mention.is_empty());
+    }
+
+    #[test]
+    fn send_parse_no_mention() {
+        let args = parse_send_args(["beam", "send", "--no-mention", "quiet log"]);
+        let args = args.expect("parse no-mention");
+        assert!(args.no_mention);
+        assert!(!args.mention_back);
+    }
+
+    #[test]
+    fn send_parse_multiple_mentions() {
+        let args = parse_send_args([
+            "beam",
+            "send",
+            "--mention",
+            "ou_abc:Alice",
+            "--mention",
+            "ou_def",
+            "hey folks",
+        ]);
+        let args = args.expect("parse multi mention");
+        assert_eq!(args.mention.len(), 2);
+        assert_eq!(args.mention[0], "ou_abc:Alice");
+        assert_eq!(args.mention[1], "ou_def");
+    }
+
+    #[test]
+    fn send_parse_content_file() {
+        let args = parse_send_args([
+            "beam",
+            "send",
+            "--mention-back",
+            "--content-file",
+            "/tmp/msg.txt",
+        ]);
+        let args = args.expect("parse content-file");
+        assert!(args.content_file.is_some());
+        assert_eq!(
+            args.content_file.as_ref().unwrap().to_str().unwrap(),
+            "/tmp/msg.txt"
+        );
+    }
+
+    #[test]
+    fn send_parse_files_and_images() {
+        let args = parse_send_args([
+            "beam",
+            "send",
+            "--mention-back",
+            "hello",
+            "--files",
+            "a.pdf",
+            "--files",
+            "b.txt",
+            "--images",
+            "img1.png",
+            "--image",
+            "img2.jpg",
+        ]);
+        let args = args.expect("parse files/images");
+        assert_eq!(args.files.len(), 2);
+        assert_eq!(args.images.len(), 2);
+    }
+
+    #[test]
+    fn send_parse_file_alias() {
+        let args = parse_send_args([
+            "beam",
+            "send",
+            "--mention-back",
+            "hello",
+            "--file",
+            "single.pdf",
+        ]);
+        let args = args.expect("parse --file alias");
+        assert_eq!(args.files.len(), 1);
+        assert_eq!(args.files[0], "single.pdf");
+    }
+
+    #[test]
+    fn send_parse_targeting_flags() {
+        let args = parse_send_args([
+            "beam",
+            "send",
+            "--no-mention",
+            "--top-level",
+            "--chat-id",
+            "oc_test123",
+            "--into",
+            "om_thread1",
+            "--quote",
+            "om_ref1",
+            "--no-quote",
+            "text",
+        ]);
+        let args = args.expect("parse targeting");
+        assert!(args.top_level);
+        assert_eq!(args.chat_id.as_deref(), Some("oc_test123"));
+        assert_eq!(args.into.as_deref(), Some("om_thread1"));
+        assert_eq!(args.quote.as_deref(), Some("om_ref1"));
+        assert!(args.no_quote);
+    }
+
+    #[test]
+    fn send_parse_attention_with_kind() {
+        let args = parse_send_args([
+            "beam",
+            "send",
+            "--mention-back",
+            "hello",
+            "--attention=decision",
+        ]);
+        let args = args.expect("parse attention=decision");
+        assert_eq!(args.attention.as_deref(), Some("decision"));
+    }
+
+    #[test]
+    fn send_parse_attention_default() {
+        let args = parse_send_args(["beam", "send", "--mention-back", "hello", "--attention"]);
+        let args = args.expect("parse attention default");
+        assert_eq!(args.attention.as_deref(), Some("blocked"));
+    }
+
+    #[test]
+    fn send_parse_voice_flag() {
+        let args = parse_send_args(["beam", "send", "--no-mention", "test", "--voice"]);
+        let args = args.expect("parse voice");
+        assert!(args.voice);
+    }
+
+    #[test]
+    fn send_parse_anyway_flag() {
+        let args = parse_send_args(["beam", "send", "--no-mention", "test", "--anyway"]);
+        let args = args.expect("parse anyway");
+        assert!(args.anyway);
+    }
+
+    #[test]
+    fn send_parse_card_text_noop() {
+        let args = parse_send_args([
+            "beam",
+            "send",
+            "--mention-back",
+            "hello",
+            "--card",
+            "--text",
+        ]);
+        let args = args.expect("parse card/text");
+        assert!(args.card);
+        assert!(args.text);
+    }
+
+    #[test]
+    fn send_build_rejects_no_mention_decision() {
+        let args = parse_send_args(["beam", "send", "hello"]).expect("parse");
+        let err = build_send_request(args).expect_err("no mention should fail");
+        assert!(
+            err.to_string().contains("no mention decision")
+                || err.to_string().contains("must choose")
+        );
+    }
+
+    #[test]
+    fn send_build_rejects_invalid_attention_kind() {
+        let args = parse_send_args([
+            "beam",
+            "send",
+            "--mention-back",
+            "hello",
+            "--attention=invalid_kind",
+        ])
+        .expect("parse");
+        let err = build_send_request(args).expect_err("invalid attention should fail");
+        assert!(err.to_string().contains("invalid attention kind"));
+    }
+
+    // --- attention usage constraint tests (botmux parity) ---
+
+    #[test]
+    fn send_build_rejects_attention_with_top_level() {
+        let args = parse_send_args([
+            "beam",
+            "send",
+            "--mention-back",
+            "hello",
+            "--attention",
+            "--top-level",
+        ])
+        .expect("parse");
+        let err = build_send_request(args).expect_err("attention + top-level should fail");
+        assert!(
+            err.to_string()
+                .contains("--attention cannot be combined with --top-level")
+        );
+    }
+
+    #[test]
+    fn send_build_rejects_attention_with_chat_id() {
+        let args = parse_send_args([
+            "beam",
+            "send",
+            "--mention-back",
+            "hello",
+            "--attention",
+            "--chat-id",
+            "oc_test123",
+        ])
+        .expect("parse");
+        let err = build_send_request(args).expect_err("attention + chat-id should fail");
+        assert!(
+            err.to_string()
+                .contains("--attention cannot be combined with --chat-id")
+        );
+    }
+
+    #[test]
+    fn send_build_rejects_attention_with_into() {
+        let args = parse_send_args([
+            "beam",
+            "send",
+            "--mention-back",
+            "hello",
+            "--attention",
+            "--into",
+            "om_test123",
+        ])
+        .expect("parse");
+        let err = build_send_request(args).expect_err("attention + into should fail");
+        assert!(
+            err.to_string()
+                .contains("--attention cannot be combined with --into")
+        );
+    }
+
+    #[test]
+    fn send_build_rejects_attention_with_voice() {
+        let args = parse_send_args([
+            "beam",
+            "send",
+            "--mention-back",
+            "hello",
+            "--attention",
+            "--voice",
+        ])
+        .expect("parse");
+        let err = build_send_request(args).expect_err("attention + voice should fail");
+        assert!(
+            err.to_string()
+                .contains("--attention cannot be combined with --voice")
+        );
+    }
+
+    #[test]
+    fn send_build_passes_voice_to_daemon() {
+        let args =
+            parse_send_args(["beam", "send", "--mention-back", "hello", "--voice"]).expect("parse");
+        let req =
+            build_send_request(args).expect("voice should not fail at CLI; daemon rejects it");
+        assert!(req.voice, "voice flag must be passed to daemon");
+        assert!(req.mention_back);
+        assert_eq!(req.content, "hello");
+    }
+
+    #[test]
+    fn send_build_rejects_no_mention_with_mention() {
+        let args = parse_send_args([
+            "beam",
+            "send",
+            "--no-mention",
+            "--mention",
+            "ou_abc:Alice",
+            "hello",
+        ])
+        .expect("parse");
+        let err = build_send_request(args).expect_err("conflict should fail");
+        assert!(
+            err.to_string().contains("incompatible")
+                || err.to_string().contains("cannot be combined")
+        );
+    }
+
+    #[test]
+    fn send_build_rejects_no_mention_with_mention_back() {
+        let args = parse_send_args(["beam", "send", "--no-mention", "--mention-back", "hello"])
+            .expect("parse");
+        let err = build_send_request(args).expect_err("conflict should fail");
+        assert!(
+            err.to_string().contains("incompatible")
+                || err.to_string().contains("cannot be combined")
+        );
+    }
+
+    #[test]
+    fn send_parse_mention_valid_formats() {
+        let t1 = parse_mention("ou_123:Alice").expect("name parse");
+        assert_eq!(t1.open_id, "ou_123");
+        assert_eq!(t1.name.as_deref(), Some("Alice"));
+
+        let t2 = parse_mention("ou_456").expect("bare parse");
+        assert_eq!(t2.open_id, "ou_456");
+        assert_eq!(t2.name, None);
+    }
+
+    #[test]
+    fn send_parse_mention_rejects_empty() {
+        assert!(parse_mention("").is_err());
+        assert!(parse_mention(":Name").is_err());
     }
 }
 
@@ -1452,13 +2031,13 @@ async fn main() -> Result<()> {
                 Command::Workflow { command } => {
                     workflow_cli::handle(command, &paths).await?;
                 }
-                Command::Send { content } => {
-                    let body = read_send_content(content)?;
+                Command::Send(args) => {
+                    let req = build_send_request(args)?;
                     let session_id = discover_session_id(&paths)?;
                     let (client, base) = api_client(&paths).await?;
                     let resp = client
                         .post(format!("{}/sessions/{}/final-output", base, session_id))
-                        .json(&FinalOutputRequest { content: body })
+                        .json(&req)
                         .send()
                         .await?;
                     if !resp.status().is_success() {
@@ -1820,8 +2399,7 @@ async fn prompt_setup_bot() -> Result<BotConfig> {
     let credentials = register_app::prompt_credentials().await?;
     let cli_id = prompt_cli_id()?;
     let cli_args = default_cli_args_for_cli_id(&cli_id);
-    let cli_bin = probe_cli_bin(&cli_id)
-        .filter(|bin| bin != &cli_id);
+    let cli_bin = probe_cli_bin(&cli_id).filter(|bin| bin != &cli_id);
     let working_dir = {
         let value = ask_line("默认工作目录 [~]: ")?;
         if value.trim().is_empty() {
@@ -1844,7 +2422,9 @@ async fn prompt_setup_bot() -> Result<BotConfig> {
         let resolved = resolve_allowed_users(&value, credentials.user_open_id.as_deref());
         if credentials.user_open_id.is_none() && resolved.is_empty() {
             println!("   ⚠️  未设置允许用户：当前为开放模式，任何人都可以和机器人对话。");
-            println!("   💡 可在 bots.json 中手动填写 allowedUsers 字段（open_id 以 ou_ 开头），或后续用 /grant 命令授权。");
+            println!(
+                "   💡 可在 bots.json 中手动填写 allowedUsers 字段（open_id 以 ou_ 开头），或后续用 /grant 命令授权。"
+            );
         }
         resolved
     };

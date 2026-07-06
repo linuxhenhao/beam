@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use beam_core::{
     BeamPaths, CliUsageLimitKind, CliUsageLimitState, DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS,
     DaemonToWorker, DisplayMode, InitConfig, ScreenAnalyzerConfig, ScreenStatus, TermActionKey,
-    TuiPromptOption, WorkerToDaemon,
+    TranscriptChoice, TuiPromptOption, WorkerToDaemon,
 };
 use image::{ColorType, ImageBuffer, ImageEncoder, Rgba, codecs::png::PngEncoder};
 use reqwest::multipart::{Form, Part};
@@ -28,6 +28,7 @@ use unicode_width::UnicodeWidthChar;
 use uuid::Uuid;
 
 use crate::adapter::CliAdapter;
+use crate::adapter::{AdapterKind, ResolveOutcome};
 use crate::backend::{SessionBackend, SpawnOpts, ZellijBackend, ZellijObserveBackend};
 
 fn render_screen_for_display_mode(screen: &str, mode: DisplayMode) -> String {
@@ -37,7 +38,20 @@ fn render_screen_for_display_mode(screen: &str, mode: DisplayMode) -> String {
     }
 }
 
-const SCREEN_ANALYZER_SYSTEM_PROMPT: &str = "You are a terminal screen analyzer. Determine whether the CLI is showing a blocking interactive prompt. Return only JSON with fields needsInteraction, description, options, multiSelect, toggleKey, confirmKey, checkAgainWhen. checkAgainWhen must be one of content_changed, after_5s, after_10s, not_needed.";
+const SCREEN_ANALYZER_SYSTEM_PROMPT: &str = r#"You analyze a terminal screen from an AI coding CLI.
+
+Decide whether the CLI is waiting for user interaction, such as a menu choice, permission prompt, confirmation, text input, or multi-select. If the CLI is still working, printing output, or only showing status text, set needsInteraction=false.
+
+Return only JSON:
+{
+  "needsInteraction": boolean,
+  "description": string,
+  "options": [{"label": string, "text": string, "selected": boolean}],
+  "multiSelect": boolean,
+  "toggleKey": string|null,
+  "confirmKey": string|null,
+  "checkAgainWhen": "content_changed"|"after_5s"|"after_10s"|"not_needed"
+}"#;
 
 #[derive(Debug, Clone, Default)]
 struct AnalyzerRuntime {
@@ -568,6 +582,16 @@ fn is_fullwidth(ch: char) -> bool {
     matches!(UnicodeWidthChar::width(ch), Some(2))
 }
 
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
 fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -835,7 +859,7 @@ async fn maybe_send_screenshot_upload(
     if app_id == "local" || app_secret.is_empty() {
         return;
     }
-    let hash = format!("{:x}", Sha256::digest(strip_ansi(screen).as_bytes()));
+    let hash = lower_hex(&Sha256::digest(strip_ansi(screen).as_bytes()));
     {
         let guard = last_uploaded_hash.lock().await;
         if guard.as_deref() == Some(hash.as_str()) {
@@ -1140,7 +1164,7 @@ pub async fn run(init: InitConfig) -> Result<()> {
                         .lock()
                         .await
                         .classify(&screen, base_status, now_ms);
-                let rendered_hash = format!("{:x}", Sha256::digest(rendered.as_bytes()));
+                let rendered_hash = lower_hex(&Sha256::digest(rendered.as_bytes()));
                 {
                     let guard = sample_last_broadcast_hash.lock().await;
                     hash_changed = guard.as_deref() != Some(&rendered_hash);
@@ -1381,6 +1405,80 @@ pub async fn run(init: InitConfig) -> Result<()> {
         }
     }
 
+    // Init-time transcript source resolution for OpenCode adapter.
+    // When cli_session_id is not yet known (typical for adopted sessions),
+    // try to resolve it before entering the main message loop.
+    {
+        let adapter_guard = adapter.lock().await;
+        if let AdapterKind::OpenCode(ref opencode_state) = adapter_guard.kind {
+            if opencode_state.cli_session_id.is_none() {
+                let backend_guard = backend.lock().await;
+                let resolution = crate::adapters::opencode::resolve_transcript_source(
+                    opencode_state,
+                    backend_guard.as_ref(),
+                )
+                .await
+                .unwrap_or_else(|err| {
+                    warn!("resolve_transcript_source error: {:?}", err);
+                    ResolveOutcome::NotFound {
+                        reason: format!("OpenCode transcript source resolution failed: {}", err),
+                    }
+                });
+                drop(backend_guard);
+                match resolution {
+                    ResolveOutcome::Found(source) => {
+                        send_message(
+                            &stdout,
+                            &WorkerToDaemon::CliSessionId {
+                                cli_session_id: source.session_id.clone(),
+                            },
+                        )
+                        .await?;
+                        // Also set in adapter state for subsequent poll/write_input.
+                        drop(adapter_guard);
+                        let mut adapter_mut = adapter.lock().await;
+                        if let AdapterKind::OpenCode(ref mut state) = adapter_mut.kind {
+                            state.expected_session_id = Some(source.session_id.clone());
+                            state.cli_session_id = Some(source.session_id.clone());
+                        }
+                        info!(
+                            "transcript source resolved automatically: session={}",
+                            source.session_id
+                        );
+                    }
+                    ResolveOutcome::Ambiguous { candidates, .. } => {
+                        warn!(
+                            "transcript source ambiguous ({} candidates), requesting user choice",
+                            candidates.len()
+                        );
+                        let turn_id = Uuid::new_v4().to_string();
+                        let choices: Vec<TranscriptChoice> = candidates
+                            .iter()
+                            .map(|c| TranscriptChoice {
+                                session_id: c.session_id.clone(),
+                                label: format!("{} ({})", c.session_id, c.db_path.display()),
+                            })
+                            .collect();
+                        send_message(
+                            &stdout,
+                            &WorkerToDaemon::TranscriptChoices {
+                                candidates: choices,
+                                turn_id: turn_id.clone(),
+                            },
+                        )
+                        .await?;
+                        drop(adapter_guard);
+                    }
+                    ResolveOutcome::NotFound { reason } => {
+                        warn!("transcript source not found: {}", reason);
+                        send_message(&stdout, &WorkerToDaemon::UserNotify { message: reason })
+                            .await?;
+                    }
+                }
+            }
+        }
+    }
+
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
     loop {
@@ -1476,7 +1574,7 @@ pub async fn run(init: InitConfig) -> Result<()> {
                     },
                 )
                 .await?;
-                let rendered_hash = format!("{:x}", Sha256::digest(rendered.as_bytes()));
+                let rendered_hash = lower_hex(&Sha256::digest(rendered.as_bytes()));
                 *last_broadcast_hash.lock().await = Some(rendered_hash);
                 if mode == DisplayMode::Screenshot {
                     maybe_send_screenshot_upload(
@@ -1545,6 +1643,17 @@ pub async fn run(init: InitConfig) -> Result<()> {
             }
             DaemonToWorker::TuiTextInput { keys, text } => {
                 handle_tui_text_input(&backend, &adapter, &analyzer_runtime, &keys, &text).await?;
+            }
+            DaemonToWorker::SetTranscriptSource { cli_session_id } => {
+                if let AdapterKind::OpenCode(ref mut state) = adapter.lock().await.kind {
+                    state.expected_session_id = Some(cli_session_id.clone());
+                    state.cli_session_id = Some(cli_session_id.clone());
+                }
+                info!(
+                    "transcript source set by user: session={}",
+                    cli_session_id
+                );
+                send_message(&stdout, &WorkerToDaemon::CliSessionId { cli_session_id }).await?;
             }
             DaemonToWorker::Init(_) => {}
         }

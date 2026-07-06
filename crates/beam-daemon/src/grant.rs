@@ -2,6 +2,8 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::card_i18n;
+
 /// TTL for grant pending entries: 10 minutes in milliseconds.
 pub const GRANT_PENDING_TTL_MS: i64 = 10 * 60 * 1000;
 
@@ -378,28 +380,36 @@ pub fn build_grant_card(
     quota: Option<u32>,
 ) -> serde_json::Value {
     let target_display = targets.join(", ");
-    let quota_text = quota
+    let quota_zh = quota
+        .map(|q| format!("\n额度：{} 条消息", q))
+        .unwrap_or_default();
+    let quota_en = quota
         .map(|q| format!("\nQuota: {} messages", q))
         .unwrap_or_default();
-    let title = format!("Grant access to @{}?{}", target_display, quota_text);
+    let title_zh = format!("授予 @{} 权限？{}", target_display, quota_zh);
+    let title_en = format!("Grant access to @{}?{}", target_display, quota_en);
 
     serde_json::json!({
         "config": { "wide_screen_mode": true },
         "header": {
             "template": "blue",
-            "title": { "tag": "plain_text", "content": "Permission Grant" },
+            "title": card_i18n::plain_text(None, "权限授权", "Permission Grant"),
         },
         "elements": [
             {
                 "tag": "markdown",
-                "content": title,
+                "content": title_en,
+                "i18n_content": {
+                    "zh_cn": title_zh,
+                    "en_us": title_en,
+                }
             },
             {
                 "tag": "action",
                 "actions": [
                     {
                         "tag": "button",
-                        "text": { "tag": "lark_md", "content": "仅本群授权 (Chat Only)" },
+                        "text": card_i18n::lark_md(None, "仅本群授权 (Chat Only)", "Chat Only"),
                         "type": "primary",
                         "value": serde_json::json!({
                             "action": "grant_chat",
@@ -411,7 +421,7 @@ pub fn build_grant_card(
                     },
                     {
                         "tag": "button",
-                        "text": { "tag": "lark_md", "content": "全局授权 (Global)" },
+                        "text": card_i18n::lark_md(None, "全局授权 (Global)", "Global"),
                         "type": "default",
                         "value": serde_json::json!({
                             "action": "grant_global",
@@ -423,7 +433,7 @@ pub fn build_grant_card(
                     },
                     {
                         "tag": "button",
-                        "text": { "tag": "lark_md", "content": "拒绝 (Deny)" },
+                        "text": card_i18n::lark_md(None, "拒绝 (Deny)", "Deny"),
                         "type": "danger",
                         "value": serde_json::json!({
                             "action": "grant_deny",
@@ -537,6 +547,22 @@ mod tests {
         assert!(matches!(cmd.action, GrantAction::Grant));
         assert_eq!(cmd.targets.len(), 1);
         assert_eq!(cmd.targets[0].open_id, "user1");
+    }
+
+    #[test]
+    fn build_grant_card_localizes_header() {
+        let card = build_grant_card(&["user1".to_string()], "nonce-1", "chat-1", None);
+
+        assert_eq!(
+            card.pointer("/header/title/i18n_content/zh_cn")
+                .and_then(serde_json::Value::as_str),
+            Some("权限授权")
+        );
+        assert_eq!(
+            card.pointer("/header/title/i18n_content/en_us")
+                .and_then(serde_json::Value::as_str),
+            Some("Permission Grant")
+        );
     }
 
     #[test]

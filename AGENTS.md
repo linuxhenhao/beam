@@ -36,6 +36,7 @@
 - Card lifecycle: `ensure_lark_streaming_card` (main new-card path) and `post_or_refresh_lark_session_card` (show-card/"Refresh" path) both create streaming cards. DO NOT call `start_pending_response_turn` on the streaming card — it marks the streaming card as the pending response target, causing `deliver_final_output_once` to PATCH-overwrite the terminal card with reply content.
 - When creating sessions via `create_session_internal`, resolve `lark_app_secret` from `state.bots` (like `build_init_from_session` does). An empty secret blocks screenshot uploads.
 - Place daemon API routes that the CLI `send` command calls (`/sessions/{id}/final-output`) in `open_routes`, not `protected_dashboard` (which requires a dashboard token).
+- 当需要某种功能时，优先使用 crates.io 上成熟的 Rust 库，而不是自行实现。
 
 ## Required GitHub repo settings
 

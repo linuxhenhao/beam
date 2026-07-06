@@ -11,8 +11,8 @@ use beam_core::{FinalOutputKind, InitConfig};
 use serde_json::Value;
 
 use crate::adapter::{
-    ClaudeState, PendingTurnKind, PollResult, SpawnSpec, SubmitResult, drain_jsonl, file_size,
-    normalize_history_text, realpath_cwd,
+    ClaudeState, PendingTurnKind, PollResult, ResolveOutcome, SpawnSpec, SubmitResult, drain_jsonl,
+    file_size, normalize_history_text, realpath_cwd,
 };
 use crate::backend::SessionBackend;
 
@@ -248,25 +248,59 @@ fn refresh_claude_pid_state(state: &mut ClaudeState) {
     let Some(pid) = state.cli_pid else {
         return;
     };
-    let path = state
-        .data_dir
-        .join("sessions")
-        .join(format!("{}.json", pid));
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return;
+    if let ResolveOutcome::Found((session_id, cwd, session_jsonl)) =
+        resolve_claude_session_via_pid(pid, &state.data_dir)
+    {
+        state.cli_session_id = Some(session_id);
+        state.session_jsonl = session_jsonl;
+        state.cli_cwd = cwd;
+    }
+}
+
+/// Resolve a Claude session's metadata via its PID.
+///
+/// Reads `<data_dir>/sessions/<pid>.json` and returns the
+/// `(session_id, cwd, session_jsonl_path)` triple, or
+/// [`ResolveOutcome::NotFound`] with a reason string.
+fn resolve_claude_session_via_pid(
+    pid: u32,
+    data_dir: &Path,
+) -> ResolveOutcome<(String, String, PathBuf)> {
+    let path = data_dir.join("sessions").join(format!("{}.json", pid));
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(e) => {
+            return ResolveOutcome::NotFound {
+                reason: format!("cannot read pid session file {}: {}", path.display(), e),
+            };
+        }
     };
-    let Ok(value) = serde_json::from_str::<Value>(&raw) else {
-        return;
+    let value = match serde_json::from_str::<Value>(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            return ResolveOutcome::NotFound {
+                reason: format!("invalid pid session json: {}", e),
+            };
+        }
     };
-    let Some(session_id) = value.get("sessionId").and_then(Value::as_str) else {
-        return;
+    let session_id = match value.get("sessionId").and_then(Value::as_str) {
+        Some(s) => s.to_string(),
+        None => {
+            return ResolveOutcome::NotFound {
+                reason: "sessionId not found in pid session file".to_string(),
+            };
+        }
     };
-    let Some(cwd) = value.get("cwd").and_then(Value::as_str) else {
-        return;
+    let cwd = match value.get("cwd").and_then(Value::as_str) {
+        Some(c) => c.to_string(),
+        None => {
+            return ResolveOutcome::NotFound {
+                reason: "cwd not found in pid session file".to_string(),
+            };
+        }
     };
-    state.cli_session_id = Some(session_id.to_string());
-    state.session_jsonl = claude_jsonl_path_for_session(session_id, cwd, &state.data_dir);
-    state.cli_cwd = cwd.to_string();
+    let session_jsonl = claude_jsonl_path_for_session(&session_id, &cwd, data_dir);
+    ResolveOutcome::Found((session_id, cwd, session_jsonl))
 }
 
 fn claude_submit_seen(path: &Path, from_byte: u64) -> Result<bool> {
@@ -689,5 +723,204 @@ mod tests {
         assert_eq!(round6.final_output.as_deref(), Some("turn2 answer"));
 
         let _ = std::fs::remove_file(path);
+    }
+
+    // ── pid-based strong anchoring ──────────────────────────────────
+
+    fn make_project_hash(cwd: &str) -> String {
+        use crate::adapter::realpath_cwd;
+        realpath_cwd(cwd)
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+    }
+
+    #[test]
+    fn pid_anchoring_resolves_session_jsonl_from_pid() {
+        // Set up mock data_dir:
+        //   sessions/<pid>.json → { sessionId, cwd }
+        //   projects/<hash>/<sessionId>.jsonl → transcript
+        let cwd_dir = temp_path("claude-cwd");
+        std::fs::create_dir_all(&cwd_dir).unwrap();
+        let cwd_canonical = std::fs::canonicalize(&cwd_dir).unwrap();
+        let cwd_str = cwd_canonical.display().to_string();
+
+        let data_dir = temp_path("claude-data");
+        let sessions_dir = data_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let session_content = serde_json::json!({
+            "sessionId": "real-sid-pid-anchor",
+            "cwd": &cwd_str
+        });
+        std::fs::write(sessions_dir.join("99999.json"), session_content.to_string()).unwrap();
+
+        let project_hash = make_project_hash(&cwd_str);
+        let projects_dir = data_dir.join("projects").join(&project_hash);
+        std::fs::create_dir_all(&projects_dir).unwrap();
+        let real_jsonl = projects_dir.join("real-sid-pid-anchor.jsonl");
+        std::fs::write(
+            &real_jsonl,
+            "{\"message\":{\"role\":\"user\",\"content\":\"hi from pid\"}}\n",
+        )
+        .unwrap();
+
+        // State: wrong session_jsonl initially, but pid is set
+        let mut state = ClaudeState {
+            data_dir: data_dir.clone(),
+            session_jsonl: data_dir
+                .join("projects")
+                .join("wrong-hash")
+                .join("wrong-sid.jsonl"),
+            cli_pid: Some(99999),
+            cli_cwd: cwd_str.clone(),
+            cli_session_id: None,
+            transcript_offset: 0,
+            pending_tail: String::new(),
+            pending_final_text: None,
+            pending_final_since: None,
+            emitted_final_text: None,
+            adopt_mode: false,
+            adopt_restored_from_metadata: false,
+            adopt_preamble_emitted: false,
+            pending_remote_user_inputs: VecDeque::new(),
+            active_turn: None,
+        };
+
+        // poll calls refresh_claude_pid_state internally
+        let _result = poll(&mut state).unwrap();
+
+        // After poll, the state should be corrected from pid
+        assert_eq!(
+            state.cli_session_id.as_deref(),
+            Some("real-sid-pid-anchor"),
+            "cli_session_id should be resolved from pid session file"
+        );
+        assert_eq!(
+            state.session_jsonl, real_jsonl,
+            "session_jsonl should point to the pid-resolved transcript"
+        );
+        assert_eq!(
+            state.cli_cwd, cwd_str,
+            "cli_cwd should be resolved from pid session file"
+        );
+
+        let _ = std::fs::remove_dir_all(&cwd_dir);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[test]
+    fn pid_anchoring_is_noop_when_pid_is_none() {
+        // When cli_pid is None, refresh_claude_pid_state should be a no-op
+        // and the state should remain unchanged.
+        let mut state = ClaudeState {
+            data_dir: PathBuf::new(),
+            session_jsonl: PathBuf::from("/original/path.jsonl"),
+            cli_pid: None,
+            cli_cwd: "/orig/cwd".to_string(),
+            cli_session_id: Some("orig-sid".to_string()),
+            transcript_offset: 42,
+            pending_tail: "tail".to_string(),
+            pending_final_text: None,
+            pending_final_since: None,
+            emitted_final_text: None,
+            adopt_mode: false,
+            adopt_restored_from_metadata: false,
+            adopt_preamble_emitted: false,
+            pending_remote_user_inputs: VecDeque::new(),
+            active_turn: None,
+        };
+        let session_jsonl_before = state.session_jsonl.clone();
+        let cli_session_id_before = state.cli_session_id.clone();
+        let cli_cwd_before = state.cli_cwd.clone();
+
+        let _result = poll(&mut state).unwrap();
+
+        assert_eq!(
+            state.session_jsonl, session_jsonl_before,
+            "session_jsonl should not change when pid is None"
+        );
+        assert_eq!(
+            state.cli_session_id, cli_session_id_before,
+            "cli_session_id should not change when pid is None"
+        );
+        assert_eq!(
+            state.cli_cwd, cli_cwd_before,
+            "cli_cwd should not change when pid is None"
+        );
+    }
+
+    #[test]
+    fn adopt_poll_with_pid_uses_corrected_transcript_for_preamble() {
+        let cwd_dir = temp_path("claude-preamble-cwd");
+        std::fs::create_dir_all(&cwd_dir).unwrap();
+        let cwd_canonical = std::fs::canonicalize(&cwd_dir).unwrap();
+        let cwd_str = cwd_canonical.display().to_string();
+
+        let data_dir = temp_path("claude-preamble-data");
+        let sessions_dir = data_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let session_content = serde_json::json!({
+            "sessionId": "pid-session-preamble",
+            "cwd": &cwd_str
+        });
+        std::fs::write(sessions_dir.join("11111.json"), session_content.to_string()).unwrap();
+
+        let project_hash = make_project_hash(&cwd_str);
+        let projects_dir = data_dir.join("projects").join(&project_hash);
+        std::fs::create_dir_all(&projects_dir).unwrap();
+        let real_jsonl = projects_dir.join("pid-session-preamble.jsonl");
+        std::fs::write(
+            &real_jsonl,
+            concat!(
+                "{\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"adopt question\"}]}}\n",
+                "{\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"adopt response\"}]}}\n"
+            ),
+        )
+        .unwrap();
+
+        let mut state = ClaudeState {
+            data_dir: data_dir.clone(),
+            // Intentionally wrong path — should be corrected by pid refresh
+            session_jsonl: data_dir
+                .join("projects")
+                .join("deadbeef")
+                .join("nope.jsonl"),
+            cli_pid: Some(11111),
+            cli_cwd: cwd_str.clone(),
+            cli_session_id: None,
+            transcript_offset: 0,
+            pending_tail: String::new(),
+            pending_final_text: None,
+            pending_final_since: None,
+            emitted_final_text: None,
+            adopt_mode: true,
+            adopt_restored_from_metadata: false,
+            adopt_preamble_emitted: false,
+            pending_remote_user_inputs: VecDeque::new(),
+            active_turn: None,
+        };
+
+        let first = poll(&mut state).unwrap();
+        // Preamble should come from the pid-corrected transcript
+        assert_eq!(
+            first.adopt_preamble,
+            Some(("adopt question".to_string(), "adopt response".to_string())),
+            "preamble should be from pid-resolved transcript"
+        );
+        assert!(first.final_output.is_none());
+
+        // Second poll should absorb history (preamble already emitted)
+        let second = poll(&mut state).unwrap();
+        assert!(second.adopt_preamble.is_none());
+        assert!(second.final_output.is_none());
+
+        let _ = std::fs::remove_dir_all(&cwd_dir);
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 }

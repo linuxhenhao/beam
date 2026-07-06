@@ -410,6 +410,7 @@ async fn run_workflow_subagent_session(
             prompt: with_workflow_output_protocol(&resolved_prompt),
             lark_app_id: "local".to_string(),
             owner_open_id: None,
+            locale: None,
             adopted_from: None,
         },
     )

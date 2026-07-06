@@ -711,7 +711,15 @@ pub async fn run_workflow_runtime_once(state: &AppState, run_id: &str, raw_def: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use beam_core::{BeamPaths, BootstrapWorkflowRunInput, bootstrap_workflow_run};
+    use crate::tests::test_helpers::*;
+    use crate::{
+        ParsedLarkCardAction, WorkflowTextCommand, parse_workflow_text_command,
+        prepare_retry_last_task, workflow_approval_target_message_id,
+    };
+    use beam_core::{
+        BeamPaths, BootstrapWorkflowRunInput, CliUsageLimitKind, CliUsageLimitState, ScreenStatus,
+        bootstrap_workflow_run,
+    };
     use serde_json::Value;
     use std::collections::BTreeMap;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1544,5 +1552,247 @@ mod tests {
         assert_eq!(body["alreadyTerminal"], true);
 
         let _ = std::fs::remove_dir_all(paths.root());
+    }
+
+    #[test]
+    fn parse_workflow_text_command_handles_run_and_cancel() {
+        // ── basic run with unquoted params ─────────────────────────
+        match parse_workflow_text_command("/workflow run demo.flow foo=bar baz=qux") {
+            Some(WorkflowTextCommand::Run {
+                workflow_id,
+                raw_params,
+            }) => {
+                assert_eq!(workflow_id, "demo.flow");
+                assert_eq!(raw_params.get("foo").map(String::as_str), Some("bar"));
+                assert_eq!(raw_params.get("baz").map(String::as_str), Some("qux"));
+            }
+            other => panic!("unexpected parse result: {:?}", other),
+        }
+
+        // ── double-quoted value with spaces ───────────────────────
+        match parse_workflow_text_command("/workflow run flow task=\"review and deploy PR #42\"") {
+            Some(WorkflowTextCommand::Run {
+                workflow_id,
+                raw_params,
+            }) => {
+                assert_eq!(workflow_id, "flow");
+                assert_eq!(
+                    raw_params.get("task").map(String::as_str),
+                    Some("review and deploy PR #42")
+                );
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // ── single-quoted value with spaces ───────────────────────
+        match parse_workflow_text_command("/workflow run flow task='review and deploy PR #42'") {
+            Some(WorkflowTextCommand::Run {
+                workflow_id,
+                raw_params,
+            }) => {
+                assert_eq!(workflow_id, "flow");
+                assert_eq!(
+                    raw_params.get("task").map(String::as_str),
+                    Some("review and deploy PR #42")
+                );
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // ── escaped double-quote inside double-quoted value ───────
+        match parse_workflow_text_command("/workflow run flow task=\"say \\\"hello\\\"\"") {
+            Some(WorkflowTextCommand::Run {
+                workflow_id,
+                raw_params,
+            }) => {
+                assert_eq!(workflow_id, "flow");
+                assert_eq!(
+                    raw_params.get("task").map(String::as_str),
+                    Some("say \"hello\"")
+                );
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // ── empty value ────────────────────────────────────────────
+        match parse_workflow_text_command("/workflow run flow foo=") {
+            Some(WorkflowTextCommand::Run {
+                workflow_id,
+                raw_params,
+            }) => {
+                assert_eq!(workflow_id, "flow");
+                assert_eq!(raw_params.get("foo").map(String::as_str), Some(""));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // ── mixed quoted and unquoted params ──────────────────────
+        match parse_workflow_text_command(
+            "/workflow run flow task=\"do stuff\" verbose=true count=10",
+        ) {
+            Some(WorkflowTextCommand::Run {
+                workflow_id,
+                raw_params,
+            }) => {
+                assert_eq!(workflow_id, "flow");
+                assert_eq!(raw_params.get("task").map(String::as_str), Some("do stuff"));
+                assert_eq!(raw_params.get("verbose").map(String::as_str), Some("true"));
+                assert_eq!(raw_params.get("count").map(String::as_str), Some("10"));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // ── JSON payload in single-quoted value ───────────────────
+        match parse_workflow_text_command("/workflow run flow payload='{\"a\":1}'") {
+            Some(WorkflowTextCommand::Run {
+                workflow_id,
+                raw_params,
+            }) => {
+                assert_eq!(workflow_id, "flow");
+                assert_eq!(
+                    raw_params.get("payload").map(String::as_str),
+                    Some("{\"a\":1}")
+                );
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // ── basic cancel ──────────────────────────────────────────
+        match parse_workflow_text_command("/workflow cancel run-123") {
+            Some(WorkflowTextCommand::Cancel { run_id }) => {
+                assert_eq!(run_id, "run-123");
+            }
+            other => panic!("unexpected parse result: {:?}", other),
+        }
+
+        // ── missing workflow id ────────────────────────────────────
+        match parse_workflow_text_command("/workflow run") {
+            Some(WorkflowTextCommand::Invalid { error, usage }) => {
+                assert_eq!(error, "缺少 workflow id");
+                assert!(usage.contains("/workflow run"));
+            }
+            other => panic!("unexpected parse result: {:?}", other),
+        }
+
+        // ── unclosed double quote ──────────────────────────────────
+        match parse_workflow_text_command("/workflow run flow task=\"unclosed") {
+            Some(WorkflowTextCommand::Invalid { error, .. }) => {
+                assert!(error.contains("参数引号不匹配"), "got: {error}");
+                assert!(error.contains("missing closing quote"), "got: {error}");
+            }
+            other => panic!("expected Invalid, got: {:?}", other),
+        }
+
+        // ── unclosed single quote ──────────────────────────────────
+        match parse_workflow_text_command("/workflow run flow task='unclosed") {
+            Some(WorkflowTextCommand::Invalid { error, .. }) => {
+                assert!(error.contains("参数引号不匹配"), "got: {error}");
+                assert!(error.contains("missing closing quote"), "got: {error}");
+            }
+            other => panic!("expected Invalid, got: {:?}", other),
+        }
+
+        // ── token without = ────────────────────────────────────────
+        match parse_workflow_text_command("/workflow run flow foo=bar baz") {
+            Some(WorkflowTextCommand::Invalid { error, .. }) => {
+                assert!(error.contains("key=value"), "got: {error}");
+                assert!(error.contains("baz"), "got: {error}");
+            }
+            other => panic!("expected Invalid, got: {:?}", other),
+        }
+
+        // ── empty key (=value) ─────────────────────────────────────
+        match parse_workflow_text_command("/workflow run flow =value") {
+            Some(WorkflowTextCommand::Invalid { error, .. }) => {
+                assert!(error.contains("参数名不能为空"), "got: {error}");
+            }
+            other => panic!("expected Invalid, got: {:?}", other),
+        }
+
+        // ── duplicate key ──────────────────────────────────────────
+        match parse_workflow_text_command("/workflow run flow foo=bar foo=qux") {
+            Some(WorkflowTextCommand::Invalid { error, .. }) => {
+                assert!(error.contains("重复参数"), "got: {error}");
+                assert!(error.contains("foo"), "got: {error}");
+            }
+            other => panic!("expected Invalid, got: {:?}", other),
+        }
+
+        // ── adjacent quoted/unquoted concatenation (shell-like) ──
+        // In shell word parsing, `"done"extra` concatenates to `doneextra`.
+        match parse_workflow_text_command("/workflow run flow task=\"done\"extra") {
+            Some(WorkflowTextCommand::Run {
+                workflow_id,
+                raw_params,
+            }) => {
+                assert_eq!(workflow_id, "flow");
+                assert_eq!(
+                    raw_params.get("task").map(String::as_str),
+                    Some("doneextra")
+                );
+            }
+            other => panic!("expected Run with concatenated value, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn prepare_retry_last_task_clears_limit_and_marks_working() {
+        let mut session = make_session("sess-retry");
+        session.last_cli_input = Some("continue".to_string());
+        session.last_screen_status = Some(ScreenStatus::Limited);
+        session.usage_limit = Some(CliUsageLimitState {
+            limited: true,
+            kind: CliUsageLimitKind::Usage,
+            retry_at_ms: 10,
+            retry_label: "3:15 PM".to_string(),
+            retry_ready: true,
+        });
+
+        let (updated, cli_input) = prepare_retry_last_task(&session, 10).expect("retry prepared");
+        assert_eq!(cli_input, "continue");
+        assert_eq!(updated.usage_limit, None);
+        assert_eq!(updated.last_screen_status, Some(ScreenStatus::Working));
+    }
+
+    #[test]
+    fn workflow_approval_target_message_id_prefers_clicked_message() {
+        let action = ParsedLarkCardAction {
+            action: "wf_approve".to_string(),
+            session_id: None,
+            root_id: Some("om_root".to_string()),
+            clicked_message_id: Some("om_clicked".to_string()),
+            operator_open_id: Some("ou_user".to_string()),
+            term_key: None,
+            visibility: None,
+            card_nonce: Some("nonce".to_string()),
+            special_keys: None,
+            selected_text: None,
+            input_keys: None,
+            input_text: None,
+            option_type: None,
+            selected_index: None,
+            is_final: false,
+            workflow_run_id: Some("run-1".to_string()),
+            workflow_id: Some("flow-a".to_string()),
+            workflow_revision_id: Some("rev-9".to_string()),
+            workflow_node_id: Some("node-1".to_string()),
+            workflow_activity_id: Some("act-1".to_string()),
+            workflow_attempt_id: Some("att-1".to_string()),
+            workflow_comment: None,
+            raw_value: None,
+            ask_id: None,
+            ask_nonce: None,
+            ask_question_index: None,
+            ask_key: None,
+            ask_submit: false,
+            pending_id: None,
+            working_dir: None,
+            dir_search_keyword: None,
+            cli_session_id: None,
+        };
+        assert_eq!(
+            workflow_approval_target_message_id(&action).as_deref(),
+            Some("om_clicked")
+        );
     }
 }

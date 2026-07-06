@@ -11,7 +11,7 @@
       "type": "subagent",
       "bot": "cli_canary_PLACEHOLDER",
       "description": "Draft a message. Replace cli_canary_PLACEHOLDER with a real bot id from `beam bots list`. The preview is shown to the human approver; content is the full message to send.",
-      "prompt": "Draft a short announcement message. Return JSON: {\"preview\": string, \"content\": string}. Preview should be <200 chars; content is the full message to send.",
+      "prompt": "Draft a short announcement message.\n\nReturn JSON:\n{\"preview\":\"approval summary under 200 chars\",\"content\":\"full message to send\"}",
       "outputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",

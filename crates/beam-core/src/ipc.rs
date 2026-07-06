@@ -130,6 +130,7 @@ pub enum DaemonToWorker {
     TuiKeys { keys: Vec<String>, is_final: bool },
     TuiTextInput { keys: Vec<String>, text: String },
     RefreshScreen,
+    SetTranscriptSource { cli_session_id: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -183,7 +184,18 @@ pub enum WorkerToDaemon {
     UserNotify {
         message: String,
     },
+    TranscriptChoices {
+        candidates: Vec<TranscriptChoice>,
+        turn_id: String,
+    },
     Error {
         message: String,
     },
+}
+
+/// A single transcript source candidate for disambiguation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TranscriptChoice {
+    pub session_id: String,
+    pub label: String,
 }

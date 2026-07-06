@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock, Weak};
 use tracing::{info, warn};
 
-use crate::{AppState, BotConfig};
+use crate::{AppState, BotConfig, card_i18n};
 
 // ---------------------------------------------------------------------------
 // Approval card sender trait (allows mocking in tests)
@@ -146,14 +146,22 @@ fn build_approval_card(
     prompt: Option<&str>,
     dashboard_url: Option<&str>,
 ) -> serde_json::Value {
-    let header_text = format!("Workflow Approval: {}", workflow_id);
+    let header_text_zh = format!("工作流审批：{}", workflow_id);
+    let header_text_en = format!("Workflow Approval: {}", workflow_id);
 
-    let mut body = format!(
+    let mut body_zh = format!(
         "**Run**\n{}\n\n**Step**\n{}\n\n**Activity**\n{}",
         run_id, node_id, activity_id,
     );
     if let Some(p) = prompt.filter(|p| !p.is_empty()) {
-        body.push_str(&format!("\n\n**Prompt**\n{}", p));
+        body_zh.push_str(&format!("\n\n**提示**\n{}", p));
+    }
+    let mut body_en = format!(
+        "**Run**\n{}\n\n**Step**\n{}\n\n**Activity**\n{}",
+        run_id, node_id, activity_id,
+    );
+    if let Some(p) = prompt.filter(|p| !p.is_empty()) {
+        body_en.push_str(&format!("\n\n**Prompt**\n{}", p));
     }
 
     let button_value = |action: &str| -> serde_json::Value {
@@ -172,14 +180,25 @@ fn build_approval_card(
     let mut elements: Vec<serde_json::Value> = vec![
         serde_json::json!({
             "tag": "div",
-            "text": { "tag": "lark_md", "content": body }
+            "text": {
+                "tag": "lark_md",
+                "content": body_en.clone(),
+                "i18n_content": {
+                    "zh_cn": body_zh.clone(),
+                    "en_us": body_en,
+                }
+            }
         }),
         serde_json::json!({
             "tag": "input",
             "name": "wf_comment",
             "placeholder": {
                 "tag": "plain_text",
-                "content": "添加备注 (可选)"
+                "content": "Add a note (optional)",
+                "i18n_content": {
+                    "zh_cn": "添加备注 (可选)",
+                    "en_us": "Add a note (optional)",
+                }
             }
         }),
         serde_json::json!({
@@ -187,19 +206,19 @@ fn build_approval_card(
             "actions": [
                 {
                     "tag": "button",
-                    "text": { "tag": "lark_md", "content": "✅ 通过" },
+                    "text": card_i18n::lark_md(None, "✅ 通过", "✅ Approve"),
                     "type": "primary",
                     "value": button_value("wf_approve")
                 },
                 {
                     "tag": "button",
-                    "text": { "tag": "lark_md", "content": "❌ 拒绝" },
+                    "text": card_i18n::lark_md(None, "❌ 拒绝", "❌ Reject"),
                     "type": "danger",
                     "value": button_value("wf_reject")
                 },
                 {
                     "tag": "button",
-                    "text": { "tag": "lark_md", "content": "🛑 取消" },
+                    "text": card_i18n::lark_md(None, "🛑 取消", "🛑 Cancel"),
                     "type": "default",
                     "value": button_value("wf_cancel")
                 }
@@ -214,7 +233,7 @@ fn build_approval_card(
             "actions": [
                 {
                     "tag": "button",
-                    "text": { "tag": "lark_md", "content": "\u{1f4ca} Open Dashboard" },
+                    "text": card_i18n::lark_md(None, "\u{1f4ca} 打开面板", "\u{1f4ca} Open Dashboard"),
                     "type": "primary",
                     "url": url,
                 }
@@ -226,7 +245,14 @@ fn build_approval_card(
     elements.push(serde_json::json!({
         "tag": "note",
         "elements": [
-            { "tag": "plain_text", "content": format!("Run: {} | Activity: {}", run_id, activity_id) }
+            {
+                "tag": "plain_text",
+                "content": format!("Run: {} | Activity: {}", run_id, activity_id),
+                "i18n_content": {
+                    "zh_cn": format!("运行：{} | 活动：{}", run_id, activity_id),
+                    "en_us": format!("Run: {} | Activity: {}", run_id, activity_id),
+                }
+            }
         ]
     }));
 
@@ -234,7 +260,14 @@ fn build_approval_card(
         "config": { "wide_screen_mode": true },
         "header": {
             "template": "blue",
-            "title": { "tag": "plain_text", "content": header_text }
+            "title": {
+                "tag": "plain_text",
+                "content": header_text_en,
+                "i18n_content": {
+                    "zh_cn": header_text_zh,
+                    "en_us": header_text_en,
+                }
+            }
         },
         "elements": elements,
     })

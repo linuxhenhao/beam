@@ -11,8 +11,8 @@ use beam_core::{FinalOutputKind, InitConfig};
 use serde_json::Value;
 
 use crate::adapter::{
-    CodexState, PendingTurnKind, PollResult, SpawnSpec, SubmitResult, drain_jsonl, file_size,
-    is_uuid_like, normalize_history_text,
+    CodexState, PendingTurnKind, PollResult, ResolveOutcome, SpawnSpec, SubmitResult, drain_jsonl,
+    file_size, is_uuid_like, normalize_history_text,
 };
 use crate::backend::SessionBackend;
 
@@ -109,7 +109,9 @@ pub fn poll(state: &mut CodexState) -> Result<PollResult> {
         }
         if state.rollout_path.is_none() {
             if let Some(pid) = state.cli_pid {
-                if let Some((path, cli_session_id)) = find_codex_rollout_by_pid(pid) {
+                if let ResolveOutcome::Found((path, cli_session_id)) =
+                    find_codex_rollout_by_pid(pid)
+                {
                     state.rollout_path = Some(path);
                     state.cli_session_id = Some(cli_session_id);
                 }
@@ -375,20 +377,35 @@ fn find_codex_rollout_by_session_id(home_dir: &Path, cli_session_id: &str) -> Op
     None
 }
 
-fn find_codex_rollout_by_pid(pid: u32) -> Option<(PathBuf, String)> {
-    let fd_dir = PathBuf::from(format!("/proc/{}/fd", pid));
-    let entries = read_dir(fd_dir).ok()?;
+fn find_codex_rollout_by_pid(pid: u32) -> ResolveOutcome<(PathBuf, String)> {
+    find_codex_rollout_by_fd_dir(&PathBuf::from(format!("/proc/{}/fd", pid)))
+}
+
+fn find_codex_rollout_by_fd_dir(fd_dir: &Path) -> ResolveOutcome<(PathBuf, String)> {
+    let entries = match read_dir(fd_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            return ResolveOutcome::NotFound {
+                reason: format!("cannot read /proc fd dir: {}", e),
+            };
+        }
+    };
     for entry in entries.flatten() {
-        let target = std::fs::read_link(entry.path()).ok()?;
+        let target = match std::fs::read_link(entry.path()) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
         let target_str = target.to_string_lossy();
         if !target_str.ends_with(".jsonl") || !target_str.contains("/.codex/sessions/") {
             continue;
         }
         if let Some(session_id) = codex_session_id_from_rollout_path(&target_str) {
-            return Some((target, session_id));
+            return ResolveOutcome::Found((target, session_id));
         }
     }
-    None
+    ResolveOutcome::NotFound {
+        reason: "no codex rollout found in pid fd dir".to_string(),
+    }
 }
 
 fn codex_session_id_from_rollout_path(path: &str) -> Option<String> {
@@ -703,5 +720,96 @@ mod tests {
         assert!(second_turn.prompt_ready);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    // ── pid-based strong anchoring ──────────────────────────────────
+
+    #[test]
+    #[cfg(unix)]
+    fn pid_anchoring_resolves_rollout_and_session_id_from_fd_dir() {
+        let tmp = temp_path("pid-anchor");
+        // Create mock ~/.codex/sessions/xxx/rollout-...-uuid.jsonl
+        let sessions_dir = tmp.join(".codex").join("sessions").join("abc123");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let rollout_path =
+            sessions_dir.join("rollout-20260603-019c6e27-e55b-73d1-87d8-4e01f1f75043.jsonl");
+        std::fs::write(&rollout_path, "{}").unwrap();
+
+        // Create mock fd dir with a symlink pointing to the rollout
+        let fd_dir = tmp.join("fake-fd");
+        std::fs::create_dir_all(&fd_dir).unwrap();
+        std::os::unix::fs::symlink(&rollout_path, fd_dir.join("3")).unwrap();
+
+        let result = find_codex_rollout_by_fd_dir(&fd_dir);
+        assert!(
+            matches!(result, ResolveOutcome::Found(_)),
+            "pid anchoring should find the rollout"
+        );
+        let (_found_path, session_id) = match result {
+            ResolveOutcome::Found(v) => v,
+            other => panic!("expected Found, got {:?}", other),
+        };
+        assert_eq!(
+            session_id, "019c6e27-e55b-73d1-87d8-4e01f1f75043",
+            "session_id should be extracted from rollout filename"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn poll_with_rollout_resolved_by_pid_emits_preamble_without_cwd_fallback() {
+        // Simulates what happens AFTER find_codex_rollout_by_pid resolves
+        // the path: state has rollout_path and cli_session_id set from pid,
+        // and adopt mode works without any cwd-based fallback.
+        let path = temp_path("codex-pid-resolved.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"adopted ask\"}]}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"adopted answer\"}]}}\n"
+            ),
+        )
+        .unwrap();
+        let mut state = CodexState {
+            home_dir: PathBuf::new(),
+            history_path: PathBuf::new(),
+            rollout_path: Some(path.clone()),
+            cli_pid: Some(12345),
+            // cli_session_id resolved from pid — NOT from cwd/latest fallback
+            cli_session_id: Some("pid-resolved-sid".to_string()),
+            transcript_offset: 0,
+            pending_tail: String::new(),
+            emitted_final_text: None,
+            adopt_mode: true,
+            adopt_restored_from_metadata: false,
+            adopt_preamble_emitted: false,
+            pending_remote_user_inputs: VecDeque::new(),
+            active_turn: None,
+        };
+        let result = poll(&mut state).unwrap();
+        assert_eq!(
+            result.adopt_preamble,
+            Some(("adopted ask".to_string(), "adopted answer".to_string())),
+            "preamble should be emitted from pid-resolved rollout"
+        );
+        assert_eq!(
+            result.cli_session_id.as_deref(),
+            Some("pid-resolved-sid"),
+            "cli_session_id should come from pid resolution"
+        );
+        assert!(result.final_output.is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pid_anchoring_session_id_from_rollout_path() {
+        // Verify codex_session_id_from_rollout_path works with
+        // the filename pattern that find_codex_rollout_by_pid discovers
+        let path = "/home/user/.codex/sessions/proj/rollout-20260603-019c6e27-e55b-73d1-87d8-4e01f1f75043.jsonl";
+        assert_eq!(
+            codex_session_id_from_rollout_path(path).as_deref(),
+            Some("019c6e27-e55b-73d1-87d8-4e01f1f75043")
+        );
     }
 }

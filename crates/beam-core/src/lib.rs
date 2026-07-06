@@ -33,9 +33,9 @@ pub const DEFAULT_TERMINAL_ROWS: u16 = 50;
 
 pub use api::{
     ApiHealth, AttemptResumeEndResponse, AttemptResumeRequest, AttemptResumeStartResponse,
-    BotSummary, CreateSessionRequest, DaemonOverview, DaemonRuntimeState, FinalOutputRequest,
-    RestartSessionRequest, ResumeSessionRequest, SessionGroup, SessionInputRequest,
-    SessionLocateInfo, SessionSummary, TerminalInfo,
+    AttentionRequest, BotSummary, CreateSessionRequest, DaemonOverview, DaemonRuntimeState,
+    FinalOutputRequest, MentionTarget, RestartSessionRequest, ResumeSessionRequest, SessionGroup,
+    SessionInputRequest, SessionLocateInfo, SessionSummary, TerminalInfo,
 };
 pub use ask::{AskOption, AskQuestion, AskRequest, AskResult, legacy_selected};
 pub use config::{
@@ -44,7 +44,7 @@ pub use config::{
 };
 pub use ipc::{
     CliUsageLimitKind, CliUsageLimitState, DaemonToWorker, DisplayMode, FinalOutputKind,
-    InitConfig, ScreenStatus, TermActionKey, TuiPromptOption, WorkerToDaemon,
+    InitConfig, ScreenStatus, TermActionKey, TranscriptChoice, TuiPromptOption, WorkerToDaemon,
 };
 pub use paths::BeamPaths;
 pub use permissions::{
@@ -58,7 +58,8 @@ pub use schedule_store::{
     create_task, get_task, list_tasks, mark_run, remove_task, update_task,
 };
 pub use session::{
-    AdoptedFrom, ChatMode, PendingResponseCardState, Session, SessionScope, SessionStatus,
+    AdoptedFrom, AgentAttention, ChatMode, PendingResponseCardState, Session, SessionScope,
+    SessionStatus,
 };
 pub use workflow::{EventDraft, EventLog, WorkflowActor, WorkflowEventEnvelope};
 pub use workflow_actions::{

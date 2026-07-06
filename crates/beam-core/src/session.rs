@@ -3,6 +3,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::ipc::{CliUsageLimitState, DisplayMode, ScreenStatus};
 
+/// Agent attention state set via `--attention` flag, analogous to botmux `agentAttention`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentAttention {
+    pub kind: String,
+    pub reason: String,
+    pub at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionScope {
@@ -96,6 +104,12 @@ pub struct Session {
     pub lark_app_id: String,
     #[serde(default)]
     pub owner_open_id: Option<String>,
+    /// Sender open_id of the trigger/quote message for the current turn.
+    /// Aligns with botmux `quoteTargetSenderOpenId`.
+    /// May differ from `owner_open_id` in multi-user group chats where
+    /// a non-owner triggers a follow-up turn.
+    #[serde(default)]
+    pub quote_target_sender_open_id: Option<String>,
     #[serde(default)]
     pub worker_pid: Option<u32>,
     #[serde(default)]
@@ -142,6 +156,14 @@ pub struct Session {
     pub last_final_output_turn_id: Option<String>,
     #[serde(default)]
     pub last_final_output: Option<String>,
+    /// Timestamp of the most recent explicit `beam send` (structured final output).
+    /// Set by `handle_final_output_request`; NOT set by worker bridge delivery.
+    /// Used by `should_skip_worker_final_output` to suppress duplicate worker
+    /// output when the model already sent the same content via explicit send.
+    /// Minimal botmux-equivalent: botmux records turn-sends markers; Beam only
+    /// needs a single timestamp for the 10-minute dedupe window.
+    #[serde(default)]
+    pub last_explicit_send_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub adopted_from: Option<AdoptedFrom>,
     #[serde(default)]
@@ -166,4 +188,111 @@ pub struct Session {
     /// thread_id=None and matches follow-ups via root_message_id).
     #[serde(default)]
     pub thread_id: Option<String>,
+    /// Agent attention state set via `--attention` flag.
+    /// Cleared on next user inbound message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_attention: Option<AgentAttention>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_deser_old_data_without_quote_target_sender_open_id() {
+        // Old session JSON (before quote_target_sender_open_id was added)
+        // must deserialize with the field defaulting to None.
+        let json = r#"{
+            "session_id": "test-sess-1",
+            "title": "test",
+            "chat_id": "chat-1",
+            "root_message_id": "root-1",
+            "scope": "thread",
+            "status": "active",
+            "created_at": "2025-01-01T00:00:00Z",
+            "lark_app_id": "app-1",
+            "owner_open_id": "ou_owner"
+        }"#;
+        let session: Session = serde_json::from_str(json).expect("should deserialize old session");
+        assert_eq!(session.session_id, "test-sess-1");
+        assert_eq!(session.owner_open_id.as_deref(), Some("ou_owner"));
+        assert_eq!(
+            session.quote_target_sender_open_id, None,
+            "old sessions without the field should default to None"
+        );
+    }
+
+    #[test]
+    fn session_deser_with_quote_target_sender_open_id() {
+        let json = r#"{
+            "session_id": "test-sess-2",
+            "title": "test",
+            "chat_id": "chat-1",
+            "root_message_id": "root-1",
+            "scope": "thread",
+            "status": "active",
+            "created_at": "2025-01-01T00:00:00Z",
+            "lark_app_id": "app-1",
+            "owner_open_id": "ou_owner",
+            "quote_target_sender_open_id": "ou_sender"
+        }"#;
+        let session: Session = serde_json::from_str(json).expect("should deserialize session");
+        assert_eq!(session.owner_open_id.as_deref(), Some("ou_owner"));
+        assert_eq!(
+            session.quote_target_sender_open_id.as_deref(),
+            Some("ou_sender"),
+            "new sessions should preserve the quote target sender"
+        );
+    }
+
+    #[test]
+    fn session_deser_old_data_without_agent_attention() {
+        // Old session JSON (before agent_attention was added)
+        // must deserialize with the field defaulting to None.
+        let json = r#"{
+            "session_id": "test-sess-3",
+            "title": "test",
+            "chat_id": "chat-1",
+            "root_message_id": "root-1",
+            "scope": "thread",
+            "status": "active",
+            "created_at": "2025-01-01T00:00:00Z",
+            "lark_app_id": "app-1",
+            "owner_open_id": "ou_owner"
+        }"#;
+        let session: Session = serde_json::from_str(json).expect("should deserialize old session");
+        assert_eq!(session.session_id, "test-sess-3");
+        assert_eq!(
+            session.agent_attention, None,
+            "old sessions without the field should default to None"
+        );
+    }
+
+    #[test]
+    fn session_deser_with_agent_attention() {
+        let json = r#"{
+            "session_id": "test-sess-4",
+            "title": "test",
+            "chat_id": "chat-1",
+            "root_message_id": "root-1",
+            "scope": "thread",
+            "status": "active",
+            "created_at": "2025-01-01T00:00:00Z",
+            "lark_app_id": "app-1",
+            "owner_open_id": "ou_owner",
+            "agent_attention": {
+                "kind": "blocked",
+                "reason": "need approval",
+                "at": "2025-06-01T12:00:00Z"
+            }
+        }"#;
+        let session: Session = serde_json::from_str(json).expect("should deserialize session");
+        let aa = session
+            .agent_attention
+            .as_ref()
+            .expect("should have agent_attention");
+        assert_eq!(aa.kind, "blocked");
+        assert_eq!(aa.reason, "need approval");
+        assert_eq!(aa.at.to_rfc3339(), "2025-06-01T12:00:00+00:00");
+    }
 }
