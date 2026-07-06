@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/linuxhenhao/beam/compare/beam-core-v0.4.0...beam-core-v0.5.0) - 2026-07-06
+
+### Added
+
+- *(adopt)* 支持 OpenCode adopt 解析与首条消息 beam context 注入
+- *(send)* 对齐 Rust send 语义
+- *(lark)* 支持中英文提示和卡片文案
+
+### Other
+
+- *(deps)* 更新 Rust 依赖
+
 ## [0.4.0](https://github.com/linuxhenhao/beam/compare/beam-core-v0.3.3...beam-core-v0.4.0) - 2026-07-01
 
 ### Added
