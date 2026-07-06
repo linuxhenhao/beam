@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/linuxhenhao/beam/compare/beam-cli-v0.4.0...beam-cli-v0.5.0) - 2026-07-06
+
+### Added
+
+- *(send)* 对齐 Rust send 语义
+
+### Other
+
+- *(beam-daemon)* 拆分 lib.rs 为模块化结构并归位测试
+
 ## [0.4.0](https://github.com/linuxhenhao/beam/compare/beam-cli-v0.3.3...beam-cli-v0.4.0) - 2026-07-01
 
 ### Added
