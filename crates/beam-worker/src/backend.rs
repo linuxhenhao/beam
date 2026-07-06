@@ -346,7 +346,7 @@ impl SessionBackend for ZellijBackend {
     }
 
     async fn raw_input(&self, text: &str) -> Result<()> {
-        self.send_text(text).await?;
+        self.paste_text(text).await?;
         tokio::time::sleep(RAW_INPUT_ENTER_DELAY).await;
         self.send_enter().await
     }
@@ -518,7 +518,7 @@ impl SessionBackend for ZellijObserveBackend {
     }
 
     async fn raw_input(&self, text: &str) -> Result<()> {
-        self.send_text(text).await?;
+        self.paste_text(text).await?;
         tokio::time::sleep(RAW_INPUT_ENTER_DELAY).await;
         self.send_enter().await
     }

@@ -412,6 +412,7 @@ mod tests {
             pending_id: None,
             working_dir: None,
             dir_search_keyword: None,
+            cli_session_id: None,
         };
         assert!(is_stale_stream_card_action(&stale_toggle, &session));
 
@@ -484,6 +485,7 @@ mod tests {
             pending_id: None,
             working_dir: None,
             dir_search_keyword: None,
+            cli_session_id: None,
         };
         assert_eq!(
             resolve_card_render_target(&legacy_click, &session),

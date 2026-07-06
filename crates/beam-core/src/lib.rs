@@ -44,7 +44,7 @@ pub use config::{
 };
 pub use ipc::{
     CliUsageLimitKind, CliUsageLimitState, DaemonToWorker, DisplayMode, FinalOutputKind,
-    InitConfig, ScreenStatus, TermActionKey, TuiPromptOption, WorkerToDaemon,
+    InitConfig, ScreenStatus, TermActionKey, TranscriptChoice, TuiPromptOption, WorkerToDaemon,
 };
 pub use paths::BeamPaths;
 pub use permissions::{

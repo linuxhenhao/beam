@@ -234,6 +234,74 @@ pub fn build_initial_prompt(opts: &InitialPromptOptions) -> String {
     blocks.join("\n\n")
 }
 
+pub struct AdoptContextOptions<'a> {
+    pub bot_name: Option<&'a str>,
+    pub bot_open_id: Option<&'a str>,
+    pub observed_bots: &'a [ObservedBot],
+    pub locale: Option<&'a str>,
+}
+
+/// Build beam context to prepend to the first message of an adopted session.
+/// This gives the LLM the same routing / identity hints that a normal new
+/// session would receive, but without a <user_message> block (the follow-up
+/// wrapper already provides one).
+pub fn build_adopt_context(opts: &AdoptContextOptions) -> String {
+    let mut blocks = Vec::new();
+    let locale = opts.locale.unwrap_or("en");
+
+    let hints = build_beam_shell_hints(Some(locale));
+    blocks.push(format!(
+        "<beam_routing>\n{}\n</beam_routing>",
+        hints.join("\n")
+    ));
+
+    let identity_routing_rules = localized(
+        Some(locale),
+        "`beam send --mention` 必须指定 `open_id[:name]`；回复当前触发者优先用 `--mention-back`",
+        "`beam send --mention` requires `open_id[:name]`; prefer `--mention-back` when replying to the current sender",
+    );
+    if let (Some(name), Some(open_id)) = (opts.bot_name, opts.bot_open_id) {
+        blocks.push(format!(
+            "<identity>\n  <name>{}</name>\n  <open_id>{}</open_id>\n  <routing_rules>{}</routing_rules>\n</identity>",
+            xml_escape(name),
+            xml_escape(open_id),
+            xml_escape(&identity_routing_rules)
+        ));
+    } else if let Some(name) = opts.bot_name {
+        blocks.push(format!(
+            "<identity>\n  <name>{}</name>\n  <routing_rules>{}</routing_rules>\n</identity>",
+            xml_escape(name),
+            xml_escape(&identity_routing_rules)
+        ));
+    }
+
+    if !opts.observed_bots.is_empty() {
+        let tags: Vec<String> = opts
+            .observed_bots
+            .iter()
+            .map(|b| {
+                format!(
+                    r#"<bot name="{}" open_id="{}" />"#,
+                    xml_escape(&b.name),
+                    xml_escape(&b.open_id)
+                )
+            })
+            .collect();
+        let hint = localized(
+            Some(locale),
+            "你可以用 `beam send --mention <bot_open_id[:name]>` 点名飞书里的其他 bot",
+            "Use `beam send --mention <bot_open_id[:name]>` to address another bot in Feishu",
+        );
+        blocks.push(format!(
+            "<available_bots hint=\"{}\">\n{}\n</available_bots>",
+            hint,
+            tags.join("\n")
+        ));
+    }
+
+    blocks.join("\n\n")
+}
+
 pub fn build_quote_hint(
     parent_id: Option<&str>,
     message_id: &str,

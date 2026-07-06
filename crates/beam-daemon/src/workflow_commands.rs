@@ -1788,6 +1788,7 @@ mod tests {
             pending_id: None,
             working_dir: None,
             dir_search_keyword: None,
+            cli_session_id: None,
         };
         assert_eq!(
             workflow_approval_target_message_id(&action).as_deref(),

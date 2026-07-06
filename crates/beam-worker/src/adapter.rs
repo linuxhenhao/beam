@@ -11,6 +11,20 @@ use beam_core::{FinalOutputKind, InitConfig};
 
 use crate::backend::SessionBackend;
 
+/// Unified resolver outcome for adopt/source resolution.
+///
+/// Expresses the three canonical resolution states used across adapters:
+/// - [`ResolveOutcome::Found`]: exactly one matching resource.
+/// - [`ResolveOutcome::NotFound`]: no matching resource.
+/// - [`ResolveOutcome::Ambiguous`]: multiple candidates that cannot be
+///   automatically disambiguated.
+#[derive(Debug, Clone)]
+pub enum ResolveOutcome<T> {
+    Found(T),
+    NotFound { reason: String },
+    Ambiguous { candidates: Vec<T>, reason: String },
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SubmitResult {
     pub submitted: bool,
@@ -101,6 +115,10 @@ pub struct OpenCodeState {
     pub cli_session_id: Option<String>,
     pub transcript_offset: u64,
     pub emitted_final_text: Option<String>,
+    /// PID of the adopted CLI process, if any.
+    /// When set and alive, directory-based candidate resolution
+    /// picks the most recent session instead of raising Ambiguous.
+    pub adopted_pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default)]

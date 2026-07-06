@@ -278,6 +278,78 @@ pub(crate) fn resolve_tui_prompt_final_text(
         .unwrap_or_else(|| "selection".to_string())
 }
 
+pub(crate) fn build_transcript_select_card(
+    root_id: &str,
+    session_id: &str,
+    candidates: &[TranscriptChoice],
+    locale: Option<&str>,
+) -> String {
+    let actions: Vec<Value> = candidates
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "tag": "button",
+                "text": card_i18n::plain_text(locale, &c.label, &c.label),
+                "type": "default",
+                "value": {
+                    "action": "transcript_select",
+                    "root_id": root_id,
+                    "session_id": session_id,
+                    "cli_session_id": c.session_id,
+                }
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "config": { "wide_screen_mode": true },
+        "header": {
+            "title": card_i18n::plain_text(locale, "选择 Transcript 来源", "Select Transcript Source"),
+            "template": "blue"
+        },
+        "elements": [
+            {
+                "tag": "markdown",
+                "content": "Multiple transcript sources found. Please select one:",
+                "i18n_content": {
+                    "zh_cn": "发现多个 transcript 来源，请选择一个：",
+                    "en_us": "Multiple transcript sources found. Please select one:",
+                }
+            },
+            { "tag": "hr" },
+            { "tag": "action", "actions": actions }
+        ]
+    })
+    .to_string()
+}
+
+pub(crate) fn build_transcript_selected_card(
+    cli_session_id: &str,
+    operator_open_id: Option<&str>,
+) -> String {
+    let zh = format!("已选择 session `{}`", cli_session_id);
+    let en = format!("Selected session `{}`", cli_session_id);
+    let mut footer = String::from("beam");
+    if let Some(open_id) = operator_open_id {
+        footer = format!(
+            "<font color='grey'>[beam](https://github.com/deepcoldy/beam) · 操作者：<at id={}></at></font>",
+            open_id
+        );
+    }
+    serde_json::json!({
+        "config": { "wide_screen_mode": true },
+        "header": {
+            "title": card_i18n::plain_text(None, &zh, &en),
+            "template": "green"
+        },
+        "elements": [
+            { "tag": "markdown", "content": en, "i18n_content": { "zh_cn": zh, "en_us": en } },
+            { "tag": "hr" },
+            { "tag": "markdown", "content": footer, "i18n_content": { "zh_cn": footer, "en_us": footer } }
+        ]
+    })
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -453,6 +453,63 @@ pub(crate) async fn spawn_worker(
                         }
                     }
                 }
+                Ok(WorkerToDaemon::TranscriptChoices { candidates, .. }) => {
+                    let snapshot = {
+                        let sessions = state.sessions.lock().await;
+                        sessions.get(&session_id_for_task).cloned()
+                    };
+                    let mut card_sent = false;
+                    if let Some(ref session) = snapshot {
+                        if session.lark_app_id != "local" && !session.root_message_id.is_empty() {
+                            if let Some(bot) = state.bots.get(&session.lark_app_id) {
+                                info!(
+                                    "sending transcript select card for session {} with {} candidates",
+                                    session_id_for_task,
+                                    candidates.len()
+                                );
+                                let card = build_transcript_select_card(
+                                    &session.root_message_id,
+                                    &session.session_id,
+                                    &candidates,
+                                    session.locale.as_deref(),
+                                );
+                                if let Err(err) = lark_reply_card_with_opts(
+                                    &state,
+                                    bot,
+                                    &session.root_message_id,
+                                    &card,
+                                    session.scope == SessionScope::Thread,
+                                )
+                                .await
+                                {
+                                    warn!(
+                                        "failed to send transcript select card for {}: {}",
+                                        session_id_for_task, err
+                                    );
+                                }
+                                card_sent = true;
+                            }
+                        }
+                    }
+                    if !card_sent {
+                        debug!(
+                            "transcript choices received but card cannot be sent: session={} lark_app_id={:?} root_msg={} bot_exists={}",
+                            session_id_for_task,
+                            snapshot
+                                .as_ref()
+                                .map(|s| s.lark_app_id.as_str())
+                                .unwrap_or("none"),
+                            snapshot
+                                .as_ref()
+                                .map(|s| s.root_message_id.as_str())
+                                .unwrap_or("none"),
+                            snapshot
+                                .as_ref()
+                                .and_then(|s| state.bots.get(&s.lark_app_id))
+                                .is_some(),
+                        );
+                    }
+                }
                 Ok(WorkerToDaemon::AdoptPreamble {
                     user_text,
                     assistant_text,

@@ -53,6 +53,7 @@ pub(crate) struct ParsedLarkCardAction {
     pub(crate) pending_id: Option<String>,
     pub(crate) working_dir: Option<String>,
     pub(crate) dir_search_keyword: Option<String>,
+    pub(crate) cli_session_id: Option<String>,
 }
 
 // ---- Message parsing ----
@@ -340,6 +341,10 @@ pub(crate) fn parse_lark_card_action(
             .pointer("/action/form_value/dir_search_keyword")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
+        cli_session_id: payload
+            .pointer("/action/value/cli_session_id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
     })
 }
 
@@ -593,6 +598,7 @@ mod tests {
                 pending_id: None,
                 working_dir: None,
                 dir_search_keyword: None,
+                cli_session_id: None,
             }
         );
     }

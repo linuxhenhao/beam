@@ -707,7 +707,7 @@ pub(crate) async fn handle_lark_event_payload(
                     .get(&session.session_id)
                     .and_then(|entry| entry.locale.as_deref())
                     .unwrap_or(inferred_locale);
-                let reuse_content = {
+                let mut reuse_content = {
                     let session_root = &session.root_message_id;
                     let raw = prompt::build_quote_hint(
                         parsed.parent_id.as_deref(),
@@ -727,6 +727,26 @@ pub(crate) async fn handle_lark_event_payload(
                         },
                     )
                 };
+
+                // For adopted sessions, prepend beam context on the first message
+                // so the LLM knows how to use beam send, its identity, etc.
+                if session.adopted_from.is_some() && session.last_cli_input.is_none() {
+                    let (bot_name, bot_open_id) = if app_id != "local" {
+                        load_bot_identity(&state.paths, &app_id)
+                    } else {
+                        (None, None)
+                    };
+                    let observed_bots =
+                        load_observed_bots_for_chat(&state.paths, &app_id, chat_id);
+                    let context = prompt::build_adopt_context(&prompt::AdoptContextOptions {
+                        bot_name: bot_name.as_deref(),
+                        bot_open_id: bot_open_id.as_deref(),
+                        observed_bots: &observed_bots,
+                        locale: Some(session_locale),
+                    });
+                    reuse_content = format!("{}\n\n{}", context, reuse_content);
+                }
+
                 let _ = send_input(
                     State(state.clone()),
                     AxumPath(session.session_id),
@@ -1643,6 +1663,57 @@ pub(crate) async fn handle_lark_card_action_payload(
         "dir_select_pick" | "dir_select_filter" | "dir_select_best"
     ) {
         return handle_dir_select_card_action(state, &bot, app_id, &action).await;
+    }
+
+    // --- Transcript source selection ---
+    if action.action == "transcript_select" {
+        let Some(ref beam_session_id) = action.session_id else {
+            return Ok(Json(build_lark_card_action_toast(
+                "error",
+                "missing session id",
+            )));
+        };
+        let Some(ref cli_session_id) = action.cli_session_id else {
+            return Ok(Json(build_lark_card_action_toast(
+                "error",
+                "missing cli_session_id",
+            )));
+        };
+        info!(
+            "user selected transcript source: session={} for beam session={}",
+            cli_session_id, beam_session_id
+        );
+        if let Err(err) = send_worker_message(
+            &state.workers,
+            beam_session_id,
+            &DaemonToWorker::SetTranscriptSource {
+                cli_session_id: cli_session_id.clone(),
+            },
+        )
+        .await
+        {
+            warn!(
+                "failed to send SetTranscriptSource to worker {}: {}",
+                beam_session_id, err
+            );
+            return Ok(Json(build_lark_card_action_toast(
+                "error",
+                "failed to deliver session selection to worker",
+            )));
+        }
+        if let Some(clicked_msg_id) = action.clicked_message_id.as_deref() {
+            let _ = lark_update_card(
+                state,
+                &bot,
+                clicked_msg_id,
+                &build_transcript_selected_card(cli_session_id, action.operator_open_id.as_deref()),
+            )
+            .await;
+        }
+        return Ok(Json(build_lark_card_action_toast(
+            "success",
+            "transcript source selected",
+        )));
     }
 
     let session_id = {
@@ -3640,7 +3711,7 @@ pub(crate) async fn adopt_zellij_session(
         .ok_or_else(|| (StatusCode::NOT_FOUND, "zellij pane not found".to_string()))?;
 
     let session_id = Uuid::new_v4().to_string();
-    let adopted_from = AdoptedFrom {
+    let mut adopted_from = AdoptedFrom {
         tmux_target: None,
         zellij_session: Some(req.zellij_session.clone()),
         zellij_pane_id: Some(pane_id.clone()),
@@ -3655,6 +3726,14 @@ pub(crate) async fn adopt_zellij_session(
         pane_cols: req.pane_cols.or(candidate.pane_cols),
         pane_rows: req.pane_rows.or(candidate.pane_rows),
     };
+    let adopted_cli_session_id = resolve_opencode_adopt_session(&req.cli_id, &adopted_from.cwd);
+    if let Some(cli_session_id) = adopted_cli_session_id.clone() {
+        info!(
+            "resolved opencode session during adopt: beam_session={} cli_session_id={}",
+            session_id, cli_session_id
+        );
+        adopted_from.session_id = Some(cli_session_id);
+    }
     let title = req
         .title
         .clone()
@@ -3688,7 +3767,7 @@ pub(crate) async fn adopt_zellij_session(
         cli_id: Some(req.cli_id.clone()),
         cli_bin: Some(req.cli_bin.clone()),
         cli_args: Vec::new(),
-        cli_session_id: None,
+        cli_session_id: adopted_cli_session_id.clone(),
         last_cli_input: None,
         stream_card_id: None,
         stream_card_nonce: None,
@@ -3741,7 +3820,7 @@ pub(crate) async fn adopt_zellij_session(
         cli_args: Vec::new(),
         prompt: String::new(),
         resume: false,
-        cli_session_id: None,
+        cli_session_id: adopted_cli_session_id,
         lark_app_id,
         lark_app_secret,
         prompt_turn_id: None,

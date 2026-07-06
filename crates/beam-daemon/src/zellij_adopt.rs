@@ -167,7 +167,16 @@ pub(crate) fn zellij_dump_layout_panes(session: &str) -> Vec<ZellijLayoutPane> {
             body = &body[..idx];
         }
     }
+    parse_dump_layout_body(body)
+}
 
+/// Parse the body of a `zellij action dump-layout` output (after stripping
+/// `new_tab_template` etc.) into [`ZellijLayoutPane`] leaves.
+///
+/// This handles both KDL attribute (`cwd="..."`) and node parameter (`cwd "..."`)
+/// forms for cwd, and inherits a layout-level cwd into panes that don't declare
+/// their own.
+fn parse_dump_layout_body(body: &str) -> Vec<ZellijLayoutPane> {
     #[derive(Clone)]
     struct Frame {
         is_pane: bool,
@@ -181,6 +190,9 @@ pub(crate) fn zellij_dump_layout_panes(session: &str) -> Vec<ZellijLayoutPane> {
 
     let mut stack: Vec<Frame> = Vec::new();
     let mut leaves = Vec::new();
+    // Track the nearest ancestor cwd (from layout-level `cwd "..."` node parameter).
+    let mut layout_cwd: Option<String> = None;
+
     let attr = |line: &str, name: &str| -> Option<String> {
         let needle = format!(r#"{}=""#, name);
         let idx = line.find(&needle)? + needle.len();
@@ -225,7 +237,9 @@ pub(crate) fn zellij_dump_layout_panes(session: &str) -> Vec<ZellijLayoutPane> {
                 is_pane: true,
                 is_floating: false,
                 command: attr(line, "command"),
-                cwd: attr(line, "cwd"),
+                // Pane's own cwd attribute takes priority; otherwise inherit
+                // the nearest ancestor (layout-level) cwd.
+                cwd: attr(line, "cwd").or_else(|| layout_cwd.clone()),
                 args: Vec::new(),
                 has_plugin: false,
                 has_child_pane: false,
@@ -283,6 +297,31 @@ pub(crate) fn zellij_dump_layout_panes(session: &str) -> Vec<ZellijLayoutPane> {
                     _ => None,
                 })
                 .collect();
+            continue;
+        }
+        // Handle KDL node parameter form: `cwd "/path/to/dir"`
+        // This appears as a child node inside `layout { ... }` (and potentially
+        // inside `pane { ... }`).
+        if line.starts_with("cwd ") {
+            if let Some(rest) = line.strip_prefix("cwd ") {
+                let rest = rest.trim();
+                if rest.starts_with('"') {
+                    let inner = &rest[1..];
+                    if let Some(end) = inner.find('"') {
+                        let cwd_value = inner[..end].to_string();
+                        if let Some(last) = stack.last_mut()
+                            && last.is_pane
+                        {
+                            // cwd node inside a pane block overrides inherited/attribute cwd.
+                            last.cwd = Some(cwd_value);
+                        } else {
+                            // Otherwise it's an ancestor-level cwd (e.g. layout).
+                            layout_cwd = Some(cwd_value);
+                        }
+                    }
+                }
+            }
+            continue;
         }
     }
     leaves
@@ -540,5 +579,95 @@ mod tests {
         assert_eq!(candidates[1].zellij_pane_id, "terminal_2");
         assert_eq!(candidates[1].cli_id, "hermes");
         assert_eq!(candidates[1].cwd, "/repo/other");
+    }
+
+    // ── cwd parsing & inheritance tests ──
+
+    #[test]
+    fn parse_body_pane_inherits_layout_cwd_node_param() {
+        let body = r#"layout {
+    cwd "/repo"
+    tab name="Tab #1" {
+        pane command="codex" {
+        }
+    }
+}"#;
+        let panes = parse_dump_layout_body(body);
+        assert_eq!(panes.len(), 1);
+        assert_eq!(panes[0].cwd.as_deref(), Some("/repo"));
+        assert_eq!(panes[0].command.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn parse_body_pane_cwd_attr_overrides_layout_cwd() {
+        let body = r#"layout {
+    cwd "/repo"
+    tab name="Tab #1" {
+        pane cwd="/project" command="codex" {
+        }
+    }
+}"#;
+        let panes = parse_dump_layout_body(body);
+        assert_eq!(panes.len(), 1);
+        assert_eq!(panes[0].cwd.as_deref(), Some("/project"));
+    }
+
+    #[test]
+    fn parse_body_pane_cwd_child_node_overrides_layout_cwd() {
+        let body = r#"layout {
+    cwd "/repo"
+    tab name="Tab #1" {
+        pane command="codex" {
+            cwd "/override"
+        }
+    }
+}"#;
+        let panes = parse_dump_layout_body(body);
+        assert_eq!(panes.len(), 1);
+        assert_eq!(panes[0].cwd.as_deref(), Some("/override"));
+    }
+
+    #[test]
+    fn parse_body_no_cwd_anywhere_is_none() {
+        let body = r#"layout {
+    tab name="Tab #1" {
+        pane command="codex" {
+        }
+    }
+}"#;
+        let panes = parse_dump_layout_body(body);
+        assert_eq!(panes.len(), 1);
+        assert_eq!(panes[0].cwd, None);
+    }
+
+    #[test]
+    fn parse_body_multiple_panes_inherit_same_layout_cwd() {
+        let body = r#"layout {
+    cwd "/shared"
+    tab name="Tab #1" {
+        pane command="codex" {
+        }
+        pane command="hermes" {
+        }
+    }
+}"#;
+        let panes = parse_dump_layout_body(body);
+        assert_eq!(panes.len(), 2);
+        assert_eq!(panes[0].cwd.as_deref(), Some("/shared"));
+        assert_eq!(panes[1].cwd.as_deref(), Some("/shared"));
+    }
+
+    #[test]
+    fn parse_body_pane_no_own_cwd_no_layout_cwd_is_none() {
+        let body = r#"layout {
+    tab name="Tab #1" {
+        pane command="codex" {
+        }
+    }
+}"#;
+        let panes = parse_dump_layout_body(body);
+        assert_eq!(panes.len(), 1);
+        assert_eq!(panes[0].cwd, None);
+        assert_eq!(panes[0].command.as_deref(), Some("codex"));
     }
 }

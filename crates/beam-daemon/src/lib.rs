@@ -25,6 +25,7 @@ mod lark_parse;
 mod lark_replies;
 mod lark_security;
 mod lark_session_cards;
+mod opencode_adopt_resolver;
 mod persistence;
 mod prompt;
 mod route_handlers;
@@ -74,6 +75,7 @@ pub(crate) use lark_parse::*;
 pub(crate) use lark_replies::*;
 pub(crate) use lark_security::*;
 pub(crate) use lark_session_cards::*;
+pub(crate) use opencode_adopt_resolver::*;
 pub(crate) use persistence::*;
 pub(crate) use route_handlers::*;
 pub(crate) use session_cards::*;
@@ -113,9 +115,9 @@ use beam_core::{
     PendingResponseCardState, RestartSessionRequest, ResumeSessionRequest, RunChatBinding,
     RunStatus, ScheduleChatType, ScreenStatus, Session, SessionGroup, SessionInputRequest,
     SessionLocateInfo, SessionScope, SessionStatus, SessionSummary, TalkEvaluation, TermActionKey,
-    TuiPromptOption, WaitResolution, WorkerToDaemon, WorkflowActor, WorkflowOutputRef, can_operate,
-    evaluate_talk, grant_restricted, parse_workflow_definition, read_event_window,
-    read_run_events_pure, read_run_snapshot, scan_cold_workflow_runs,
+    TranscriptChoice, TuiPromptOption, WaitResolution, WorkerToDaemon, WorkflowActor,
+    WorkflowOutputRef, can_operate, evaluate_talk, grant_restricted, parse_workflow_definition,
+    read_event_window, read_run_events_pure, read_run_snapshot, scan_cold_workflow_runs,
 };
 use chrono::Utc;
 use connector_store::{

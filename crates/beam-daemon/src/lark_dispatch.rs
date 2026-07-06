@@ -570,6 +570,7 @@ mod tests {
             pending_id: None,
             working_dir: None,
             dir_search_keyword: None,
+            cli_session_id: None,
         };
         assert_eq!(
             resolve_lark_card_action_session_id(&sessions, "app-1", &direct).as_deref(),
@@ -608,6 +609,7 @@ mod tests {
             pending_id: None,
             working_dir: None,
             dir_search_keyword: None,
+            cli_session_id: None,
         };
         assert_eq!(
             resolve_lark_card_action_session_id(&sessions, "app-1", &fallback).as_deref(),
@@ -662,6 +664,7 @@ mod tests {
             pending_id: None,
             working_dir: None,
             dir_search_keyword: None,
+            cli_session_id: None,
         };
         assert_eq!(
             resolve_lark_card_action_session_id(&sessions, "app-1", &action),
