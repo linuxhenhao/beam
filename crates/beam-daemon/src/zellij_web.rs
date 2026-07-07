@@ -68,9 +68,12 @@ impl ZellijWebTokens {
 /// Runs `zellij web --status` and requires the output to explicitly
 /// contain an "online" indicator.  Relying on exit status alone is
 /// unreliable because the CLI may exit 0 even when the server is
-/// still starting or has stopped.
+/// still starting or has stopped.  If the status command reports
+/// offline or cannot be parsed, fall back to probing the zellij web
+/// HTTP endpoint directly; some zellij versions can have a live web
+/// server while `web --status` is not yet reporting an online state.
 pub fn zellij_web_is_running(port: u16) -> bool {
-    match Command::new("zellij")
+    let status_online = match Command::new("zellij")
         .args([
             "web",
             "--status",
@@ -83,14 +86,90 @@ pub fn zellij_web_is_running(port: u16) -> bool {
     {
         Ok(out) => {
             if !out.status.success() {
-                return false;
+                return zellij_web_http_probe(port);
             }
             let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
             parse_zellij_web_status_output(&stdout, &stderr)
         }
         Err(_) => false,
+    };
+
+    status_online || zellij_web_http_probe(port)
+}
+
+/// Probe the local zellij web HTTP endpoint.
+///
+/// `/info/version` is intentionally used because it is a small unauthenticated
+/// endpoint on zellij web 0.44/0.45.  Older web-client builds are documented to
+/// serve the browser app from `/`, so use that as a compatibility fallback while
+/// still requiring zellij-looking content to avoid accepting an arbitrary HTTP
+/// server on the same port.
+fn zellij_web_http_probe(port: u16) -> bool {
+    http_probe_path(port, "/info/version") || http_probe_path(port, "/")
+}
+
+fn http_probe_path(port: u16, path: &str) -> bool {
+    let addr = match format!("127.0.0.1:{port}").parse::<std::net::SocketAddr>() {
+        Ok(addr) => addr,
+        Err(_) => return false,
+    };
+    let mut stream = match std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)) {
+        Ok(stream) => stream,
+        Err(_) => return false,
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+
+    use std::io::{Read, Write};
+    let request = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
     }
+
+    let mut buf = [0_u8; 2048];
+    match stream.read(&mut buf) {
+        Ok(n) if n > 0 => parse_zellij_web_http_response(path, &buf[..n]),
+        _ => false,
+    }
+}
+
+fn parse_zellij_web_http_response(path: &str, response: &[u8]) -> bool {
+    let response = String::from_utf8_lossy(response);
+    let is_ok = response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200");
+    if !is_ok {
+        return false;
+    }
+
+    let body = match response.split_once("\r\n\r\n") {
+        Some((_, body)) => body.trim(),
+        None => "",
+    };
+
+    if path == "/info/version" {
+        return looks_like_semver(body);
+    }
+
+    response.to_lowercase().contains("zellij")
+}
+
+fn looks_like_semver(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let Some(major) = parts.next() else {
+        return false;
+    };
+    let Some(minor) = parts.next() else {
+        return false;
+    };
+    let Some(patch) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some() {
+        return false;
+    }
+    [major, minor, patch]
+        .iter()
+        .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// Parse the combined stdout+stderr of `zellij web --status` and
@@ -782,6 +861,38 @@ mod tests {
         assert!(!parse_zellij_web_status_output(
             "running but also offline",
             ""
+        ));
+    }
+
+    #[test]
+    fn http_version_response_detected() {
+        assert!(parse_zellij_web_http_response(
+            "/info/version",
+            b"HTTP/1.1 200 OK\r\ncontent-length: 6\r\n\r\n0.45.0"
+        ));
+    }
+
+    #[test]
+    fn http_version_requires_semver_body() {
+        assert!(!parse_zellij_web_http_response(
+            "/info/version",
+            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nOK"
+        ));
+    }
+
+    #[test]
+    fn http_root_response_detects_zellij_app() {
+        assert!(parse_zellij_web_http_response(
+            "/",
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\n\r\n<title>Zellij Web Client</title>"
+        ));
+    }
+
+    #[test]
+    fn http_root_response_rejects_unrelated_server() {
+        assert!(!parse_zellij_web_http_response(
+            "/",
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\n\r\n<title>Other App</title>"
         ));
     }
 
