@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.5.0...beam-daemon-v0.5.1) - 2026-07-08
+
+### Fixed
+
+- *(terminal)* 修复 zellij web 就绪检测
+
 ## [0.5.0](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.4.0...beam-daemon-v0.5.0) - 2026-07-06
 
 ### Added
