@@ -19,6 +19,7 @@ use reqwest::Client;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tokio::sync::{Mutex, oneshot};
 
 use crate::{AppState, RunOptions};
@@ -380,6 +381,6 @@ pub(crate) fn make_state(paths: BeamPaths, bots: HashMap<String, BotConfig>) -> 
         grant_pending: Arc::new(Mutex::new(HashMap::new())),
         pending_creates: Arc::new(Mutex::new(HashMap::new())),
         dashboard_token: Arc::new(Mutex::new(None)),
-        external_host: "localhost".to_string(),
+        external_host: std::sync::Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
     }
 }

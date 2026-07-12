@@ -1649,10 +1649,7 @@ pub async fn run(init: InitConfig) -> Result<()> {
                     state.expected_session_id = Some(cli_session_id.clone());
                     state.cli_session_id = Some(cli_session_id.clone());
                 }
-                info!(
-                    "transcript source set by user: session={}",
-                    cli_session_id
-                );
+                info!("transcript source set by user: session={}", cli_session_id);
                 send_message(&stdout, &WorkerToDaemon::CliSessionId { cli_session_id }).await?;
             }
             DaemonToWorker::Init(_) => {}

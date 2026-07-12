@@ -17,6 +17,12 @@
 - `beam restart` resolves from `PATH`; on this machine it may hit `~/.cargo/bin/beam` instead of `target/debug/beam`. For workspace verification, prefer `target/debug/beam restart` after rebuilding.
 - Lifecycle commands: `beam start` (background daemon), `beam stop`, `beam restart`, `beam logs`, `beam status`.
 - Run tests: `cargo test --workspace --no-fail-fast`; narrower: `cargo test -p <crate> <filter>`.
+- Test maintenance:
+  - Keep pure logic and small component coverage next to the implementation in `src/*.rs` `#[cfg(test)]` modules.
+  - Keep crate-level integration tests under each crate's `tests/` directory; prefer hermetic tests that use temp dirs, mock HTTP servers, random ports, and no live daemon/zellij/tailscale/Feishu dependency.
+  - Keep real-system integration tests as explicit live tests: place them in `tests/live_*.rs` or name the test `live_*`, mark them `#[ignore]`, document required local services/env vars in the test, and run them manually with `cargo test -p <crate> --test <name> -- --ignored`.
+  - When a real-system bug appears, first capture it with an ignored live test when useful, then extract the stable contract into deterministic unit or integration tests where possible.
+  - Shared integration-test setup belongs in `tests/support/` instead of duplicating daemon/AppState/session fixtures across files.
 - There is no repo `lint` or `format` script; do not assume one exists.
 - Commit messages use `type(scope): 中文描述` (conventional commits).
   - `feat:` → minor version bump (0.x.0)

@@ -12,8 +12,10 @@ mod connector_store;
 mod daemon_types;
 mod dashboard_support;
 mod dir_select;
+mod external_host_watcher;
 mod final_output;
 mod grant;
+mod ip_resolver;
 mod lark_api_helpers;
 mod lark_card_builders;
 mod lark_delivery;
@@ -62,7 +64,9 @@ pub(crate) use workflow_catalog::*;
 pub(crate) use workflow_execution::*;
 // Re-export workflow resume items for backward compatibility (used by route handlers and tests)
 pub(crate) use connector_runtime::*;
+pub(crate) use external_host_watcher::*;
 pub(crate) use final_output::*;
+pub(crate) use ip_resolver::*;
 pub(crate) use lark_api_helpers::*;
 pub(crate) use lark_card_builders::*;
 pub(crate) use lark_delivery::*;
@@ -91,9 +95,9 @@ use dashboard_support::{
     WebhookTriggerRecord, extract_dashboard_token, write_webhook_trigger_records,
 };
 use dashboard_support::{
-    dashboard_gate, dashboard_token_is_valid, detect_external_host,
-    load_observed_bot_open_ids_for_app, load_observed_bots_for_chat, mint_dashboard_token,
-    read_webhook_trigger_records, record_observed_bots,
+    dashboard_gate, dashboard_token_is_valid, load_observed_bot_open_ids_for_app,
+    load_observed_bots_for_chat, mint_dashboard_token, read_webhook_trigger_records,
+    record_observed_bots,
 };
 
 use anyhow::{Context, Result};
@@ -142,6 +146,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tower_http::services::ServeDir;
 use tracing::{debug, error, info, warn};
 use trigger_log::{
@@ -177,7 +182,7 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:7893").await?;
     let addr = listener.local_addr()?;
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    let external_host = detect_external_host(&config.web.host);
+    let external_host = resolve_external_host(&config.web.host);
     let started_at = Utc::now();
     let runtime = DaemonRuntimeState {
         pid: std::process::id(),
@@ -240,15 +245,13 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         grant_pending: Arc::new(Mutex::new(grant_pending_map)),
         pending_creates: Arc::new(Mutex::new(pending_creates_map)),
         dashboard_token: Arc::new(Mutex::new(None)),
-        external_host,
+        external_host: std::sync::Arc::new(tokio::sync::RwLock::new(external_host)),
     };
 
-    if matches!(
-        state.config.lark.event_mode.as_str(),
-        "ws" | "websocket" | "stream"
-    ) {
-        spawn_lark_ws_clients(&state);
-    }
+    refresh_external_host(&state, true).await?;
+    spawn_external_host_watcher(state.clone());
+
+    spawn_lark_ws_clients(&state);
 
     // Load replay nonces and rate buckets from disk into static stores.
     {
@@ -649,7 +652,7 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
                 .checked_duration_since(Instant::now())
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
-            "mode": state.config.lark.event_mode,
+            "mode": "ws",
             "botCount": state.bots.len(),
             "daemonPid": std::process::id(),
             "dashboard": {
@@ -796,8 +799,6 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         .route("/sessions", get(list_sessions))
         .route("/api/auth", get(auth))
         .route("/dashboard/login", get(dashboard_login))
-        .route("/lark/events/{app_id}", post(handle_lark_event))
-        .route("/lark/cards/{app_id}", post(handle_lark_card_action))
         .route("/api/schedules", post(create_schedule))
         .route("/webhook/{workflow_id}", post(handle_webhook_trigger))
         .route(
@@ -971,6 +972,11 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
 
     let _ = tokio::fs::remove_file(paths.runtime_state_json()).await;
     Ok(())
+}
+
+#[doc(hidden)]
+pub fn __test_resolve_external_host(bind_host: &str) -> String {
+    resolve_external_host(bind_host)
 }
 
 #[cfg(test)]
@@ -1380,7 +1386,7 @@ pub(crate) mod tests {
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
             pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
-            external_host: "localhost".to_string(),
+            external_host: std::sync::Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
         };
 
         let token = mint_dashboard_token();
@@ -1453,7 +1459,7 @@ pub(crate) mod tests {
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
             pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
-            external_host: "localhost".to_string(),
+            external_host: std::sync::Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
         };
         let node = beam_core::HostExecutorNode {
             base: beam_core::workflow_definition::NodeBase {

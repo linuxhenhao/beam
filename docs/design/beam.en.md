@@ -15,7 +15,7 @@ The core idea is one conversation thread mapped to one local session. Users inte
 Beam is a Rust workspace:
 
 - `beam-core`: shared config, IPC, session models, workflow/event-log types, and API types.
-- `beam-daemon`: long-running process for Feishu integration, HTTP APIs, terminal proxy, session persistence, worker supervision, and workflow orchestration.
+- `beam-daemon`: long-running process for Feishu WS integration, HTTP APIs, terminal proxy, session persistence, worker supervision, and workflow orchestration.
 - `beam-worker`: per-session process that owns the CLI adapter and terminal backend.
 - `beam-cli`: command-line entrypoint for starting/stopping the daemon and sending commands.
 
@@ -70,6 +70,8 @@ The web terminal may resize the real pane through zellij web. Card screenshots a
 
 ## Feishu Card Lifecycle
 
+Feishu message events and card actions enter the daemon through the event stream. Beam does not expose HTTP callback routes such as `/lark/events/{app_id}` or `/lark/cards/{app_id}` for Feishu interaction. Generic workflow webhooks remain separate connector entrypoints.
+
 Streaming cards represent session state. The daemon should create and refresh terminal cards through the established card paths and must not mark the streaming card as the pending final-response target. Final assistant output should not patch over the terminal card.
 
 Card actions include display toggle, screenshot refresh, read-only terminal open, write-link request, close/restart, export text, and workflow actions. Handlers must validate session identity and stale-card state.
@@ -100,5 +102,5 @@ After restart, Beam should:
 - Preserve local terminal ownership and CLI semantics.
 - Keep read-only and writable terminal access separate.
 - Use structured IPC/events instead of parsing UI text when possible.
-- Make external callbacks idempotent.
+- Make generic external callbacks idempotent.
 - Keep Chinese and English system design docs in sync.

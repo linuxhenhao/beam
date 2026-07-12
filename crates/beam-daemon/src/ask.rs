@@ -431,7 +431,7 @@ mod tests {
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
             pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
-            external_host: "localhost".to_string(),
+            external_host: std::sync::Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
         }
     }
 

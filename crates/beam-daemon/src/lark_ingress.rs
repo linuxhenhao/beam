@@ -39,22 +39,6 @@ pub(crate) enum LarkPreflight {
     IgnoredEmptyText,
 }
 
-pub(crate) async fn handle_lark_event(
-    State(state): State<AppState>,
-    AxumPath(app_id): AxumPath<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let payload: Value = serde_json::from_slice(&body).map_err(|err| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("invalid request json: {}", err),
-        )
-    })?;
-
-    handle_lark_event_payload(state, app_id, payload, Some((headers, body))).await
-}
-
 pub(crate) async fn handle_lark_event_payload(
     state: AppState,
     app_id: String,
@@ -736,8 +720,7 @@ pub(crate) async fn handle_lark_event_payload(
                     } else {
                         (None, None)
                     };
-                    let observed_bots =
-                        load_observed_bots_for_chat(&state.paths, &app_id, chat_id);
+                    let observed_bots = load_observed_bots_for_chat(&state.paths, &app_id, chat_id);
                     let context = prompt::build_adopt_context(&prompt::AdoptContextOptions {
                         bot_name: bot_name.as_deref(),
                         bot_open_id: bot_open_id.as_deref(),
@@ -968,34 +951,23 @@ pub(crate) async fn handle_lark_event_payload(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-pub(crate) async fn handle_lark_card_action(
-    State(state): State<AppState>,
-    AxumPath(app_id): AxumPath<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let payload: Value = serde_json::from_slice(&body).map_err(|err| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("invalid request json: {}", err),
-        )
-    })?;
-
-    if let Some(challenge) = payload.get("challenge").and_then(|v| v.as_str()) {
-        return Ok(Json(serde_json::json!({ "challenge": challenge })));
-    }
-
-    let bot = state
-        .bots
-        .get(&app_id)
-        .cloned()
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "bot config not found".to_string()))?;
-    verify_lark_signature(&state, &bot, &headers, &body)
-        .map_err(|err| (StatusCode::UNAUTHORIZED, err.to_string()))?;
-    verify_lark_token(&state, &bot, &payload)
-        .map_err(|err| (StatusCode::UNAUTHORIZED, err.to_string()))?;
-
-    handle_lark_card_action_payload(&state, &app_id, payload).await
+async fn build_terminal_link_choice_card_json(
+    state: &AppState,
+    session: &Session,
+    permission: terminal_auth::TerminalPermission,
+    header_zh: &str,
+    header_en: &str,
+    body_zh: &str,
+    body_en: &str,
+) -> String {
+    let candidate_hosts = external_host_candidates(&state.config.web.host);
+    let candidates = terminal_link_choice_candidates(
+        session,
+        permission,
+        &candidate_hosts,
+        state.config.web.proxy_base_port,
+    );
+    build_terminal_link_choice_card(session, header_zh, header_en, body_zh, body_en, &candidates)
 }
 
 pub(crate) async fn handle_lark_card_action_payload(
@@ -1876,7 +1848,7 @@ pub(crate) async fn handle_lark_card_action_payload(
                 ))),
             }
         }
-        "get_read_only_link" => {
+        "choose_read_only_terminal_link" | "get_read_only_link" => {
             let session_snapshot = {
                 let sessions = state.sessions.lock().await;
                 sessions.get(&session_id).cloned()
@@ -1897,16 +1869,17 @@ pub(crate) async fn handle_lark_card_action_payload(
                     "error",
                     "terminal not ready",
                 )));
-            };
-            let ro_url = build_terminal_url_with_ticket(
-                &format!(
-                    "http://{}:{}/s/{}",
-                    state.external_host, state.config.web.proxy_base_port, session.session_id,
-                ),
-                &session.session_id,
+            }
+            let card_json = build_terminal_link_choice_card_json(
+                &state,
+                &session,
                 terminal_auth::TerminalPermission::ReadOnly,
-            );
-            let card_json = build_readonly_link_card(&session, &ro_url, ""); // No raw token in card
+                "选择只读终端入口",
+                "Choose read-only terminal entry",
+                "如果某个入口打不开，请返回后选择其他入口。",
+                "If one entry does not open, go back and choose another.",
+            )
+            .await;
             if session.lark_app_id != "local" {
                 if let Some(operator_open_id) = action.operator_open_id.as_deref() {
                     let delivered = match private_card_delivery(session.chat_type.as_deref()) {
@@ -1977,15 +1950,16 @@ pub(crate) async fn handle_lark_card_action_payload(
                     "terminal not ready",
                 )));
             }
-            let write_url = build_terminal_url_with_ticket(
-                &format!(
-                    "http://{}:{}/s/{}",
-                    state.external_host, state.config.web.proxy_base_port, session.session_id,
-                ),
-                &session.session_id,
+            let card_json = build_terminal_link_choice_card_json(
+                &state,
+                &session,
                 terminal_auth::TerminalPermission::Write,
-            );
-            let card_json = build_writable_session_card(&session, &write_url);
+                "选择可写终端入口",
+                "Choose writable terminal entry",
+                "如果某个入口打不开，请返回后选择其他入口。",
+                "If one entry does not open, go back and choose another.",
+            )
+            .await;
             if session.lark_app_id != "local" {
                 if let Some(operator_open_id) = action.operator_open_id.as_deref() {
                     let delivered = match private_card_delivery(session.chat_type.as_deref()) {
@@ -2787,9 +2761,10 @@ pub(crate) async fn start_workflow_attempt_resume(
             if let (Some(_web_port), Some(_write_token)) = (existing.web_port, existing.write_token)
             {
                 let terminal_url = build_terminal_url_with_ticket(
-                    &format!(
-                        "http://{}:{}/s/{}",
-                        state.external_host, state.config.web.proxy_base_port, existing.session_id,
+                    &terminal_base_url(
+                        &current_external_host(&state).await,
+                        state.config.web.proxy_base_port,
+                        &existing.session_id,
                     ),
                     &existing.session_id,
                     terminal_auth::TerminalPermission::Write,
@@ -2820,11 +2795,10 @@ pub(crate) async fn start_workflow_attempt_resume(
                         (waiting.web_port, waiting.write_token.clone())
                     {
                         let terminal_url = build_terminal_url_with_ticket(
-                            &format!(
-                                "http://{}:{}/s/{}",
-                                state.external_host,
+                            &terminal_base_url(
+                                &current_external_host(&state).await,
                                 state.config.web.proxy_base_port,
-                                waiting.session_id,
+                                &waiting.session_id,
                             ),
                             &waiting.session_id,
                             terminal_auth::TerminalPermission::Write,
@@ -3091,9 +3065,10 @@ pub(crate) async fn start_workflow_attempt_resume(
             .map_err(internal_error)?;
     }
     let terminal_url = build_terminal_url_with_ticket(
-        &format!(
-            "http://{}:{}/s/{}",
-            state.external_host, state.config.web.proxy_base_port, session_id,
+        &terminal_base_url(
+            &current_external_host(&state).await,
+            state.config.web.proxy_base_port,
+            &session_id,
         ),
         &session_id,
         terminal_auth::TerminalPermission::Write,
@@ -4497,6 +4472,31 @@ mod tests {
             Some("om_abc123"),
             "clicked_message_id must be extracted from restored /context/open_message_id"
         );
+    }
+
+    #[test]
+    fn normalize_lark_ws_card_action_preserves_choose_read_only_terminal_link_action() {
+        let raw = serde_json::json!({
+            "operator": {
+                "open_id": "ou_choose"
+            },
+            "context": {
+                "open_message_id": "om_choose"
+            },
+            "action": {
+                "value": {
+                    "action": "choose_read_only_terminal_link",
+                    "session_id": "sess-choose"
+                },
+                "tag": "button"
+            }
+        });
+
+        let payload = normalize_lark_ws_card_action_from_raw(raw).expect("normalize from raw");
+        let parsed = parse_lark_card_action(&payload).expect("parse normalized payload");
+        assert_eq!(parsed.action, "choose_read_only_terminal_link");
+        assert_eq!(parsed.operator_open_id.as_deref(), Some("ou_choose"),);
+        assert_eq!(parsed.clicked_message_id.as_deref(), Some("om_choose"),);
     }
 
     #[test]

@@ -9,7 +9,7 @@ Beam is a local-first orchestration layer around agent CLIs. It does not invent 
 Key entities:
 
 - Session: the durable unit that binds a chat/thread, bot, CLI adapter, terminal backend, current screen, display mode, and lifecycle state.
-- Daemon: the long-running local process that owns HTTP routes, Feishu callbacks, session persistence, worker supervision, terminal proxying, and workflow coordination.
+- Daemon: the long-running local process that owns HTTP routes, Feishu WS ingress, session persistence, worker supervision, terminal proxying, and workflow coordination.
 - Worker: a per-session process that owns the CLI adapter and terminal backend, samples screen state, sends updates, and accepts control messages.
 - Backend: the terminal/session implementation, currently centered on zellij with support for managed and adopted sessions.
 - Adapter: CLI-specific logic for spawn arguments, transcript polling, final output extraction, usage-limit detection, and session id discovery.
@@ -56,7 +56,7 @@ The daemon owns:
 - Bot registry and per-bot credentials.
 - Session persistence.
 - Worker process lifecycle.
-- Feishu webhook/callback handling.
+- Feishu WS ingress handling.
 - Card rendering and patching.
 - Terminal proxy auth bridge.
 - Workflow run APIs and recovery.
@@ -98,5 +98,5 @@ Session and workflow state must survive daemon restarts. Recovery paths should:
 - Keep daemon, worker, backend, adapter, and card responsibilities separated.
 - Preserve the read-only vs writable terminal split.
 - Prefer structured events and messages over parsing display text.
-- Make callback handling idempotent.
+- Make generic external callback handling idempotent.
 - Keep recovery behavior explicit and testable.

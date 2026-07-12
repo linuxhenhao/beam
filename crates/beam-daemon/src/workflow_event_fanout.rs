@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock, Weak};
 use tracing::{info, warn};
 
-use crate::{AppState, BotConfig, card_i18n};
+use crate::{AppState, BotConfig, card_i18n, current_external_host, host_for_url};
 
 // ---------------------------------------------------------------------------
 // Approval card sender trait (allows mocking in tests)
@@ -371,7 +371,8 @@ pub(crate) async fn fanout_approval_cards_if_needed<S: ApprovalCardSender>(
 
         let dashboard_url = format!(
             "http://{}/dashboard/workflows/{}",
-            state.external_host, run_id
+            host_for_url(&current_external_host(&state).await),
+            run_id
         );
 
         let card = build_approval_card(
@@ -507,7 +508,7 @@ mod tests {
             grant_pending: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             pending_creates: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             dashboard_token: Arc::new(tokio::sync::Mutex::new(None)),
-            external_host: "localhost".to_string(),
+            external_host: Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
         }
     }
 
