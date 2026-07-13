@@ -27,9 +27,9 @@ web terminal 当前不是 worker 内置 xterm.js server。daemon 启动本地 `z
 daemon `run()` 中：
 
 1. `zellij_web_port = web.proxy_base_port + 1`。
-2. `ensure_zellij_web(zellij_web_port)` 确保本地 zellij web 在线。
+2. `ensure_zellij_web(zellij_web_port)` 只检查这个配置端口上的 zellij web；如果 `/info/version` 可读则必须与当前 `zellij --version` 一致，版本不可读时退回到 `zellij web --status --ip 127.0.0.1 --port {port}` 或 HTTP 根探测。版本不一致时先执行 `zellij web --stop --ip 127.0.0.1 --port {port}`；如果端口仍被 zellij web 占用，Linux 上只清理这个端口的监听进程，再用同一端口 `--start --daemonize` 重启。
 3. `ensure_zellij_web_tokens(...)` 创建或加载 read-only / write token，持久化在 Beam state 目录下的 zellij web tokens JSON。
-4. `spawn_zellij_web_watchdog(zellij_web_port)` 每 30 秒检查 zellij web，离线时尝试重启。
+4. `spawn_zellij_web_watchdog(zellij_web_port)` 每 30 秒检查这个配置端口；离线或版本陈旧时按同样的 stop -> cleanup -> start 流程重启，不扫描或影响其他端口。
 5. `terminal_proxy::start_proxy(...)` 在 `web.host:web.proxy_base_port` 启动对外 proxy。
 
 ## 登录和 Cookie Bridge
