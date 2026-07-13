@@ -3405,16 +3405,6 @@ pub(crate) async fn send_input(
     ensure_worker_for_session(&state, &session_id)
         .await
         .map_err(internal_error)?;
-    let session_before_turn = {
-        let sessions = state.sessions.lock().await;
-        sessions
-            .get(&session_id)
-            .cloned()
-            .ok_or_else(|| (StatusCode::NOT_FOUND, "session not found".to_string()))?
-    };
-    if let Err(err) = park_stream_card(&state.paths, &session_before_turn).await {
-        warn!("failed to park stream card for {}: {}", session_id, err);
-    }
     {
         let snapshot = {
             let mut sessions = state.sessions.lock().await;
@@ -3422,17 +3412,14 @@ pub(crate) async fn send_input(
                 .get_mut(&session_id)
                 .ok_or_else(|| (StatusCode::NOT_FOUND, "session not found".to_string()))?;
             session.last_cli_input = Some(req.content.clone());
-            session.stream_card_id = None;
-            session.current_image_key = None;
-            session.current_screen = None;
-            session.last_screen_status = None;
-            session.stream_card_nonce = None;
-            session.last_final_output_turn_id = None;
             sessions.clone()
         };
         persist_sessions(&state.paths, &snapshot)
             .await
             .map_err(internal_error)?;
+    }
+    if let Err(err) = begin_lark_turn_card(&state, &session_id, "starting").await {
+        warn!("failed to begin lark turn card for {}: {}", session_id, err);
     }
 
     let turn_id = next_session_turn_id();
@@ -4888,5 +4875,84 @@ mod tests {
         assert_eq!(ChatMode::from("group"), ChatMode::Group);
         assert_eq!(ChatMode::from(""), ChatMode::Group);
         assert_eq!(ChatMode::from("unknown"), ChatMode::Group);
+    }
+
+    #[tokio::test]
+    async fn send_input_keeps_live_card_when_turn_card_begin_fails() {
+        let paths = temp_paths("send-input-turn-begin-fail");
+        maybe_remove_dir(&paths.root().to_path_buf());
+
+        let state = make_state(paths.clone(), HashMap::new());
+        let mut session = make_session("sess-send-input");
+        session.status = SessionStatus::Active;
+        session.closed_at = None;
+        session.lark_app_id = "app-no-bot".to_string();
+        session.stream_card_id = Some("om_live_old".to_string());
+        session.stream_card_nonce = Some("nonce_live_old".to_string());
+        session.current_screen = Some("old output".to_string());
+        session.current_image_key = Some("img_live_old".to_string());
+        session.last_screen_status = Some(ScreenStatus::Working);
+        session.last_final_output_turn_id = Some("turn-old".to_string());
+        session.last_cli_input = Some("previous input".to_string());
+        {
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert(session.session_id.clone(), session.clone());
+        }
+
+        let mut child = tokio::process::Command::new("/bin/cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn worker");
+        let stdin = child.stdin.take().expect("worker stdin");
+        {
+            let mut workers = state.workers.lock().await;
+            workers.insert(
+                session.session_id.clone(),
+                WorkerHandle {
+                    child,
+                    stdin: Arc::new(Mutex::new(stdin)),
+                },
+            );
+        }
+
+        let response = send_input(
+            State(state.clone()),
+            AxumPath(session.session_id.clone()),
+            Json(SessionInputRequest {
+                content: "hello".to_string(),
+                raw: false,
+            }),
+        )
+        .await;
+        assert_eq!(response, Ok(StatusCode::ACCEPTED));
+
+        let stored = {
+            let sessions = state.sessions.lock().await;
+            sessions
+                .get(&session.session_id)
+                .cloned()
+                .expect("stored session")
+        };
+        assert_eq!(stored.last_cli_input.as_deref(), Some("hello"));
+        assert_eq!(stored.stream_card_id.as_deref(), Some("om_live_old"));
+        assert_eq!(stored.stream_card_nonce.as_deref(), Some("nonce_live_old"));
+        assert_eq!(stored.current_screen.as_deref(), Some("old output"));
+        assert_eq!(stored.current_image_key.as_deref(), Some("img_live_old"));
+        assert_eq!(stored.last_screen_status, Some(ScreenStatus::Working));
+        assert_eq!(
+            stored.last_final_output_turn_id.as_deref(),
+            Some("turn-old")
+        );
+
+        let mut worker = {
+            let mut workers = state.workers.lock().await;
+            workers.remove(&session.session_id).expect("worker handle")
+        };
+        let _ = worker.child.kill().await;
+        let _ = worker.child.wait().await;
+
+        maybe_remove_dir(&paths.root().to_path_buf());
     }
 }
