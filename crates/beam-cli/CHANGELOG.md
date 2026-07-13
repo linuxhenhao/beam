@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/linuxhenhao/beam/compare/beam-cli-v0.5.1...beam-cli-v0.6.0) - 2026-07-13
+
+### Added
+
+- *(daemon)* 支持外部终端入口候选
+
 ## [0.5.0](https://github.com/linuxhenhao/beam/compare/beam-cli-v0.4.0...beam-cli-v0.5.0) - 2026-07-06
 
 ### Added
