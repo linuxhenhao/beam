@@ -192,14 +192,14 @@ Adapter trait
 ```mermaid
 sequenceDiagram
     participant F as 飞书用户
-    participant L as Lark Webhook
+    participant L as Lark WS
     participant D as Daemon
     participant S as Session Store
     participant W as Worker
     participant C as CLI (opencode)
 
     F->>L: 发送消息 "你好"
-    L->>D: POST /lark/events/{app_id}
+    L->>D: event stream message
     D->>D: 权限检查 (can_operate / can_talk)
     D->>D: classify_lark_text_action
     alt 新话题 / 无 active session

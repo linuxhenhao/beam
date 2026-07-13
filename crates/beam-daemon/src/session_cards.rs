@@ -1,9 +1,54 @@
 use super::*;
 
+fn is_tailscale_ipv4_host(host: &str) -> bool {
+    let Ok(ip) = host.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    let [a, b, _, _] = ip.octets();
+    a == 100 && (64..=127).contains(&b)
+}
+
+fn is_rfc1918_lan_ipv4_host(host: &str) -> bool {
+    let Ok(ip) = host.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    let [a, b, _, _] = ip.octets();
+    matches!((a, b), (10, _) | (172, 16..=31) | (192, 168))
+}
+
+fn terminal_link_candidate_labels(host: &str, is_first: bool) -> (String, String) {
+    if host == "localhost" {
+        return ("本机地址".to_string(), "Localhost".to_string());
+    }
+    if is_first {
+        return (
+            format!("推荐地址 {}", host),
+            format!("Recommended address {}", host),
+        );
+    }
+    if is_tailscale_ipv4_host(host) {
+        return (
+            format!("Tailscale 地址 {}", host),
+            format!("Tailscale address {}", host),
+        );
+    }
+    if is_rfc1918_lan_ipv4_host(host) {
+        return (
+            format!("局域网地址 {}", host),
+            format!("LAN address {}", host),
+        );
+    }
+    (
+        format!("候选地址 {}", host),
+        format!("Candidate address {}", host),
+    )
+}
+
 pub(crate) fn action_uses_live_stream_card(action: &str) -> bool {
     matches!(
         action,
         "get_write_link"
+            | "choose_read_only_terminal_link"
             | "toggle_display"
             | "toggle_stream"
             | "refresh_screenshot"
@@ -74,7 +119,84 @@ pub(crate) fn card_text<'a>(locale: Option<&str>, zh: &'a str, en: &'a str) -> &
     if prompt::is_zh_locale(locale) { zh } else { en }
 }
 
-pub(crate) fn build_writable_session_card(session: &Session, write_url: &str) -> String {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TerminalLinkCandidate {
+    pub(crate) label_zh: String,
+    pub(crate) label_en: String,
+    pub(crate) url: String,
+}
+
+impl TerminalLinkCandidate {
+    pub(crate) fn new(
+        label_zh: impl Into<String>,
+        label_en: impl Into<String>,
+        url: impl Into<String>,
+    ) -> Self {
+        Self {
+            label_zh: label_zh.into(),
+            label_en: label_en.into(),
+            url: url.into(),
+        }
+    }
+}
+
+fn normalize_terminal_base_url(url: &str) -> Option<String> {
+    let mut parsed = url::Url::parse(url.trim()).ok()?;
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    Some(parsed.to_string())
+}
+
+pub(crate) fn terminal_link_choice_candidates(
+    session: &Session,
+    permission: terminal_auth::TerminalPermission,
+    candidate_hosts: &[String],
+    proxy_base_port: u16,
+) -> Vec<TerminalLinkCandidate> {
+    let candidate_url =
+        |base_url: &str| build_terminal_url_with_ticket(base_url, &session.session_id, permission);
+    let mut candidates = Vec::new();
+    let mut candidate_base_urls = HashSet::new();
+
+    for (idx, host) in candidate_hosts.iter().enumerate() {
+        let base_url = terminal_base_url(host, proxy_base_port, &session.session_id);
+        if !candidate_base_urls.insert(base_url.clone()) {
+            continue;
+        }
+        let (label_zh, label_en) = terminal_link_candidate_labels(host, idx == 0);
+        candidates.push(TerminalLinkCandidate::new(
+            label_zh,
+            label_en,
+            candidate_url(&base_url),
+        ));
+    }
+
+    if let Some(current_base) = session
+        .terminal_url
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .and_then(normalize_terminal_base_url)
+    {
+        if !candidate_base_urls.contains(&current_base) {
+            candidates.push(TerminalLinkCandidate::new(
+                "当前地址",
+                "Current address",
+                candidate_url(&current_base),
+            ));
+        }
+    }
+
+    candidates
+}
+
+pub(crate) fn build_terminal_link_choice_card(
+    session: &Session,
+    header_zh: &str,
+    header_en: &str,
+    body_zh: &str,
+    body_en: &str,
+    candidates: &[TerminalLinkCandidate],
+) -> String {
     let locale = session.locale.as_deref();
     let title = if session.title.trim().is_empty() {
         session
@@ -84,117 +206,88 @@ pub(crate) fn build_writable_session_card(session: &Session, write_url: &str) ->
     } else {
         session.title.clone()
     };
-    let card_nonce = session.stream_card_nonce.clone().unwrap_or_default();
-    let mut actions = vec![serde_json::json!({
-        "tag": "button",
-        "text": card_i18n::plain_text(locale, "打开可写终端", "Open writable terminal"),
-        "type": "primary",
-        "multi_url": {
-            "url": write_url,
-            "pc_url": write_url,
-            "android_url": write_url,
-            "ios_url": write_url,
-        },
-    })];
-    if session.adopted_from.is_none() {
-        actions.push(serde_json::json!({
-            "tag": "button",
-            "text": card_i18n::plain_text(locale, "重启", "Restart"),
-            "type": "default",
-            "value": {
-                "action": "restart",
-                "root_id": session.root_message_id,
-                "session_id": session.session_id,
-                "cli_id": session.cli_id.clone().unwrap_or_else(|| "cli".to_string()),
-                "visibility": "private",
-                "card_nonce": card_nonce,
-            }
-        }));
-    }
-    let (close_label_zh, close_label_en) = if session.adopted_from.is_some() {
-        ("断开连接", "Disconnect")
-    } else {
-        ("关闭会话", "Close session")
-    };
-    actions.push(serde_json::json!({
-        "tag": "button",
-        "text": card_i18n::plain_text(locale, close_label_zh, close_label_en),
-        "type": "danger",
-        "value": {
-            "action": "close",
-            "root_id": session.root_message_id,
-            "session_id": session.session_id,
-            "cli_id": session.cli_id.clone().unwrap_or_else(|| "cli".to_string()),
-            "visibility": "private",
-            "card_nonce": session.stream_card_nonce.clone().unwrap_or_default(),
-        }
-    }));
+    let display_title = title.clone();
+    let actions: Vec<serde_json::Value> = candidates
+        .iter()
+        .enumerate()
+        .map(|(idx, candidate)| {
+            let text = card_i18n::plain_text(locale, &candidate.label_zh, &candidate.label_en);
+            serde_json::json!({
+                "tag": "button",
+                "text": text,
+                "type": if idx == 0 { "primary" } else { "default" },
+                "multi_url": {
+                    "url": candidate.url,
+                    "pc_url": candidate.url,
+                    "android_url": candidate.url,
+                    "ios_url": candidate.url,
+                },
+            })
+        })
+        .collect();
     serde_json::json!({
         "config": { "wide_screen_mode": true },
         "header": {
-            "title": card_i18n::plain_text(locale, format!("{} · {}", "终端", title), format!("{} · {}", "terminal", title)),
+            "title": card_i18n::plain_text(locale, header_zh, header_en),
             "template": "blue"
         },
         "elements": [
+            {
+                "tag": "markdown",
+                "content": card_text(locale, body_zh, body_en),
+                "i18n_content": {
+                    "zh_cn": body_zh,
+                    "en_us": body_en,
+                },
+            },
+            {
+                "tag": "markdown",
+                "content": card_text(
+                    locale,
+                    &format!("**会话** `{}`", display_title),
+                    &format!("**Session** `{}`", display_title),
+                ),
+                "i18n_content": {
+                    "zh_cn": format!("**会话** `{}`", display_title),
+                    "en_us": format!("**Session** `{}`", display_title),
+                },
+            },
             { "tag": "action", "actions": actions }
         ]
     })
     .to_string()
 }
 
+#[allow(dead_code)]
+pub(crate) fn build_writable_session_card(session: &Session, write_url: &str) -> String {
+    build_terminal_link_choice_card(
+        session,
+        "选择可写终端入口",
+        "Choose writable terminal entry",
+        "如果某个入口打不开，请返回后选择其他入口。",
+        "If one entry does not open, go back and choose another.",
+        &[TerminalLinkCandidate::new(
+            "可写终端",
+            "Writable terminal",
+            write_url,
+        )],
+    )
+}
+
+#[allow(dead_code)]
 pub(crate) fn build_readonly_link_card(session: &Session, ro_url: &str, _ro_token: &str) -> String {
-    let locale = session.locale.as_deref();
-    let title = session
-        .cli_id
-        .clone()
-        .unwrap_or_else(|| session.session_id.clone());
-    let display_title = if session.title.trim().is_empty() {
-        title.clone()
-    } else {
-        session.title.clone()
-    };
-    serde_json::json!({
-        "config": { "wide_screen_mode": true },
-        "header": {
-            "title": card_i18n::plain_text(
-                locale,
-                format!("只读终端 · {}", display_title),
-                format!("Read-only terminal · {}", display_title),
-            ),
-            "template": "blue"
-        },
-        "elements": [
-            {
-                "tag": "markdown",
-                "content": card_text(
-                    locale,
-                    "**只读访问**\n\n点击下方按钮以只读模式打开终端。链接仅可使用一次。",
-                    "**Read-only access**\n\nClick the button below to open the terminal in read-only mode. The link is single-use."
-                ),
-                "i18n_content": {
-                    "zh_cn": "**只读访问**\n\n点击下方按钮以只读模式打开终端。链接仅可使用一次。",
-                    "en_us": "**Read-only access**\n\nClick the button below to open the terminal in read-only mode. The link is single-use.",
-                },
-            },
-            {
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": card_i18n::plain_text(locale, "打开只读终端", "Open read-only terminal"),
-                        "type": "primary",
-                        "multi_url": {
-                            "url": ro_url,
-                            "pc_url": ro_url,
-                            "android_url": ro_url,
-                            "ios_url": ro_url,
-                        }
-                    }
-                ]
-            }
-        ]
-    })
-    .to_string()
+    build_terminal_link_choice_card(
+        session,
+        "选择只读终端入口",
+        "Choose read-only terminal entry",
+        "如果某个入口打不开，请返回后选择其他入口。",
+        "If one entry does not open, go back and choose another.",
+        &[TerminalLinkCandidate::new(
+            "只读终端",
+            "Read-only terminal",
+            ro_url,
+        )],
+    )
 }
 
 pub(crate) fn next_display_mode(current: Option<DisplayMode>) -> DisplayMode {
@@ -344,21 +437,6 @@ pub(crate) fn build_streaming_card(session: &Session, status: &str) -> String {
     } else {
         session.title.clone()
     };
-    let base_terminal = session.terminal_url.clone().unwrap_or_default();
-    let zellij_tokens = load_zellij_web_tokens_for_card();
-    let has_ro_token = zellij_tokens
-        .as_ref()
-        .and_then(|t| t.read_only_token.as_deref())
-        .map_or(false, |t| !t.is_empty());
-    let terminal = if has_ro_token && !base_terminal.is_empty() {
-        build_terminal_url_with_ticket(
-            &base_terminal,
-            &session.session_id,
-            terminal_auth::TerminalPermission::ReadOnly,
-        )
-    } else {
-        base_terminal
-    };
     let effective_status = if status == "limited"
         && session
             .usage_limit
@@ -461,14 +539,15 @@ pub(crate) fn build_streaming_card(session: &Session, status: &str) -> String {
     }));
     actions.push(serde_json::json!({
         "tag": "button",
-        "text": card_i18n::plain_text(locale, "打开只读终端", "Open read-only terminal"),
+        "text": card_i18n::plain_text(locale, "选择只读终端入口", "Choose read-only terminal entry"),
         "type": "primary",
-        "multi_url": {
-            "url": terminal,
-            "pc_url": terminal,
-            "android_url": terminal,
-            "ios_url": terminal,
-        },
+        "value": {
+            "action": "choose_read_only_terminal_link",
+            "root_id": session.root_message_id,
+            "session_id": session.session_id,
+            "cli_id": session.cli_id.clone().unwrap_or_else(|| "cli".to_string()),
+            "card_nonce": action_nonce,
+        }
     }));
 
     actions.push(serde_json::json!({
@@ -703,7 +782,7 @@ mod tests {
     }
 
     #[test]
-    fn build_writable_session_card_contains_write_restart_and_close_buttons() {
+    fn build_writable_session_card_lists_single_choice_button() {
         let mut session = make_session("sess-7");
         session.status = SessionStatus::Active;
         session.closed_at = None;
@@ -712,32 +791,22 @@ mod tests {
         let card: Value = serde_json::from_str(&build_writable_session_card(&session, write_url))
             .expect("valid card json");
         let actions = card
-            .pointer("/elements/0/actions")
+            .pointer("/elements/2/actions")
             .and_then(Value::as_array)
             .expect("actions array");
-        assert_eq!(actions.len(), 3);
+        assert_eq!(actions.len(), 1);
         assert_eq!(
             actions[0].pointer("/multi_url/url").and_then(Value::as_str),
             Some("http://proxy.example.com/s/sess-7?token=abc")
         );
         assert_eq!(
-            actions[1].pointer("/value/action").and_then(Value::as_str),
-            Some("restart")
-        );
-        assert_eq!(
-            actions[2].pointer("/value/action").and_then(Value::as_str),
-            Some("close")
-        );
-        assert_eq!(
-            actions[1]
-                .pointer("/value/visibility")
-                .and_then(Value::as_str),
-            Some("private")
+            actions[0].pointer("/text/content").and_then(Value::as_str),
+            Some("Writable terminal")
         );
     }
 
     #[test]
-    fn build_writable_session_card_adopted_shows_disconnect_without_restart() {
+    fn build_writable_session_card_keeps_choice_copy_for_adopted_sessions() {
         let mut session = make_session("sess-7-adopted");
         session.status = SessionStatus::Active;
         session.closed_at = None;
@@ -753,29 +822,18 @@ mod tests {
         let card: Value = serde_json::from_str(&build_writable_session_card(&session, write_url))
             .expect("valid card json");
         let actions = card
-            .pointer("/elements/0/actions")
+            .pointer("/elements/2/actions")
             .and_then(Value::as_array)
             .expect("actions array");
-        // Adopted: 2 actions — "Open writable terminal" + "Disconnect" (no restart)
-        assert_eq!(actions.len(), 2);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            actions[0].pointer("/text/content").and_then(Value::as_str),
+            Some("Writable terminal")
+        );
         assert_eq!(
             actions[0].pointer("/multi_url/url").and_then(Value::as_str),
             Some("http://proxy.example.com/s/sess-7-adopted?token=abc")
         );
-        assert_eq!(
-            actions[1].pointer("/value/action").and_then(Value::as_str),
-            Some("close")
-        );
-        assert_eq!(
-            actions[1].pointer("/text/content").and_then(Value::as_str),
-            Some("Disconnect")
-        );
-        // No restart action present
-        let action_names: Vec<&str> = actions
-            .iter()
-            .filter_map(|a| a.pointer("/value/action").and_then(Value::as_str))
-            .collect();
-        assert!(!action_names.contains(&"restart"));
     }
 
     #[test]
@@ -795,7 +853,7 @@ mod tests {
             .expect("markdown body");
         assert!(
             !body.contains("Open read-only terminal"),
-            "markdown should not contain Open read-only terminal link"
+            "markdown should not contain the old read-only terminal button copy"
         );
         let actions = card
             .pointer("/elements/2/actions")
@@ -815,28 +873,27 @@ mod tests {
             "should not have get_read_only_link action"
         );
         assert!(
+            action_names.contains(&"choose_read_only_terminal_link"),
+            "should have choose_read_only_terminal_link action"
+        );
+        assert!(
             action_names.contains(&"get_write_link"),
             "should have get_write_link action"
         );
-        // Check URL starts with base (may have ticket appended)
-        let url = actions
+        let choose_action = actions
             .iter()
-            .find_map(|a| a.pointer("/multi_url/url").and_then(Value::as_str))
-            .expect("url should exist");
-        let terminal_action = actions
-            .iter()
-            .find(|a| a.pointer("/multi_url/url").and_then(Value::as_str) == Some(url))
-            .expect("terminal action should exist");
+            .find(|a| {
+                a.pointer("/value/action").and_then(Value::as_str)
+                    == Some("choose_read_only_terminal_link")
+            })
+            .expect("choose action should exist");
         assert_eq!(
-            terminal_action
+            choose_action
                 .pointer("/text/content")
                 .and_then(Value::as_str),
-            Some("Open read-only terminal")
+            Some("Choose read-only terminal entry")
         );
-        assert!(
-            url.starts_with("http://127.0.0.1:9000/s/sess-8"),
-            "url should start with base: {url}"
-        );
+        assert!(choose_action.pointer("/multi_url").is_none());
         assert!(card.pointer("/elements/3").is_none());
     }
 
@@ -864,7 +921,7 @@ mod tests {
         );
         assert_eq!(
             actions[1].pointer("/text/content").and_then(Value::as_str),
-            Some("打开只读终端")
+            Some("选择只读终端入口")
         );
         assert_eq!(
             actions[2].pointer("/text/content").and_then(Value::as_str),
@@ -873,22 +930,185 @@ mod tests {
     }
 
     #[test]
-    fn build_readonly_link_card_omits_stale_five_minute_copy() {
+    fn build_terminal_link_choice_card_lists_multiple_ticketed_candidates() {
         let session = make_session("sess-ro");
-        let card: Value = serde_json::from_str(&build_readonly_link_card(
+        let candidate_a = TerminalLinkCandidate::new(
+            "当前地址 / Current",
+            "Current address",
+            build_terminal_url_with_ticket(
+                "http://proxy.example.com/s/sess-ro",
+                "sess-ro",
+                terminal_auth::TerminalPermission::ReadOnly,
+            ),
+        );
+        let candidate_b = TerminalLinkCandidate::new(
+            "推荐地址 / Recommended",
+            "Recommended address",
+            build_terminal_url_with_ticket(
+                "http://lan.example.com/s/sess-ro",
+                "sess-ro",
+                terminal_auth::TerminalPermission::ReadOnly,
+            ),
+        );
+        let card: Value = serde_json::from_str(&build_terminal_link_choice_card(
             &session,
-            "http://proxy.example.com/s/sess-ro",
-            "",
+            "选择只读终端入口",
+            "Choose read-only terminal entry",
+            "如果某个入口打不开，请返回后选择其他入口。",
+            "If one entry does not open, go back and choose another.",
+            &[candidate_a, candidate_b],
         ))
         .expect("valid card json");
+        let actions = card
+            .pointer("/elements/2/actions")
+            .and_then(Value::as_array)
+            .expect("actions array");
+        assert_eq!(actions.len(), 2);
+        assert_eq!(
+            actions[0].pointer("/type").and_then(Value::as_str),
+            Some("primary")
+        );
+        assert_eq!(
+            actions[1].pointer("/type").and_then(Value::as_str),
+            Some("default")
+        );
+        for action in actions {
+            let url = action
+                .pointer("/multi_url/url")
+                .and_then(Value::as_str)
+                .expect("multi_url url");
+            assert!(
+                url.contains("ticket="),
+                "terminal links should carry single-use tickets: {url}"
+            );
+        }
         let body = card
             .pointer("/elements/0/content")
             .and_then(Value::as_str)
             .expect("markdown body");
-        assert!(body.contains("single-use"));
         assert!(
-            !body.contains("5 minutes"),
-            "read-only link copy should not mention the stale 5 minute TTL"
+            body.contains("choose another"),
+            "choice copy should explain how to switch entries"
+        );
+    }
+
+    #[test]
+    fn terminal_link_candidate_labels_cover_host_types() {
+        assert_eq!(
+            terminal_link_candidate_labels("100.64.12.34", true),
+            (
+                "推荐地址 100.64.12.34".to_string(),
+                "Recommended address 100.64.12.34".to_string(),
+            )
+        );
+        assert_eq!(
+            terminal_link_candidate_labels("100.64.12.34", false),
+            (
+                "Tailscale 地址 100.64.12.34".to_string(),
+                "Tailscale address 100.64.12.34".to_string(),
+            )
+        );
+        assert_eq!(
+            terminal_link_candidate_labels("192.168.31.20", false),
+            (
+                "局域网地址 192.168.31.20".to_string(),
+                "LAN address 192.168.31.20".to_string(),
+            )
+        );
+        assert_eq!(
+            terminal_link_candidate_labels("example.com", false),
+            (
+                "候选地址 example.com".to_string(),
+                "Candidate address example.com".to_string(),
+            )
+        );
+        assert_eq!(
+            terminal_link_candidate_labels("localhost", false),
+            ("本机地址".to_string(), "Localhost".to_string())
+        );
+    }
+
+    #[test]
+    fn terminal_link_choice_candidates_share_permission_logic_and_append_current_address() {
+        let mut session = make_session("sess-choice");
+        session.terminal_url = Some("http://old.example.com:9000/s/sess-choice".to_string());
+        let candidate_hosts = vec![
+            "100.64.12.34".to_string(),
+            "192.168.31.20".to_string(),
+            "192.168.31.20".to_string(),
+            "localhost".to_string(),
+        ];
+
+        let read_only = terminal_link_choice_candidates(
+            &session,
+            terminal_auth::TerminalPermission::ReadOnly,
+            &candidate_hosts,
+            8800,
+        );
+        let write = terminal_link_choice_candidates(
+            &session,
+            terminal_auth::TerminalPermission::Write,
+            &candidate_hosts,
+            8800,
+        );
+
+        assert_eq!(read_only.len(), 4);
+        assert_eq!(
+            read_only
+                .iter()
+                .map(|candidate| candidate.label_en.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Recommended address 100.64.12.34",
+                "LAN address 192.168.31.20",
+                "Localhost",
+                "Current address",
+            ]
+        );
+        assert!(
+            read_only
+                .last()
+                .map(|candidate| candidate.url.contains("old.example.com"))
+                .unwrap_or(false)
+        );
+        assert_ne!(read_only[0].url, write[0].url);
+        let mut used = terminal_auth::UsedTickets::default();
+        let read_only_ticket = url::Url::parse(&read_only[0].url)
+            .expect("read-only url")
+            .query_pairs()
+            .find_map(|(key, value)| {
+                (key == terminal_auth::TICKET_QUERY_PARAM).then_some(value.into_owned())
+            })
+            .expect("read-only ticket");
+        let read_only_payload =
+            terminal_auth::verify_terminal_ticket(&read_only_ticket, "sess-choice", &mut used)
+                .expect("read-only ticket should verify");
+        assert_eq!(
+            read_only_payload.permission,
+            terminal_auth::TerminalPermission::ReadOnly
+        );
+        let write_ticket = url::Url::parse(&write[0].url)
+            .expect("write url")
+            .query_pairs()
+            .find_map(|(key, value)| {
+                (key == terminal_auth::TICKET_QUERY_PARAM).then_some(value.into_owned())
+            })
+            .expect("write ticket");
+        let write_payload = terminal_auth::verify_terminal_ticket(
+            &write_ticket,
+            "sess-choice",
+            &mut terminal_auth::UsedTickets::default(),
+        )
+        .expect("write ticket should verify");
+        assert_eq!(
+            write_payload.permission,
+            terminal_auth::TerminalPermission::Write
+        );
+        assert!(
+            read_only
+                .iter()
+                .all(|candidate| candidate.url.contains("ticket=")),
+            "every candidate should be ticketed"
         );
     }
 

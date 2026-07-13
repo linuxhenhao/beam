@@ -43,3 +43,5 @@ feishu-sdk.workspace = true
 libc.workspace = true
 rustls.workspace = true
 shell-words.workspace = true
+url.workspace = true
+netwatcher = { version = "0.7.1", features = ["tokio"] }

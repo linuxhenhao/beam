@@ -127,8 +127,6 @@ pub struct QuotaEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LarkConfig {
-    #[serde(default = "default_lark_event_mode")]
-    pub event_mode: String,
     #[serde(default)]
     pub verification_token: Option<String>,
     #[serde(default)]
@@ -185,14 +183,9 @@ impl Default for ScreenAnalyzerConfig {
     }
 }
 
-fn default_lark_event_mode() -> String {
-    "http".to_string()
-}
-
 impl Default for LarkConfig {
     fn default() -> Self {
         Self {
-            event_mode: default_lark_event_mode(),
             verification_token: None,
             encrypt_key: None,
         }

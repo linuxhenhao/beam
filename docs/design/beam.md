@@ -332,9 +332,11 @@ struct Envelope<T> {
 
 ## 10. 飞书/Lark Bridge
 
+飞书消息和卡片动作通过事件长连接接入 daemon；不再暴露 `/lark/events/{app_id}` 或 `/lark/cards/{app_id}` 这类 HTTP callback 入口。通用工作流 webhook 仍属于独立 connector 能力，不受此约束。
+
 第一阶段实现最小飞书能力：
 
-- 事件接收：优先 HTTP callback；event websocket 后补。
+- 事件接收：使用飞书事件长连接。
 - 发送普通文本消息。
 - 发送/更新 interactive card。
 - 获取 thread messages。
@@ -521,9 +523,6 @@ quiet_restart = false
 [web]
 host = "0.0.0.0"
 proxy_base_port = 8800
-
-[lark]
-event_mode = "http"
 ```
 
 `bots.json`：

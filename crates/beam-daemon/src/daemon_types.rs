@@ -64,7 +64,7 @@ pub(crate) struct AppState {
     pub(crate) grant_pending: Arc<Mutex<HashMap<String, grant::GrantPendingEntry>>>,
     pub(crate) pending_creates: Arc<Mutex<HashMap<String, dir_select::PendingCreateSession>>>,
     pub(crate) dashboard_token: Arc<Mutex<Option<DashboardAuthToken>>>,
-    pub(crate) external_host: String,
+    pub(crate) external_host: Arc<RwLock<String>>,
 }
 
 pub(crate) struct WorkerHandle {

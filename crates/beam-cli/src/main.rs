@@ -2479,7 +2479,7 @@ async fn cmd_setup(paths: &BeamPaths) -> Result<()> {
         let defaults = "\
 [daemon]\nworking_dirs = [\"~\"]\n\n\
 [web]\nhost = \"0.0.0.0\"\nproxy_base_port = 8800\n\n\
-[lark]\nevent_mode = \"http\"\n";
+";
         std::fs::write(&cfg, defaults)?;
         println!("Wrote {}", cfg.display());
     } else {

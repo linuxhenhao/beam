@@ -161,14 +161,14 @@ pub(crate) async fn spawn_worker(
             match serde_json::from_str::<WorkerToDaemon>(&line) {
                 Ok(WorkerToDaemon::Ready { zellij_session }) => {
                     {
+                        let external_host = current_external_host(&state).await;
                         let snapshot = {
                             let mut sessions = state.sessions.lock().await;
                             if let Some(entry) = sessions.get_mut(&session_id_for_task) {
-                                entry.terminal_url = Some(format!(
-                                    "http://{}:{}/s/{}",
-                                    state.external_host,
+                                entry.terminal_url = Some(terminal_base_url(
+                                    &external_host,
                                     state.config.web.proxy_base_port,
-                                    session_id_for_task
+                                    &session_id_for_task,
                                 ));
                                 entry.last_screen_status = Some(ScreenStatus::Starting);
                             }
