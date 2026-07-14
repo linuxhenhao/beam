@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.6.1...beam-daemon-v0.6.2) - 2026-07-14
+
+### Fixed
+
+- *(daemon)* 优化飞书回复提醒随机化
+
 ## [0.6.1](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.6.0...beam-daemon-v0.6.1) - 2026-07-14
 
 ### Fixed
