@@ -14,6 +14,8 @@ use tokio::sync::broadcast;
 use tracing::warn;
 
 const RAW_INPUT_ENTER_DELAY: Duration = Duration::from_millis(200);
+const ZELLIJ_PANE_DISCOVERY_RETRY_INTERVAL: Duration = Duration::from_millis(200);
+const ZELLIJ_PANE_DISCOVERY_MAX_ATTEMPTS: usize = 15;
 
 #[derive(Debug, Clone)]
 pub struct SpawnOpts {
@@ -183,17 +185,8 @@ impl ZellijBackend {
         Ok((tmp, config_path, layout_path))
     }
 
-    fn discover_pane_id(session: &str) -> Option<String> {
-        let out = std::process::Command::new("zellij")
-            .arg("--session")
-            .arg(session)
-            .args(["action", "list-panes", "--json"])
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let json: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    fn parse_terminal_pane_id(stdout: &[u8]) -> Option<String> {
+        let json: serde_json::Value = serde_json::from_slice(stdout).ok()?;
         let panes = json.as_array()?;
         for pane in panes {
             let is_plugin = pane
@@ -210,19 +203,43 @@ impl ZellijBackend {
         None
     }
 
+    fn discover_pane_id(session: &str) -> Option<String> {
+        let out = std::process::Command::new("zellij")
+            .arg("--session")
+            .arg(session)
+            .args(["action", "list-panes", "--json"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Self::parse_terminal_pane_id(&out.stdout)
+    }
+
     fn pane_id_str(&self) -> &str {
         self.pane_id.as_deref().unwrap_or("terminal_0")
     }
 
-    fn ensure_zellij_subscribe_started(&mut self) {
-        if self.pane_id.is_none() {
-            self.pane_id = Self::discover_pane_id(&self.session_name);
-            if self.pane_id.is_none() {
-                warn!(
-                    "zellij session {}: failed to discover pane_id, falling back to terminal_0",
-                    self.session_name
-                );
+    async fn wait_for_zellij_pane_id(&self) -> Result<String> {
+        for attempt in 0..ZELLIJ_PANE_DISCOVERY_MAX_ATTEMPTS {
+            if let Some(pane_id) = Self::discover_pane_id(&self.session_name) {
+                return Ok(pane_id);
             }
+            if attempt + 1 < ZELLIJ_PANE_DISCOVERY_MAX_ATTEMPTS {
+                tokio::time::sleep(ZELLIJ_PANE_DISCOVERY_RETRY_INTERVAL).await;
+            }
+        }
+        bail!(
+            "zellij session {} did not expose a terminal pane within {}ms",
+            self.session_name,
+            ZELLIJ_PANE_DISCOVERY_RETRY_INTERVAL.as_millis()
+                * ZELLIJ_PANE_DISCOVERY_MAX_ATTEMPTS as u128
+        );
+    }
+
+    async fn ensure_zellij_subscribe_started(&mut self) -> Result<()> {
+        if self.pane_id.is_none() {
+            self.pane_id = Some(self.wait_for_zellij_pane_id().await?);
         }
         if !self.subscribe_started.swap(true, Ordering::SeqCst) {
             if let Some(ref pane_id) = self.pane_id {
@@ -233,6 +250,7 @@ impl ZellijBackend {
                 tokio::spawn(run_zellij_subscribe(session, pid, tx, stop));
             }
         }
+        Ok(())
     }
 }
 
@@ -242,7 +260,7 @@ impl SessionBackend for ZellijBackend {
         self.reattach = self.reattach || Self::has_session(&self.session_name);
 
         if self.reattach && Self::has_session(&self.session_name) {
-            self.ensure_zellij_subscribe_started();
+            self.ensure_zellij_subscribe_started().await?;
             return Ok(());
         }
 
@@ -285,13 +303,13 @@ impl SessionBackend for ZellijBackend {
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             if stderr.contains("Session already exists") {
-                self.ensure_zellij_subscribe_started();
+                self.ensure_zellij_subscribe_started().await?;
                 return Ok(());
             }
             bail!("zellij backend failed: {}", stderr.trim());
         }
 
-        self.ensure_zellij_subscribe_started();
+        self.ensure_zellij_subscribe_started().await?;
         Ok(())
     }
 
@@ -724,9 +742,9 @@ async fn run_zellij_subscribe(
 #[cfg(test)]
 mod tests {
     use super::{
-        SpawnOpts, ZellijBackend, is_zellij_pane_closed, numeric_pane_id,
-        parse_zellij_cursor_from_list_panes, parse_zellij_subscribe_viewport,
-        viewport_to_ansi_chunk,
+        SpawnOpts, ZELLIJ_PANE_DISCOVERY_MAX_ATTEMPTS, ZELLIJ_PANE_DISCOVERY_RETRY_INTERVAL,
+        ZellijBackend, is_zellij_pane_closed, numeric_pane_id, parse_zellij_cursor_from_list_panes,
+        parse_zellij_subscribe_viewport, viewport_to_ansi_chunk,
     };
 
     #[test]
@@ -744,6 +762,37 @@ mod tests {
 
         assert!(config.contains("web_server true"));
         assert!(config.contains("web_sharing \"on\""));
+    }
+
+    #[test]
+    fn zellij_pane_discovery_uses_200ms_retry_budget() {
+        assert_eq!(
+            ZELLIJ_PANE_DISCOVERY_RETRY_INTERVAL,
+            std::time::Duration::from_millis(200)
+        );
+        assert_eq!(ZELLIJ_PANE_DISCOVERY_MAX_ATTEMPTS, 15);
+    }
+
+    #[test]
+    fn parse_terminal_pane_id_skips_plugin_panes() {
+        let panes = br#"[
+            {"id":0,"is_plugin":true},
+            {"id":3,"is_plugin":false}
+        ]"#;
+        assert_eq!(
+            ZellijBackend::parse_terminal_pane_id(panes),
+            Some("terminal_3".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_terminal_pane_id_returns_none_without_terminal_pane() {
+        let panes = br#"[
+            {"id":0,"is_plugin":true},
+            {"is_plugin":false}
+        ]"#;
+        assert_eq!(ZellijBackend::parse_terminal_pane_id(panes), None);
+        assert_eq!(ZellijBackend::parse_terminal_pane_id(b"bad json"), None);
     }
 
     // ---- numeric_pane_id tests ----

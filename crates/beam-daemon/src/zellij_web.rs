@@ -28,6 +28,16 @@ use tracing::{info, warn};
 
 const ZELLIJ_WEB_WATCHDOG_INTERVAL: Duration = Duration::from_secs(30);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ZellijWebHealth {
+    Current,
+    StaleVersion {
+        cli_version: String,
+        web_version: String,
+    },
+    Offline,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZellijWebTokens {
     pub port: u16,
@@ -63,17 +73,32 @@ impl ZellijWebTokens {
     }
 }
 
-/// Check if the zellij web server is running on the given port.
+/// Check if the zellij web server is current and running on the given port.
 ///
-/// Runs `zellij web --status` and requires the output to explicitly
-/// contain an "online" indicator.  Relying on exit status alone is
-/// unreliable because the CLI may exit 0 even when the server is
-/// still starting or has stopped.  If the status command reports
-/// offline or cannot be parsed, fall back to probing the zellij web
-/// HTTP endpoint directly; some zellij versions can have a live web
-/// server while `web --status` is not yet reporting an online state.
+/// The configured port is accepted only when:
+/// - `/info/version` matches the current `zellij --version` output, or
+/// - when `/info/version` is unavailable, `zellij web --status --ip
+///   127.0.0.1 --port {port}` reports online or the HTTP root probe still
+///   identifies a zellij web page.
+///
+/// A reachable server with a stale `/info/version` is treated as not running
+/// so startup and the watchdog can restart it in place.
 pub fn zellij_web_is_running(port: u16) -> bool {
-    let status_online = match Command::new("zellij")
+    matches!(zellij_web_health(port), ZellijWebHealth::Current)
+}
+
+fn zellij_web_health(port: u16) -> ZellijWebHealth {
+    let status_online = zellij_web_status_online(port);
+    let cli_version = current_zellij_version();
+    let web_version = http_probe_version(port);
+
+    classify_zellij_web_health(status_online, cli_version, web_version, || {
+        http_probe_root(port)
+    })
+}
+
+fn zellij_web_status_online(port: u16) -> bool {
+    match Command::new("zellij")
         .args([
             "web",
             "--status",
@@ -86,37 +111,75 @@ pub fn zellij_web_is_running(port: u16) -> bool {
     {
         Ok(out) => {
             if !out.status.success() {
-                return zellij_web_http_probe(port);
+                return false;
             }
             let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
             parse_zellij_web_status_output(&stdout, &stderr)
         }
         Err(_) => false,
-    };
-
-    status_online || zellij_web_http_probe(port)
+    }
 }
 
-/// Probe the local zellij web HTTP endpoint.
-///
-/// `/info/version` is intentionally used because it is a small unauthenticated
-/// endpoint on zellij web 0.44/0.45.  Older web-client builds are documented to
-/// serve the browser app from `/`, so use that as a compatibility fallback while
-/// still requiring zellij-looking content to avoid accepting an arbitrary HTTP
-/// server on the same port.
-fn zellij_web_http_probe(port: u16) -> bool {
-    http_probe_path(port, "/info/version") || http_probe_path(port, "/")
+fn classify_zellij_web_health(
+    status_online: bool,
+    cli_version: Option<String>,
+    web_version: Option<String>,
+    root_probe: impl FnOnce() -> bool,
+) -> ZellijWebHealth {
+    if let Some(web_version) = web_version {
+        if let Some(cli_version) = cli_version {
+            if cli_version == web_version {
+                return ZellijWebHealth::Current;
+            }
+            return ZellijWebHealth::StaleVersion {
+                cli_version,
+                web_version,
+            };
+        }
+        return ZellijWebHealth::StaleVersion {
+            cli_version: "<unavailable>".to_owned(),
+            web_version,
+        };
+    }
+
+    if status_online || root_probe() {
+        ZellijWebHealth::Current
+    } else {
+        ZellijWebHealth::Offline
+    }
 }
 
-fn http_probe_path(port: u16, path: &str) -> bool {
+fn current_zellij_version() -> Option<String> {
+    let output = Command::new("zellij").arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_zellij_cli_version(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn http_probe_version(port: u16) -> Option<String> {
+    http_probe_path(port, "/info/version").and_then(parse_zellij_web_version_response)
+}
+
+fn http_probe_root(port: u16) -> bool {
+    http_probe_path(port, "/")
+        .map(|response| parse_zellij_web_http_response("/", &response))
+        .unwrap_or(false)
+}
+
+fn zellij_web_looks_like_zellij(port: u16) -> bool {
+    http_probe_version(port).is_some() || http_probe_root(port)
+}
+
+fn http_probe_path(port: u16, path: &str) -> Option<Vec<u8>> {
     let addr = match format!("127.0.0.1:{port}").parse::<std::net::SocketAddr>() {
         Ok(addr) => addr,
-        Err(_) => return false,
+        Err(_) => return None,
     };
     let mut stream = match std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)) {
         Ok(stream) => stream,
-        Err(_) => return false,
+        Err(_) => return None,
     };
     let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
@@ -124,14 +187,31 @@ fn http_probe_path(port: u16, path: &str) -> bool {
     use std::io::{Read, Write};
     let request = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
     if stream.write_all(request.as_bytes()).is_err() {
-        return false;
+        return None;
     }
 
     let mut buf = [0_u8; 2048];
     match stream.read(&mut buf) {
-        Ok(n) if n > 0 => parse_zellij_web_http_response(path, &buf[..n]),
-        _ => false,
+        Ok(n) if n > 0 => Some(buf[..n].to_vec()),
+        _ => None,
     }
+}
+
+fn parse_zellij_cli_version(output: &str) -> Option<String> {
+    output
+        .split_whitespace()
+        .find(|part| looks_like_semver(part))
+        .map(ToOwned::to_owned)
+}
+
+fn parse_zellij_web_version_response(response: Vec<u8>) -> Option<String> {
+    let response = String::from_utf8_lossy(&response);
+    let is_ok = response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200");
+    if !is_ok {
+        return None;
+    }
+    let body = response.split_once("\r\n\r\n")?.1.trim();
+    looks_like_semver(body).then(|| body.to_owned())
 }
 
 fn parse_zellij_web_http_response(path: &str, response: &[u8]) -> bool {
@@ -255,25 +335,207 @@ pub fn zellij_web_start(port: u16) -> Result<()> {
     }
 }
 
-/// Ensure zellij web server is running; start it if not.
-pub fn ensure_zellij_web(port: u16) -> Result<()> {
-    if zellij_web_is_running(port) {
+fn zellij_web_stop(port: u16) -> Result<()> {
+    let output = Command::new("zellij")
+        .args([
+            "web",
+            "--stop",
+            "--ip",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+        ])
+        .output()
+        .context("failed to spawn zellij web stop command")?;
+
+    if output.status.success() {
         return Ok(());
     }
+
+    bail!(
+        "zellij web stop failed (status={}): stdout={} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout).trim(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
+}
+
+fn zellij_web_restart(port: u16) -> Result<()> {
+    if let Err(err) = zellij_web_stop(port) {
+        warn!("zellij web stop failed before restart on port {port}: {err:#}");
+    }
+
+    if wait_for_zellij_web_port_closed(port, Duration::from_secs(3), Duration::from_millis(200)) {
+        return zellij_web_start(port);
+    }
+
+    if !zellij_web_looks_like_zellij(port) {
+        bail!(
+            "zellij web port {port} is still accepting connections after stop, but it does not look like zellij web"
+        );
+    }
+
+    terminate_zellij_web_listener_on_port(port)?;
+
+    if !wait_for_zellij_web_port_closed(port, Duration::from_secs(3), Duration::from_millis(200)) {
+        bail!("zellij web port {port} is still accepting connections after listener cleanup");
+    }
+
     zellij_web_start(port)
 }
 
-/// Spawn a background watchdog that restarts zellij web if it goes offline.
+fn wait_for_zellij_web_port_closed(port: u16, timeout: Duration, interval: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if !tcp_port_accepts(port) {
+            return true;
+        }
+        std::thread::sleep(interval);
+    }
+    !tcp_port_accepts(port)
+}
+
+fn tcp_port_accepts(port: u16) -> bool {
+    let Ok(addr) = format!("127.0.0.1:{port}").parse::<std::net::SocketAddr>() else {
+        return false;
+    };
+    std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
+}
+
+#[cfg(target_os = "linux")]
+fn terminate_zellij_web_listener_on_port(port: u16) -> Result<()> {
+    let inodes = linux_tcp_listen_inodes(port);
+    if inodes.is_empty() {
+        bail!("no listening socket inode found for zellij web port {port}");
+    }
+
+    let proc_entries = std::fs::read_dir("/proc")
+        .with_context(|| format!("failed to read /proc while cleaning zellij web port {port}"))?;
+
+    let mut terminated_any = false;
+    for entry in proc_entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        if process_owns_listen_inode(&entry.path(), &inodes)? {
+            warn!("terminating stale zellij web listener pid {pid} on port {port}");
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
+            terminated_any = true;
+        }
+    }
+
+    if terminated_any {
+        Ok(())
+    } else {
+        bail!("no process found listening on zellij web port {port}");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn terminate_zellij_web_listener_on_port(port: u16) -> Result<()> {
+    bail!(
+        "cannot safely clean up a stale zellij web listener on port {port} without Linux /proc support"
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn process_owns_listen_inode(proc_path: &Path, inodes: &[String]) -> Result<bool> {
+    let fd_dir = proc_path.join("fd");
+    let Ok(fd_entries) = std::fs::read_dir(fd_dir) else {
+        return Ok(false);
+    };
+
+    for fd in fd_entries.flatten() {
+        let Ok(target) = std::fs::read_link(fd.path()) else {
+            continue;
+        };
+        let target = target.to_string_lossy();
+        if let Some(inode) = target
+            .strip_prefix("socket:[")
+            .and_then(|value| value.strip_suffix(']'))
+        {
+            if inodes.iter().any(|candidate| candidate == inode) {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_tcp_listen_inodes(port: u16) -> Vec<String> {
+    let mut inodes = parse_linux_tcp_listen_inodes(
+        &std::fs::read_to_string("/proc/net/tcp").unwrap_or_default(),
+        port,
+    );
+    inodes.extend(parse_linux_tcp_listen_inodes(
+        &std::fs::read_to_string("/proc/net/tcp6").unwrap_or_default(),
+        port,
+    ));
+    inodes
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_tcp_listen_inodes(contents: &str, port: u16) -> Vec<String> {
+    let port_hex = format!("{port:04X}");
+    contents
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            let local_address = fields.get(1)?;
+            let state = fields.get(3)?;
+            let inode = fields.get(9)?;
+            if *state != "0A" {
+                return None;
+            }
+            let (_, local_port) = local_address.rsplit_once(':')?;
+            local_port
+                .eq_ignore_ascii_case(&port_hex)
+                .then(|| (*inode).to_owned())
+        })
+        .collect()
+}
+
+/// Ensure zellij web server is current and running; start or restart it if not.
+pub fn ensure_zellij_web(port: u16) -> Result<()> {
+    match zellij_web_health(port) {
+        ZellijWebHealth::Current => Ok(()),
+        ZellijWebHealth::StaleVersion {
+            cli_version,
+            web_version,
+        } => {
+            warn!(
+                "zellij web on port {port} is stale (web={web_version}, cli={cli_version}); restarting"
+            );
+            zellij_web_restart(port)
+        }
+        ZellijWebHealth::Offline => zellij_web_start(port),
+    }
+}
+
+/// Spawn a background watchdog that restarts zellij web if it goes offline or stale.
 pub fn spawn_zellij_web_watchdog(port: u16) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(ZELLIJ_WEB_WATCHDOG_INTERVAL);
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            if zellij_web_is_running(port) {
-                continue;
+            match zellij_web_health(port) {
+                ZellijWebHealth::Current => continue,
+                ZellijWebHealth::StaleVersion {
+                    cli_version,
+                    web_version,
+                } => warn!(
+                    "zellij web watchdog: port {port} stale (web={web_version}, cli={cli_version}), attempting restart"
+                ),
+                ZellijWebHealth::Offline => {
+                    warn!("zellij web watchdog: port {port} offline, attempting restart")
+                }
             }
-            warn!("zellij web watchdog: port {port} offline, attempting restart");
             match ensure_zellij_web(port) {
                 Ok(()) => info!("zellij web watchdog: port {port} restart success"),
                 Err(err) => warn!("zellij web watchdog: port {port} restart failed: {err:#}"),
@@ -865,11 +1127,44 @@ mod tests {
     }
 
     #[test]
+    fn parse_cli_version_from_zellij_version_output() {
+        assert_eq!(
+            parse_zellij_cli_version("zellij 0.45.0\n"),
+            Some("0.45.0".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_cli_version_rejects_missing_semver() {
+        assert_eq!(parse_zellij_cli_version("zellij dev\n"), None);
+    }
+
+    #[test]
     fn http_version_response_detected() {
         assert!(parse_zellij_web_http_response(
             "/info/version",
             b"HTTP/1.1 200 OK\r\ncontent-length: 6\r\n\r\n0.45.0"
         ));
+    }
+
+    #[test]
+    fn web_version_response_returns_semver_body() {
+        assert_eq!(
+            parse_zellij_web_version_response(
+                b"HTTP/1.1 200 OK\r\ncontent-length: 6\r\n\r\n0.45.0".to_vec()
+            ),
+            Some("0.45.0".to_string())
+        );
+    }
+
+    #[test]
+    fn web_version_response_rejects_non_200() {
+        assert_eq!(
+            parse_zellij_web_version_response(
+                b"HTTP/1.1 404 Not Found\r\ncontent-length: 6\r\n\r\n0.45.0".to_vec()
+            ),
+            None
+        );
     }
 
     #[test]
@@ -894,6 +1189,95 @@ mod tests {
             "/",
             b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\n\r\n<title>Other App</title>"
         ));
+    }
+
+    #[test]
+    fn health_current_when_versions_match() {
+        assert_eq!(
+            classify_zellij_web_health(
+                false,
+                Some("0.45.0".to_string()),
+                Some("0.45.0".to_string()),
+                || false,
+            ),
+            ZellijWebHealth::Current
+        );
+    }
+
+    #[test]
+    fn health_stale_when_versions_differ() {
+        assert_eq!(
+            classify_zellij_web_health(
+                true,
+                Some("0.46.0".to_string()),
+                Some("0.45.0".to_string()),
+                || true,
+            ),
+            ZellijWebHealth::StaleVersion {
+                cli_version: "0.46.0".to_string(),
+                web_version: "0.45.0".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn health_uses_status_when_version_unavailable() {
+        assert_eq!(
+            classify_zellij_web_health(true, Some("0.45.0".to_string()), None, || false),
+            ZellijWebHealth::Current
+        );
+    }
+
+    #[test]
+    fn health_uses_root_probe_when_version_unavailable() {
+        assert_eq!(
+            classify_zellij_web_health(false, Some("0.45.0".to_string()), None, || true),
+            ZellijWebHealth::Current
+        );
+    }
+
+    #[test]
+    fn health_offline_when_no_signal() {
+        assert_eq!(
+            classify_zellij_web_health(false, Some("0.45.0".to_string()), None, || false),
+            ZellijWebHealth::Offline
+        );
+    }
+
+    #[test]
+    fn health_stale_when_cli_version_cannot_be_read() {
+        assert_eq!(
+            classify_zellij_web_health(false, None, Some("0.45.0".to_string()), || false),
+            ZellijWebHealth::StaleVersion {
+                cli_version: "<unavailable>".to_string(),
+                web_version: "0.45.0".to_string(),
+            }
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_tcp_listen_inode_parser_matches_port_and_listen_state() {
+        let contents = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:2261 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 100 0 0 10 0
+   1: 0100007F:2261 00000000:0000 01 00000000:00000000 00:00000000 00000000  1000        0 99999 1 0000000000000000 100 0 0 10 0
+   2: 0100007F:270F 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 54321 1 0000000000000000 100 0 0 10 0
+";
+        assert_eq!(
+            parse_linux_tcp_listen_inodes(contents, 8801),
+            vec!["12345".to_string()]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_tcp_listen_inode_parser_ignores_other_ports() {
+        let contents = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:270F 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 54321 1 0000000000000000 100 0 0 10 0
+";
+        assert!(parse_linux_tcp_listen_inodes(contents, 8801).is_empty());
     }
 
     // ── ZellijWebTokens ──

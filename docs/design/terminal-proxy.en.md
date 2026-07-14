@@ -27,9 +27,9 @@ This means `beam_terminal_session` is a Beam proxy cookie, not a zellij cookie.
 In daemon `run()`:
 
 1. `zellij_web_port = web.proxy_base_port + 1`.
-2. `ensure_zellij_web(zellij_web_port)` ensures local zellij web is online.
+2. `ensure_zellij_web(zellij_web_port)` only checks the configured port; if `/info/version` is readable it must match the current `zellij --version`, otherwise it falls back to `zellij web --status --ip 127.0.0.1 --port {port}` or the HTTP root probe. On a version mismatch, it first runs `zellij web --stop --ip 127.0.0.1 --port {port}`; if the port is still occupied by zellij web, Linux cleanup targets only that listener before restarting the same port with `--start --daemonize`.
 3. `ensure_zellij_web_tokens(...)` creates or loads read-only / write tokens and persists the zellij web tokens JSON under the Beam state directory.
-4. `spawn_zellij_web_watchdog(zellij_web_port)` checks zellij web every 30 seconds and attempts restart when it is offline.
+4. `spawn_zellij_web_watchdog(zellij_web_port)` checks only the configured port every 30 seconds; when it is offline or stale, it restarts with the same stop -> cleanup -> start flow and does not scan or affect other ports.
 5. `terminal_proxy::start_proxy(...)` starts the external proxy on `web.host:web.proxy_base_port`.
 
 ## Login and Cookie Bridge
