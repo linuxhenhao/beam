@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.6.0...beam-daemon-v0.6.1) - 2026-07-14
+
+### Fixed
+
+- *(lark)* 优化消息 turn 卡片交接
+- *(zellij)* 重启陈旧 web 服务并等待 pane 就绪
+
 ## [0.6.0](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.5.1...beam-daemon-v0.6.0) - 2026-07-13
 
 ### Added
