@@ -205,6 +205,21 @@ cargo test -p beam-core --test workflow_regression
 3. 将 `workflow_regression.rs` 按 `run_regression.rs`、`loop_regression.rs`、`recovery_regression.rs` 等行为命名拆分；测试共享 fixture 放 `crates/beam-core/tests/support/`。
 4. 复查所有 801–1,000 行文件；若文件内只有一个内聚职责，可在文档中记录原因并暂留；若同时有生产代码和大段测试，按通用方法继续外置测试，使物理文件不超过 1,000 行。
 
+##### 801–1,000 行文件评估结果（Row 24 逐文件单一职责理由）
+
+| 文件 | 当前行数 | 核心职责 | 单一职责评估理由 |
+|---|---|---:|---|
+| `beam-daemon/src/workflow_event_fanout.rs` | 972 | 检测 human-gate wait 并 idempotent 发送审批卡片 | 单一职责：所有代码（ApprovalCardSender trait/impl、ApprovalCardSentMarker 持久化、card builder、fanout 逻辑）均围绕「发现未发送审批卡片的人控 wait 并推送卡片」这一领域。生产 ~459 行，测试 ~513 行。 |
+| `beam-daemon/src/session_creation.rs` | 917 | Session 创建规格构建与内部创建函数 | 单一职责：生产代码仅含 SessionCreateSpec 结构体及构建器、create_session_internal、await_session_final_output，均为 session 创建领域函数。生产 ~289 行，测试 ~628 行。 |
+| `beam-daemon/src/lark_parse.rs` | 891 | Lark 事件/卡片/动作解析与路由决策 | 单一职责：所有函数均为 Lark payload 解析（消息文本分类、卡片 action 提取、inbound message 解析、locale 归一化）。生产 ~499 行，测试 ~392 行。 |
+| `beam-daemon/src/terminal_auth.rs` | 854 | 终端代理鉴权桥接（ticket/cookie/路径分类） | 单一职责：所有代码围绕 HMAC ticket 生成验证、UsedTickets 反重放、cookie jar 映射、zellij 路径分类与 WS 路径翻译。生产 ~500 行，测试 ~354 行。 |
+| `beam-daemon/src/lark_session_cards.rs` | 815 | Lark streaming 卡片生命周期管理 | 单一职责：所有函数管理 session streaming card 的创建、替换、PATCH、停用、定时器重试和路由决策。生产 ~396 行，测试 ~419 行。 |
+| `beam-cli/src/workflow_cli.rs` | 814 | `beam workflow` CLI 子命令实现 | 单一职责：所有代码（run/resume/cancel/validate/ls/tail/show 命令处理、arg 类型、辅助函数）均为 CLI workflow 领域的命令实现。生产 ~742 行，测试 ~72 行。 |
+| `beam-worker/src/adapters/codex.rs` | 811 | Codex CLI 适配器实现 | 单一职责：所有函数实现 Codex adapter 的 spawn/poll/write_input、rollout 路径发现、历史匹配、adopt 模式处理。生产 ~426 行，测试 ~385 行。 |
+| `beam-daemon/src/lark_delivery.rs` | 803 | Lark 卡片投递与 frozen card 管理 | 单一职责：所有代码处理 card 的发送（reply/update/open_id/ephemeral/delete）、frozen card 持久化、pending response tracking。生产 ~324 行，测试 ~479 行。 |
+
+结论：8 个文件均为单一内聚职责，无需拆分。当前均在 1,000 行以内，继续保留。如未来增长超过 1,000 行，优先外置 `#[cfg(test)]` 测试模块。
+
 ## 5. 合并与审查清单
 
 每个 PR/提交由审查者逐项确认：
