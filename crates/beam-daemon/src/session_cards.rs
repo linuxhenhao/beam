@@ -1570,7 +1570,7 @@ mod tests {
     }
 
     #[test]
-    fn build_follow_up_content_skips_beam_reminder_for_mira() {
+    fn build_follow_up_content_skips_beam_response_contract_for_mira() {
         let mentions: Vec<LarkEventMention> = vec![];
         let opts = prompt::FollowUpContentOptions {
             session_id: "test-session",
@@ -1581,6 +1581,6 @@ mod tests {
             locale: None,
         };
         let result = prompt::build_follow_up_content("hi", &opts);
-        assert!(!result.contains("beam_reminder"));
+        assert!(!result.contains("beam_response_contract"));
     }
 }

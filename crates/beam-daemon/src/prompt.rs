@@ -340,6 +340,46 @@ pub struct FollowUpContentOptions<'a> {
     pub locale: Option<&'a str>,
 }
 
+const FOLLOW_UP_CONTRACTS_ZH: [&str; 10] = [
+    "这条飞书消息需要用户可见回应时，最终必须执行 `beam send --mention-back`；终端输出不算回复。低优先级记录才用 `--no-mention`，点名他人用 `--mention <open_id[:name]>`。",
+    "不要把普通终端输出当作回复。只要要让飞书用户看到结论、进度、问题或阻塞，就用 `beam send --mention-back`；无需打扰时才改 `--no-mention`，定向通知用 `--mention <open_id[:name]>`。",
+    "本轮如果产生任何给用户看的内容，结束前必须用 shell 命令 `beam send --mention-back` 发回飞书。不要只在终端写最终答案；安静记录用 `--no-mention`，点名用 `--mention <open_id[:name]>`。",
+    "用户看不到你的终端最终回答。需要回复、确认、汇报完成或说明阻塞时，必须执行 `beam send --mention-back`；仅普通记录用 `--no-mention`，需要找别人用 `--mention <open_id[:name]>`。",
+    "处理完这条飞书输入后，凡是用户应该看到的信息都必须通过 `beam send --mention-back` 发出。不要依赖自然语言输出；低优先级更新用 `--no-mention`，指定对象用 `--mention <open_id[:name]>`。",
+    "请把 `beam send` 当作唯一对飞书用户可见的回复通道。需要回应时默认 `beam send --mention-back`；安静日志才用 `--no-mention`，点名人或 bot 时用 `--mention <open_id[:name]>`。",
+    "如果本轮需要告诉用户任何结果、问题、计划变化或等待事项，必须用 `beam send --mention-back`。终端文本不会送达飞书；不需提醒才用 `--no-mention`，定向提醒用 `--mention <open_id[:name]>`。",
+    "不要只输出最终答复给自己看。给飞书用户的可见回复必须走 `beam send --mention-back`；纯记录可选 `--no-mention`，需要让特定人或 bot 收到提醒时用 `--mention <open_id[:name]>`。",
+    "这是一条飞书会话输入：有用户可见结论时，最后必须执行 `beam send --mention-back`。终端 echo/JSON/自然语言都不是送达；安静更新用 `--no-mention`，点名用 `--mention <open_id[:name]>`。",
+    "本轮回复的交付标准是飞书收到消息。默认用 `beam send --mention-back`；不要把终端输出当交付。低优先级记录用 `--no-mention`，要通知指定对象用 `--mention <open_id[:name]>`。",
+];
+
+const FOLLOW_UP_CONTRACTS_EN: [&str; 10] = [
+    "If this Feishu turn needs a user-visible response, you must finish by running `beam send --mention-back`. Terminal output is not a reply. Use `--no-mention` only for quiet notes, and `--mention <open_id[:name]>` for a specific target.",
+    "Do not treat normal terminal output as the answer. Any conclusion, progress, question, or blocker the user should see must go through `beam send --mention-back`; use `--no-mention` for low-priority notes or `--mention <open_id[:name]>` for a target.",
+    "Before ending this turn, send any user-facing content with the shell command `beam send --mention-back`. A plain final answer in the terminal will not reach Feishu; quiet updates use `--no-mention`, targeted updates use `--mention <open_id[:name]>`.",
+    "The Feishu user cannot see your terminal-only final text. When replying, confirming, reporting completion, or explaining a blocker, run `beam send --mention-back`; use `--no-mention` only for quiet notes and `--mention <open_id[:name]>` for a target.",
+    "For this Feishu input, anything the user should see must be delivered with `beam send --mention-back`. Do not rely on natural-language terminal output; use `--no-mention` for quiet records and `--mention <open_id[:name]>` for a specific person or bot.",
+    "Treat `beam send` as the only user-visible Feishu reply channel. Default to `beam send --mention-back`; choose `--no-mention` only for quiet logs, or `--mention <open_id[:name]>` when addressing a person or bot.",
+    "If this turn produces a result, question, plan change, or wait state for the user, you must run `beam send --mention-back`. Terminal text is not delivered; use `--no-mention` only when no alert is needed, or `--mention <open_id[:name]>` for a target.",
+    "Do not leave the final response only in the terminal. A visible Feishu reply must use `beam send --mention-back`; use `--no-mention` for quiet records, and `--mention <open_id[:name]>` when a specific person or bot should be notified.",
+    "This is a Feishu session input: when there is a user-visible conclusion, run `beam send --mention-back` before stopping. Echo, JSON, or plain terminal prose is not delivery; quiet updates use `--no-mention`, targeted ones use `--mention <open_id[:name]>`.",
+    "This turn is not complete until Feishu receives the user-facing message. Default to `beam send --mention-back`; terminal output is not delivery. Use `--no-mention` for low-priority notes and `--mention <open_id[:name]>` for a specific target.",
+];
+
+fn follow_up_contract_templates(locale: Option<&str>) -> &'static [&'static str] {
+    if is_zh_locale(locale) {
+        &FOLLOW_UP_CONTRACTS_ZH
+    } else {
+        &FOLLOW_UP_CONTRACTS_EN
+    }
+}
+
+fn random_follow_up_contract(locale: Option<&str>) -> &'static str {
+    let templates = follow_up_contract_templates(locale);
+    let index = usize::from(uuid::Uuid::new_v4().as_bytes()[0]) % templates.len();
+    templates[index]
+}
+
 pub fn build_follow_up_content(content: &str, opts: &FollowUpContentOptions) -> String {
     let mut blocks = Vec::new();
     let locale = opts.locale.unwrap_or_else(|| infer_prompt_locale(content));
@@ -379,12 +419,10 @@ pub fn build_follow_up_content(content: &str, opts: &FollowUpContentOptions) -> 
     }
 
     if opts.cli_id != "mira" {
-        let reminder = localized(
-            Some(locale),
-            "如果这条消息改变了计划，请继续处理；如果需要回复用户，请先定好最终回复，再用 `beam send --mention-back`、`beam send --mention <open_id[:name]>` 或 `beam send --no-mention` 发回飞书。",
-            "If this message changes the plan, continue working. If you need to reply to the user, decide on the final reply first, then send it back to Feishu with `beam send --mention-back`, `beam send --mention <open_id[:name]>`, or `beam send --no-mention`.",
-        );
-        blocks.push(format!("<beam_reminder>{}</beam_reminder>", reminder));
+        blocks.push(format!(
+            "<beam_response_contract>{}</beam_response_contract>",
+            random_follow_up_contract(Some(locale))
+        ));
     }
 
     blocks.join("\n\n")
@@ -462,9 +500,29 @@ mod tests {
                 locale: None,
             },
         );
-        assert!(prompt.contains("如果这条消息改变了计划，请继续处理"));
+        assert!(prompt.contains("<beam_response_contract>"));
+        assert!(prompt.contains("</beam_response_contract>"));
         assert!(prompt.contains("beam send --mention-back"));
-        assert!(prompt.contains("beam send --no-mention"));
+        assert!(prompt.contains("--no-mention"));
+    }
+
+    #[test]
+    fn follow_up_contract_templates_stay_short_and_complete() {
+        for templates in [
+            FOLLOW_UP_CONTRACTS_ZH.as_slice(),
+            FOLLOW_UP_CONTRACTS_EN.as_slice(),
+        ] {
+            assert_eq!(templates.len(), 10);
+            for template in templates {
+                assert!(
+                    template.chars().count() <= 260,
+                    "template too long: {template}"
+                );
+                assert!(template.contains("beam send --mention-back"));
+                assert!(template.contains("--no-mention"));
+                assert!(template.contains("--mention <open_id[:name]>"));
+            }
+        }
     }
 
     #[test]
