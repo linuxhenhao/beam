@@ -23,6 +23,12 @@
   - Keep real-system integration tests as explicit live tests: place them in `tests/live_*.rs` or name the test `live_*`, mark them `#[ignore]`, document required local services/env vars in the test, and run them manually with `cargo test -p <crate> --test <name> -- --ignored`.
   - When a real-system bug appears, first capture it with an ignored live test when useful, then extract the stable contract into deterministic unit or integration tests where possible.
   - Shared integration-test setup belongs in `tests/support/` instead of duplicating daemon/AppState/session fixtures across files.
+- Rust modularity:
+  - Keep individual source files around 800 lines or fewer as a general guideline.
+  - When a file exceeds 1,000 lines, explicitly assess whether it contains multiple independent responsibilities.
+  - When a file exceeds 1,500 lines, default to splitting it into cohesive submodules; if it remains unsplit, document the reason in the change.
+  - Keep `lib.rs` and `main.rs` focused on module declarations, composition, and entrypoint coordination rather than accumulating business logic.
+  - Prefer module boundaries based on responsibility, dependency direction, and test ownership over mechanical line-count reduction.
 - There is no repo `lint` or `format` script; do not assume one exists.
 - Commit messages use `type(scope): 中文描述` (conventional commits).
   - `feat:` → minor version bump (0.x.0)

@@ -908,19 +908,12 @@ pub fn build_dir_select_card(
 /// Build a simple "session starting" card to replace the dir select card.
 pub fn build_dir_session_starting_card(
     working_dir: &str,
-    title: &str,
+    _title: &str,
     locale: Option<&str>,
 ) -> String {
-    let body_zh = format!(
-        "✅ 已选择工作目录：{}\n\n正在启动会话：_{}_\n\n等待终端就绪...",
-        sanitize_lark_md(working_dir),
-        sanitize_lark_md(title)
-    );
-    let body_en = format!(
-        "✅ Selected working directory: {}\n\nStarting session: _{}_\n\nWaiting for terminal readiness...",
-        sanitize_lark_md(working_dir),
-        sanitize_lark_md(title)
-    );
+    let selected_dir = sanitize_lark_md(working_dir);
+    let body_zh = format!("✅ **已选择工作目录**\n\n{}", selected_dir);
+    let body_en = format!("✅ **Selected working directory**\n\n{}", selected_dir);
     let card = serde_json::json!({
         "config": {
             "wide_screen_mode": true
@@ -928,10 +921,10 @@ pub fn build_dir_session_starting_card(
         "header": {
             "title": {
                 "tag": "plain_text",
-                "content": card_text(locale, "正在启动会话", "Starting session"),
+                "content": card_text(locale, "工作目录已选择", "Working directory selected"),
                 "i18n_content": {
-                    "zh_cn": "正在启动会话",
-                    "en_us": "Starting session",
+                    "zh_cn": "工作目录已选择",
+                    "en_us": "Working directory selected",
                 }
             },
             "template": "blue"
@@ -1619,9 +1612,10 @@ mod tests {
     #[test]
     fn test_build_dir_session_starting_card() {
         let card = build_dir_session_starting_card("/home/user/projects", "my title", Some("zh"));
-        assert!(card.contains("正在启动会话"));
+        assert!(card.contains("工作目录已选择"));
         assert!(card.contains("/home/user/projects"));
-        assert!(card.contains("my title"));
+        assert!(!card.contains("my title"));
+        assert!(!card.contains("\"tag\":\"action\""));
     }
 
     #[test]

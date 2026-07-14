@@ -48,10 +48,6 @@ pub fn build_spawn_spec(state: &CodexState, init: &InitConfig) -> SpawnSpec {
             args.push(cli_session_id);
         }
     }
-    if !init.disable_cli_bypass {
-        args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
-    }
-    args.push("--no-alt-screen".to_string());
     args.push("-C".to_string());
     args.push(init.working_dir.clone());
     args.extend(init.cli_args.clone());

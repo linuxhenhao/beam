@@ -1431,6 +1431,11 @@ pub(crate) async fn handle_lark_card_action_payload(
                 pending.locale.as_deref(),
             );
             let _ = lark_update_card(state, bot, card_msg_id, &success_card).await;
+            let card_data = serde_json::from_str::<Value>(&success_card).unwrap_or(Value::Null);
+            return Ok(Json(serde_json::json!({
+                "toast": { "type": "success", "content": "directory selected" },
+                "card": { "type": "raw", "data": card_data }
+            })));
         }
 
         Ok(Json(build_lark_card_action_toast(

@@ -1053,7 +1053,8 @@ mod tests {
         BotInfoEntry, Cli, Command, SendArgs, SessionCommand, active_sessions,
         bin_candidates_for_cli_id, build_send_request, default_cli_args_for_cli_id,
         discover_session_id_from_pid, format_bot_info_entries_for_cli, format_duration,
-        parse_mention, parse_migrate_flags, resolve_allowed_users, setup_backup_file,
+        parse_cli_args_input, parse_mention, parse_migrate_flags, resolve_allowed_users,
+        setup_backup_file,
     };
     use beam_core::{BeamPaths, SessionStatus, SessionSummary};
     use chrono::Utc;
@@ -1161,7 +1162,31 @@ mod tests {
     #[test]
     fn setup_defaults_traex_cli_args() {
         assert_eq!(default_cli_args_for_cli_id("traex"), vec!["-y".to_string()]);
-        assert!(default_cli_args_for_cli_id("codex").is_empty());
+        assert_eq!(
+            default_cli_args_for_cli_id("codex"),
+            vec![
+                "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                "--no-alt-screen".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn setup_cli_args_prompt_keeps_defaults_on_empty_input() {
+        let defaults = vec!["--safe-mode".to_string()];
+        assert_eq!(parse_cli_args_input("", &defaults), defaults);
+        assert_eq!(parse_cli_args_input("  ", &defaults), defaults);
+    }
+
+    #[test]
+    fn setup_cli_args_prompt_accepts_override_and_clear() {
+        let defaults = vec!["--safe-mode".to_string()];
+        assert_eq!(
+            parse_cli_args_input("--model fast --verbose", &defaults),
+            vec!["--model", "fast", "--verbose"]
+        );
+        assert!(parse_cli_args_input("clear", &defaults).is_empty());
+        assert!(parse_cli_args_input("none", &defaults).is_empty());
     }
 
     #[test]
@@ -2294,9 +2319,27 @@ const CLI_CHOICES: &[(&str, &str, &[&str])] = &[
 
 fn default_cli_args_for_cli_id(cli_id: &str) -> Vec<String> {
     match cli_id {
+        "codex" => vec![
+            "--dangerously-bypass-approvals-and-sandbox".to_string(),
+            "--no-alt-screen".to_string(),
+        ],
         "traex" => vec!["-y".to_string()],
         _ => Vec::new(),
     }
+}
+
+fn parse_cli_args_input(input: &str, defaults: &[String]) -> Vec<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return defaults.to_vec();
+    }
+    if matches!(trimmed.to_ascii_lowercase().as_str(), "clear" | "none") {
+        return Vec::new();
+    }
+    trimmed
+        .split_whitespace()
+        .map(ToString::to_string)
+        .collect()
 }
 
 fn detect_installed_clis() -> Vec<&'static (&'static str, &'static str, &'static [&'static str])> {
@@ -2398,7 +2441,17 @@ async fn prompt_setup_bot() -> Result<BotConfig> {
     let name = ask_line("机器人名称（留空=不设）: ")?;
     let credentials = register_app::prompt_credentials().await?;
     let cli_id = prompt_cli_id()?;
-    let cli_args = default_cli_args_for_cli_id(&cli_id);
+    let default_cli_args = default_cli_args_for_cli_id(&cli_id);
+    let default_cli_args_display = if default_cli_args.is_empty() {
+        "（无）".to_string()
+    } else {
+        default_cli_args.join(" ")
+    };
+    let cli_args_input = ask_line(&format!(
+        "启动参数 cliArgs [{}]（回车使用默认，输入 clear 清空）: ",
+        default_cli_args_display
+    ))?;
+    let cli_args = parse_cli_args_input(&cli_args_input, &default_cli_args);
     let cli_bin = probe_cli_bin(&cli_id).filter(|bin| bin != &cli_id);
     let working_dir = {
         let value = ask_line("默认工作目录 [~]: ")?;
