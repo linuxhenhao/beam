@@ -32,6 +32,8 @@ mod screenshot;
 mod tui;
 
 pub(crate) use analyzer::*;
+#[cfg(test)]
+pub(crate) use run_loop::maybe_inject_term;
 pub use run_loop::run;
 pub(crate) use run_loop::send_message;
 pub(crate) use screenshot::*;

@@ -1,6 +1,81 @@
 use crate::worker_runtime::*;
 
 #[test]
+fn maybe_inject_term_codex_no_term_injects() {
+    assert_eq!(
+        maybe_inject_term("codex", None),
+        Some(("TERM".to_string(), "xterm-256color".to_string()))
+    );
+}
+
+#[test]
+fn maybe_inject_term_codex_empty_term_injects() {
+    assert_eq!(
+        maybe_inject_term("codex", Some("")),
+        Some(("TERM".to_string(), "xterm-256color".to_string()))
+    );
+}
+
+#[test]
+fn maybe_inject_term_codex_dumb_term_injects() {
+    assert_eq!(
+        maybe_inject_term("codex", Some("dumb")),
+        Some(("TERM".to_string(), "xterm-256color".to_string()))
+    );
+}
+
+#[test]
+fn maybe_inject_term_traex_no_term_injects() {
+    assert_eq!(
+        maybe_inject_term("traex", None),
+        Some(("TERM".to_string(), "xterm-256color".to_string()))
+    );
+}
+
+#[test]
+fn maybe_inject_term_traex_dumb_term_injects() {
+    assert_eq!(
+        maybe_inject_term("traex", Some("dumb")),
+        Some(("TERM".to_string(), "xterm-256color".to_string()))
+    );
+}
+
+#[test]
+fn maybe_inject_term_codex_existing_xterm_does_not_inject() {
+    assert_eq!(maybe_inject_term("codex", Some("xterm-256color")), None);
+}
+
+#[test]
+fn maybe_inject_term_codex_existing_xterm_does_not_inject_any() {
+    assert_eq!(maybe_inject_term("codex", Some("xterm")), None);
+}
+
+#[test]
+fn maybe_inject_term_non_target_cli_never_injects() {
+    assert_eq!(maybe_inject_term("claude", None), None);
+    assert_eq!(maybe_inject_term("claude", Some("dumb")), None);
+    assert_eq!(maybe_inject_term("opencode", None), None);
+    assert_eq!(maybe_inject_term("gemini", None), None);
+    assert_eq!(maybe_inject_term("coco", None), None);
+    assert_eq!(maybe_inject_term("hermes", None), None);
+    assert_eq!(maybe_inject_term("antigravity", None), None);
+    assert_eq!(maybe_inject_term("generic", Some("dumb")), None);
+}
+
+#[test]
+fn maybe_inject_term_valid_term_preserved_for_codex() {
+    assert_eq!(maybe_inject_term("codex", Some("xterm")), None);
+    assert_eq!(maybe_inject_term("codex", Some("screen-256color")), None);
+    assert_eq!(maybe_inject_term("codex", Some("vt100")), None);
+}
+
+#[test]
+fn maybe_inject_term_valid_term_preserved_for_traex() {
+    assert_eq!(maybe_inject_term("traex", Some("xterm-256color")), None);
+    assert_eq!(maybe_inject_term("traex", Some("xterm")), None);
+}
+
+#[test]
 fn render_screen_for_display_mode_hides_or_shows_content() {
     assert_eq!(
         render_screen_for_display_mode("hello", DisplayMode::Hidden),
