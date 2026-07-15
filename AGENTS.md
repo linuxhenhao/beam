@@ -17,6 +17,7 @@
 - `beam restart` resolves from `PATH`; on this machine it may hit `~/.cargo/bin/beam` instead of `target/debug/beam`. For workspace verification, prefer `target/debug/beam restart` after rebuilding.
 - Lifecycle commands: `beam start` (background daemon), `beam stop`, `beam restart`, `beam logs`, `beam status`.
 - Run tests: `cargo test --workspace --no-fail-fast`; narrower: `cargo test -p <crate> <filter>`.
+- Rust source-file line limit: run `scripts/check-rust-line-count.sh` directly for an immediate check. The same script is run by CI and by `cargo test --workspace` through the `beam-core` integration test.
 - Test maintenance:
   - Keep pure logic and small component coverage next to the implementation in `src/*.rs` `#[cfg(test)]` modules.
   - Keep crate-level integration tests under each crate's `tests/` directory; prefer hermetic tests that use temp dirs, mock HTTP servers, random ports, and no live daemon/zellij/tailscale/Feishu dependency.
