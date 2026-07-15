@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3](https://github.com/linuxhenhao/beam/compare/beam-cli-v0.6.2...beam-cli-v0.6.3) - 2026-07-15
+
+### Fixed
+
+- screenshot_delay/cli startup args/dir choose card fixes
+
+### Other
+
+- *(workspace)* 拆分首批 Rust 源文件模块
+
 ## [0.6.0](https://github.com/linuxhenhao/beam/compare/beam-cli-v0.5.1...beam-cli-v0.6.0) - 2026-07-13
 
 ### Added

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.6.2...beam-daemon-v0.6.3) - 2026-07-15
+
+### Fixed
+
+- screenshot_delay/cli startup args/dir choose card fixes
+
+### Other
+
+- *(daemon)* 格式化拆分模块
+- *(daemon)* 拆分Zellij Web模块
+- *(daemon)* 拆分终端代理模块
+- *(daemon)* 拆分路由处理模块
+- *(daemon)* 拆分工作流取消模块
+- *(daemon)* 拆分工作流恢复模块
+- *(daemon)* 拆分工作流命令模块
+- *(daemon)* 拆分工作流协调模块
+- *(daemon)* 拆分Lark入口模块
+- *(daemon)* 拆分最终输出模块
+- *(workspace)* 拆分首批 Rust 源文件模块
+
 ## [0.6.2](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.6.1...beam-daemon-v0.6.2) - 2026-07-14
 
 ### Fixed

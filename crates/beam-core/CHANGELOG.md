@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3](https://github.com/linuxhenhao/beam/compare/beam-core-v0.6.2...beam-core-v0.6.3) - 2026-07-15
+
+### Other
+
+- *(workspace)* 本地测试覆盖Rust文件行数检查
+- *(core)* 拆分workflow回归场景
+- *(workspace)* 拆分首批 Rust 源文件模块
+
 ## [0.6.0](https://github.com/linuxhenhao/beam/compare/beam-core-v0.5.1...beam-core-v0.6.0) - 2026-07-13
 
 ### Added
