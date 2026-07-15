@@ -1,8 +1,8 @@
 //! Tests for the reconciler registry itself.
 
 use super::registry::{
-    default_reconciler_registry, global_reconciler_registry, ProviderReconciler,
-    ProviderReconcilerRegistry,
+    ProviderReconciler, ProviderReconcilerRegistry, default_reconciler_registry,
+    global_reconciler_registry,
 };
 
 /// Custom reconciler for testing the registry API.

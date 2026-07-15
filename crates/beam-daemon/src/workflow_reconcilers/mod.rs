@@ -20,8 +20,8 @@ pub use missing_provider::{
 pub use reconcile::{ProviderResumeResult, ReconcilerRegistryCheckResult};
 #[allow(unused_imports)]
 pub use registry::{
-    default_reconciler_registry, global_reconciler_registry, ProviderReconciler,
-    ProviderReconcilerRegistry,
+    ProviderReconciler, ProviderReconcilerRegistry, default_reconciler_registry,
+    global_reconciler_registry,
 };
 
 // ---------------------------------------------------------------------------

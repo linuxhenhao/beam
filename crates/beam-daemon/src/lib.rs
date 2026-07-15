@@ -120,8 +120,8 @@ use beam_core::{
     RunStatus, ScheduleChatType, ScreenStatus, Session, SessionGroup, SessionInputRequest,
     SessionLocateInfo, SessionScope, SessionStatus, SessionSummary, TalkEvaluation, TermActionKey,
     TranscriptChoice, TuiPromptOption, WaitResolution, WorkerToDaemon, WorkflowActor,
-    WorkflowOutputRef, can_operate, evaluate_talk, parse_workflow_definition,
-    read_event_window, read_run_events_pure, read_run_snapshot, scan_cold_workflow_runs,
+    WorkflowOutputRef, can_operate, evaluate_talk, parse_workflow_definition, read_event_window,
+    read_run_events_pure, read_run_snapshot, scan_cold_workflow_runs,
 };
 use chrono::Utc;
 use connector_store::{

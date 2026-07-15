@@ -26,7 +26,7 @@ mod watchdog;
 pub use lifecycle::{ensure_zellij_web, zellij_web_is_running, zellij_web_start};
 #[allow(unused_imports)]
 pub use tokens::{
-    ensure_zellij_web_tokens, load_zellij_web_tokens, save_zellij_web_tokens, ZellijWebTokens,
+    ZellijWebTokens, ensure_zellij_web_tokens, load_zellij_web_tokens, save_zellij_web_tokens,
 };
 pub use watchdog::spawn_zellij_web_watchdog;
 
