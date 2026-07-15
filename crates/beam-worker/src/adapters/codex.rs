@@ -21,9 +21,28 @@ pub fn create_state(init: &InitConfig) -> CodexState {
         std::env::var("CODEX_HOME")
             .unwrap_or_else(|_| format!("{}/.codex", std::env::var("HOME").unwrap_or_default())),
     );
+    create_state_with_paths(init, codex_home.join("history.jsonl"), codex_home)
+}
+
+pub fn create_traex_state(init: &InitConfig) -> CodexState {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let (history_path, home_dir) = traex_paths(Path::new(&home));
+    create_state_with_paths(init, history_path, home_dir)
+}
+
+fn traex_paths(home: &Path) -> (PathBuf, PathBuf) {
+    // Trae keeps its submit history and rollout transcripts in separate homes.
+    (home.join(".trae/cli/history.json"), home.join(".traex/cli"))
+}
+
+fn create_state_with_paths(
+    init: &InitConfig,
+    history_path: PathBuf,
+    home_dir: PathBuf,
+) -> CodexState {
     CodexState {
-        history_path: codex_home.join("history.jsonl"),
-        home_dir: codex_home,
+        history_path,
+        home_dir,
         rollout_path: None,
         cli_pid: None,
         cli_session_id: init.cli_session_id.clone(),
@@ -74,12 +93,13 @@ pub async fn write_input(
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    let base_byte = file_size(&state.history_path);
+    let history_boundary = capture_history_boundary(&state.history_path)?;
     backend.paste_text(content).await?;
     tokio::time::sleep(Duration::from_millis(200)).await;
     backend.send_enter().await?;
     for _ in 0..4 {
-        if let Some(cli_session_id) = codex_history_match(&state.history_path, base_byte, content)?
+        if let Some(cli_session_id) =
+            codex_history_match(&state.history_path, &history_boundary, content)?
         {
             state.cli_session_id = Some(cli_session_id.clone());
             return Ok(SubmitResult {
@@ -106,7 +126,7 @@ pub fn poll(state: &mut CodexState) -> Result<PollResult> {
         if state.rollout_path.is_none() {
             if let Some(pid) = state.cli_pid {
                 if let ResolveOutcome::Found((path, cli_session_id)) =
-                    find_codex_rollout_by_pid(pid)
+                    find_codex_rollout_by_pid(pid, &state.home_dir)
                 {
                     state.rollout_path = Some(path);
                     state.cli_session_id = Some(cli_session_id);
@@ -209,58 +229,151 @@ fn latest_codex_session_for_beam_session(
     history_path: &Path,
     beam_session_id: &str,
 ) -> Option<String> {
-    let raw = std::fs::read_to_string(history_path).ok()?;
-    for line in raw.lines().rev() {
-        if !line.contains(beam_session_id) {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let Some(text) = value.get("text").and_then(Value::as_str) else {
+    let entries = read_history_entries(history_path).ok()?;
+    for value in entries.iter().rev() {
+        let Some(text) = history_text(value) else {
             continue;
         };
         if !text.contains(beam_session_id) {
             continue;
         }
-        if let Some(session_id) = value.get("session_id").and_then(Value::as_str) {
+        if let Some(session_id) = history_session_id(value) {
             return Some(session_id.to_string());
         }
     }
     None
 }
 
+#[derive(Debug, Clone)]
+enum HistoryBoundary {
+    Byte(u64),
+    DocumentEntries(Vec<Value>),
+}
+
+fn capture_history_boundary(history_path: &Path) -> Result<HistoryBoundary> {
+    let raw = match std::fs::read_to_string(history_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(
+                if history_path
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+                {
+                    HistoryBoundary::DocumentEntries(Vec::new())
+                } else {
+                    HistoryBoundary::Byte(0)
+                },
+            );
+        }
+        Err(error) => return Err(error.into()),
+    };
+    Ok(parse_history_document(&raw)
+        .map(HistoryBoundary::DocumentEntries)
+        .unwrap_or_else(|| HistoryBoundary::Byte(raw.len() as u64)))
+}
+
 fn codex_history_match(
     history_path: &Path,
-    from_byte: u64,
+    boundary: &HistoryBoundary,
     expected_text: &str,
 ) -> Result<Option<String>> {
     if !history_path.exists() {
         return Ok(None);
     }
-    let size = file_size(history_path);
-    if size <= from_byte {
-        return Ok(None);
-    }
-    let mut file = File::open(history_path)?;
-    file.seek(SeekFrom::Start(from_byte))?;
-    let mut text = String::new();
-    file.read_to_string(&mut text)?;
-    for line in text.lines() {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
+    let expected = normalize_history_text(expected_text);
+    for value in read_recent_history_entries(history_path, boundary)?
+        .into_iter()
+        .rev()
+    {
+        let Some(actual) = history_text(&value) else {
             continue;
         };
-        let Some(actual) = value.get("text").and_then(Value::as_str) else {
-            continue;
-        };
-        if normalize_history_text(actual) == normalize_history_text(expected_text) {
-            return Ok(value
-                .get("session_id")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned));
+        if normalize_history_text(actual) == expected {
+            return Ok(history_session_id(&value).map(ToOwned::to_owned));
         }
     }
     Ok(None)
+}
+
+fn read_recent_history_entries(
+    history_path: &Path,
+    boundary: &HistoryBoundary,
+) -> Result<Vec<Value>> {
+    let raw = std::fs::read_to_string(history_path)?;
+    if let Some(entries) = parse_history_document(&raw) {
+        return match boundary {
+            HistoryBoundary::DocumentEntries(previous) if entries.starts_with(previous) => {
+                Ok(entries[previous.len()..].to_vec())
+            }
+            HistoryBoundary::DocumentEntries(_) => Ok(Vec::new()),
+            // A JSON document that replaced JSONL has no trustworthy append boundary.
+            HistoryBoundary::Byte(_) => Ok(Vec::new()),
+        };
+    }
+    let HistoryBoundary::Byte(from_byte) = boundary else {
+        return Ok(Vec::new());
+    };
+    let size = file_size(history_path);
+    if size <= *from_byte {
+        return Ok(Vec::new());
+    }
+    let mut file = File::open(history_path)?;
+    file.seek(SeekFrom::Start(*from_byte))?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(parse_history_jsonl(&text))
+}
+
+fn read_history_entries(history_path: &Path) -> Result<Vec<Value>> {
+    let raw = std::fs::read_to_string(history_path)?;
+    if let Some(entries) = parse_history_document(&raw) {
+        return Ok(entries);
+    }
+    Ok(parse_history_jsonl(&raw))
+}
+
+fn parse_history_document(raw: &str) -> Option<Vec<Value>> {
+    let value = serde_json::from_str::<Value>(raw).ok()?;
+    match value {
+        Value::Array(items) => Some(items),
+        Value::Object(map) => {
+            for key in ["history", "entries", "items", "data"] {
+                if let Some(Value::Array(items)) = map.get(key) {
+                    return Some(items.clone());
+                }
+            }
+            if map.contains_key("text")
+                || map.contains_key("session_id")
+                || map.contains_key("sessionId")
+                || map.contains_key("message")
+            {
+                return Some(vec![Value::Object(map)]);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn parse_history_jsonl(raw: &str) -> Vec<Value> {
+    raw.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect()
+}
+
+fn history_text(value: &Value) -> Option<&str> {
+    value
+        .get("text")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("message").and_then(Value::as_str))
+        .or_else(|| value.get("content").and_then(Value::as_str))
+}
+
+fn history_session_id(value: &Value) -> Option<&str> {
+    value
+        .get("session_id")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("sessionId").and_then(Value::as_str))
 }
 
 fn extract_codex_text(content: Option<&Value>, block_type: &str) -> String {
@@ -373,11 +486,17 @@ fn find_codex_rollout_by_session_id(home_dir: &Path, cli_session_id: &str) -> Op
     None
 }
 
-fn find_codex_rollout_by_pid(pid: u32) -> ResolveOutcome<(PathBuf, String)> {
-    find_codex_rollout_by_fd_dir(&PathBuf::from(format!("/proc/{}/fd", pid)))
+fn find_codex_rollout_by_pid(pid: u32, home_dir: &Path) -> ResolveOutcome<(PathBuf, String)> {
+    find_codex_rollout_by_fd_dir(
+        &PathBuf::from(format!("/proc/{}/fd", pid)),
+        &home_dir.join("sessions"),
+    )
 }
 
-fn find_codex_rollout_by_fd_dir(fd_dir: &Path) -> ResolveOutcome<(PathBuf, String)> {
+fn find_codex_rollout_by_fd_dir(
+    fd_dir: &Path,
+    sessions_root: &Path,
+) -> ResolveOutcome<(PathBuf, String)> {
     let entries = match read_dir(fd_dir) {
         Ok(e) => e,
         Err(e) => {
@@ -391,10 +510,16 @@ fn find_codex_rollout_by_fd_dir(fd_dir: &Path) -> ResolveOutcome<(PathBuf, Strin
             Ok(t) => t,
             Err(_) => continue,
         };
-        let target_str = target.to_string_lossy();
-        if !target_str.ends_with(".jsonl") || !target_str.contains("/.codex/sessions/") {
+        if !target
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext == "jsonl")
+            .unwrap_or(false)
+            || !target.starts_with(sessions_root)
+        {
             continue;
         }
+        let target_str = target.to_string_lossy();
         if let Some(session_id) = codex_session_id_from_rollout_path(&target_str) {
             return ResolveOutcome::Found((target, session_id));
         }
@@ -455,9 +580,55 @@ mod tests {
             ),
         )
         .unwrap();
-        let found = codex_history_match(&path, 0, "hello\r\nworld").unwrap();
+        let found =
+            codex_history_match(&path, &HistoryBoundary::Byte(0), "hello\r\nworld").unwrap();
         assert_eq!(found.as_deref(), Some("s1"));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn history_match_supports_json_document() {
+        let path = temp_path("history.json");
+        std::fs::write(&path, r#"[{"sessionId":"s0","message":"hello\nworld"}]"#).unwrap();
+        let boundary = capture_history_boundary(&path).unwrap();
+        std::fs::write(
+            &path,
+            r#"[{"sessionId":"s0","message":"hello\nworld"},{"sessionId":"s1","message":"hello\nworld"}]"#,
+        )
+        .unwrap();
+        let found = codex_history_match(&path, &boundary, "hello\r\nworld").unwrap();
+        assert_eq!(found.as_deref(), Some("s1"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn history_match_ignores_stale_json_document_entry() {
+        let path = temp_path("history.json");
+        std::fs::write(&path, r#"[{"sessionId":"s0","message":"continue"}]"#).unwrap();
+        let boundary = capture_history_boundary(&path).unwrap();
+        let found = codex_history_match(&path, &boundary, "continue").unwrap();
+        assert_eq!(found, None);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn missing_json_history_uses_an_empty_document_boundary() {
+        let path = temp_path("history").with_extension("json");
+        let boundary = capture_history_boundary(&path).unwrap();
+        std::fs::write(&path, r#"[{"sessionId":"s1","message":"hello"}]"#).unwrap();
+        let found = codex_history_match(&path, &boundary, "hello").unwrap();
+        assert_eq!(found.as_deref(), Some("s1"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn traex_uses_its_rollout_home() {
+        let (history_path, home_dir) = traex_paths(Path::new("/home/tester"));
+        assert_eq!(
+            history_path,
+            PathBuf::from("/home/tester/.trae/cli/history.json")
+        );
+        assert_eq!(home_dir, PathBuf::from("/home/tester/.traex/cli"));
     }
 
     #[test]
@@ -469,6 +640,19 @@ mod tests {
                 "{\"text\":\"no marker\",\"session_id\":\"s0\"}\n",
                 "{\"text\":\"session beam-123 marker\",\"session_id\":\"s1\"}\n"
             ),
+        )
+        .unwrap();
+        let found = latest_codex_session_for_beam_session(&path, "beam-123");
+        assert_eq!(found.as_deref(), Some("s1"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn latest_session_supports_json_document_history() {
+        let path = temp_path("latest-history.json");
+        std::fs::write(
+            &path,
+            r#"{"entries":[{"sessionId":"s0","message":"no marker"},{"sessionId":"s1","message":"session beam-123 marker"}]}"#,
         )
         .unwrap();
         let found = latest_codex_session_for_beam_session(&path, "beam-123");
@@ -736,7 +920,7 @@ mod tests {
         std::fs::create_dir_all(&fd_dir).unwrap();
         std::os::unix::fs::symlink(&rollout_path, fd_dir.join("3")).unwrap();
 
-        let result = find_codex_rollout_by_fd_dir(&fd_dir);
+        let result = find_codex_rollout_by_fd_dir(&fd_dir, &tmp.join(".codex").join("sessions"));
         assert!(
             matches!(result, ResolveOutcome::Found(_)),
             "pid anchoring should find the rollout"
@@ -749,6 +933,37 @@ mod tests {
             session_id, "019c6e27-e55b-73d1-87d8-4e01f1f75043",
             "session_id should be extracted from rollout filename"
         );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn pid_anchoring_supports_traex_sessions_root() {
+        let tmp = temp_path("traex-pid-anchor");
+        let sessions_dir = tmp
+            .join(".traex")
+            .join("cli")
+            .join("sessions")
+            .join("2026")
+            .join("06")
+            .join("11");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let rollout_path = sessions_dir
+            .join("rollout-2026-06-11T10-00-00-8db7d911-96f3-4764-a310-e42ae4cb626f.jsonl");
+        std::fs::write(&rollout_path, "{}").unwrap();
+
+        let fd_dir = tmp.join("fake-fd");
+        std::fs::create_dir_all(&fd_dir).unwrap();
+        std::os::unix::fs::symlink(&rollout_path, fd_dir.join("3")).unwrap();
+
+        let result =
+            find_codex_rollout_by_fd_dir(&fd_dir, &tmp.join(".traex").join("cli").join("sessions"));
+        let (_found_path, session_id) = match result {
+            ResolveOutcome::Found(v) => v,
+            other => panic!("expected Found, got {:?}", other),
+        };
+        assert_eq!(session_id, "8db7d911-96f3-4764-a310-e42ae4cb626f");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
