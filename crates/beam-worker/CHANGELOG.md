@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.6.2...beam-worker-v0.6.3) - 2026-07-15
+
+### Fixed
+
+- *(worker)* 修复Traex会话记录发现
+- screenshot_delay/cli startup args/dir choose card fixes
+
+### Other
+
+- *(workspace)* 本地测试覆盖Rust文件行数检查
+- *(worker)* 拆分Zellij后端模块
+- *(worker)* 拆分OpenCode适配器模块
+- *(workspace)* 拆分首批 Rust 源文件模块
+
 ## [0.6.1](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.6.0...beam-worker-v0.6.1) - 2026-07-14
 
 ### Fixed
