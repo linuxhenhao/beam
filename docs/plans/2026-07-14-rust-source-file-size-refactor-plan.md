@@ -1,7 +1,7 @@
 # Rust 源文件大小治理与模块化重构计划
 
 - 日期：2026-07-14
-- 状态：待实施
+- 状态：已完成
 - 受众：初级工程师（每个任务均可独立提交、独立验收）
 - 范围：仅重构 Rust 源代码的模块边界和测试归属；**不改变** HTTP/IPC/Lark/workflow 对外行为、持久化格式、配置字段或命令行兼容性。
 
@@ -277,20 +277,20 @@ rg --files crates -g '*.rs' | xargs wc -l | sort -rn | head -40
 | 09 | 已完成 | `beam-daemon/src/lark_dispatch.rs` | 仅抽 preflight、routing、session 更新与测试；dedupe/multibot gate 不变；`cargo test -p beam-daemon lark_dispatch` |
 | 10 | 已完成 | `beam-daemon/src/dir_select.rs` | 仅抽 scan、validation、recent、card 与测试；路径边界语义不变；`cargo test -p beam-daemon dir_select` |
 | 11 | 已完成 | `beam-daemon/src/session_cards.rs` | 仅抽 terminal links、streaming render、actions 与测试；action/ticket URL 不变；`cargo test -p beam-daemon session_cards` |
-| 12 | 待开始 | `beam-daemon/src/final_output.rs` | 仅抽 pending、attention、attachments、retry、delivery 与测试；streaming/final 卡片隔离不变；`cargo test -p beam-daemon final_output` |
-| 13 | 待开始 | `beam-daemon/src/lark_ingress.rs` | 仅抽 webhook、card/workflow/session actions、WS 与测试；payload/action value 不变；`cargo test -p beam-daemon lark_ingress` |
-| 14 | 待开始 | `beam-daemon/src/workflow_reconcilers.rs` | 仅抽 registry、providers、reconcile、missing-provider 与测试；sidecar hash/manual recovery 不变；`cargo test -p beam-daemon workflow_reconcilers` |
-| 15 | 待开始 | `beam-daemon/src/workflow_commands.rs` | 仅抽 approval、cancel、runtime driver 与测试；run-id/status 语义不变；`cargo test -p beam-daemon workflow_commands` |
-| 16 | 待开始 | `beam-daemon/src/workflow_resume.rs` | 仅抽 request、response、recovery；provider 恢复次序不变；`cargo test -p beam-daemon workflow_resume` |
-| 17 | 待开始 | `beam-daemon/src/workflow_cancellation.rs` | 仅抽 pure logic、外部 delivery 与测试；cancel 后不 dispatch 新 action；`cargo test -p beam-daemon workflow_cancellation` |
-| 18 | 待开始 | `beam-daemon/src/route_handlers.rs` | 仅按 sessions/workflows/connectors 拆 handler；router 组合与 open routes 不变；`cargo test -p beam-daemon`、`cargo build -p beam-cli` |
-| 19 | 待开始 | `beam-daemon/src/terminal_proxy.rs` | 仅抽 auth、HTTP、WS、anchor 与测试；cookie/header/readonly 边界不变；`cargo test -p beam-daemon terminal_proxy` |
-| 20 | 待开始 | `beam-daemon/src/zellij_web.rs` | 仅抽 lifecycle、tokens、watchdog 与测试；configured-port readiness 不变；`cargo test -p beam-daemon zellij_web` |
-| 21 | 待开始 | `beam-worker/src/adapters/opencode.rs` | 仅抽 transcript、source resolution、disambiguation、types 与测试；adopted PID 行为不变；`cargo test -p beam-worker opencode` |
-| 22 | 待开始 | `beam-worker/src/backend.rs` | 仅抽 zellij、observe、subscribe 与测试；pane/ANSI/lifecycle 语义不变；`cargo test -p beam-worker backend` |
-| 23 | 待开始 | `beam-core/tests/workflow_regression.rs` | 仅按 run/loop/recovery 场景拆集成测试和 `tests/support` fixture；`cargo test -p beam-core --test <拆分后的每个测试目标>` |
-| 24 | 待开始 | 基线中 801–1,000 行的八个文件：`workflow_event_fanout`、`session_creation`、`lark_parse`、`terminal_auth`、`lark_session_cards`、`workflow_cli`、`adapters/codex`、`lark_delivery` | 逐文件写“单一职责保留理由”或另开一个只含该文件的拆分任务；不能批量移动代码；所有文件仍 <1,000 行 |
-| 25 | 待开始 | CI 与最终质量门禁 | 只新增行数检查并跑 `cargo fmt --check`、workspace tests、`cargo build -p beam-cli`；不得与业务重构混合提交 |
+| 12 | 已完成 | `beam-daemon/src/final_output.rs` | 仅抽 pending、attention、attachments、retry、delivery 与测试；streaming/final 卡片隔离不变；`cargo test -p beam-daemon final_output` |
+| 13 | 已完成 | `beam-daemon/src/lark_ingress.rs` | 仅抽 webhook、card/workflow/session actions、WS 与测试；payload/action value 不变；`cargo test -p beam-daemon lark_ingress` |
+| 14 | 已完成 | `beam-daemon/src/workflow_reconcilers.rs` | 仅抽 registry、providers、reconcile、missing-provider 与测试；sidecar hash/manual recovery 不变；`cargo test -p beam-daemon workflow_reconcilers` |
+| 15 | 已完成 | `beam-daemon/src/workflow_commands.rs` | 仅抽 approval、cancel、runtime driver 与测试；run-id/status 语义不变；`cargo test -p beam-daemon workflow_commands` |
+| 16 | 已完成 | `beam-daemon/src/workflow_resume.rs` | 仅抽 request、response、recovery；provider 恢复次序不变；`cargo test -p beam-daemon workflow_resume` |
+| 17 | 已完成 | `beam-daemon/src/workflow_cancellation.rs` | 仅抽 pure logic、外部 delivery 与测试；cancel 后不 dispatch 新 action；`cargo test -p beam-daemon workflow_cancellation` |
+| 18 | 已完成 | `beam-daemon/src/route_handlers.rs` | 仅按 sessions/workflows/connectors 拆 handler；router 组合与 open routes 不变；`cargo test -p beam-daemon`、`cargo build -p beam-cli` |
+| 19 | 已完成 | `beam-daemon/src/terminal_proxy.rs` | 仅抽 auth、HTTP、WS、anchor 与测试；cookie/header/readonly 边界不变；`cargo test -p beam-daemon terminal_proxy` |
+| 20 | 已完成 | `beam-daemon/src/zellij_web.rs` | 仅抽 lifecycle、tokens、watchdog 与测试；configured-port readiness 不变；`cargo test -p beam-daemon zellij_web` |
+| 21 | 已完成 | `beam-worker/src/adapters/opencode.rs` | 仅抽 transcript、source resolution、disambiguation、types 与测试；adopted PID 行为不变；`cargo test -p beam-worker opencode` |
+| 22 | 已完成 | `beam-worker/src/backend.rs` | 仅抽 zellij、observe、subscribe 与测试；pane/ANSI/lifecycle 语义不变；`cargo test -p beam-worker backend` |
+| 23 | 已完成 | `beam-core/tests/workflow_regression.rs` | 仅按 run/loop/recovery 场景拆集成测试和 `tests/support` fixture；`cargo test -p beam-core --test <拆分后的每个测试目标>` |
+| 24 | 已完成 | 基线中 801–1,000 行的八个文件：`workflow_event_fanout`、`session_creation`、`lark_parse`、`terminal_auth`、`lark_session_cards`、`workflow_cli`、`adapters/codex`、`lark_delivery` | 逐文件写“单一职责保留理由”或另开一个只含该文件的拆分任务；不能批量移动代码；所有文件仍 <1,000 行 |
+| 25 | 已完成 | CI 与最终质量门禁 | 只新增行数检查并跑 `cargo fmt --check`、workspace tests、`cargo build -p beam-cli`；不得与业务重构混合提交 |
 
 ### 每次派发时必须附上的固定指令
 
