@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.4](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.6.3...beam-worker-v0.6.4) - 2026-07-15
+
+### Fixed
+
+- *(worker)* 修复Codex和Traex终端环境
+
+### Other
+
+- Merge pull request #38 from linuxhenhao/fix/screenshot_delay_and_traex_codex_start
+
 ## [0.6.3](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.6.2...beam-worker-v0.6.3) - 2026-07-15
 
 ### Fixed
