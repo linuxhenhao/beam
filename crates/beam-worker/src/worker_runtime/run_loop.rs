@@ -1,5 +1,27 @@
 use super::*;
 
+/// Returns `Some(("TERM", "xterm-256color"))` when `cli_id` is `"codex"` or
+/// `"traex"` and the inherited `TERM` is missing, empty, or `"dumb"`.
+///
+/// For any other CLI, or when `TERM` is already set to a non-empty value other
+/// than `"dumb"`, returns `None` — the environment is never overwritten.
+///
+/// This is a pure function so it can be tested deterministically without
+/// touching the real process environment.
+pub(crate) fn maybe_inject_term(
+    cli_id: &str,
+    current_term: Option<&str>,
+) -> Option<(String, String)> {
+    match cli_id {
+        "codex" | "traex" => {}
+        _ => return None,
+    }
+    match current_term {
+        None | Some("") | Some("dumb") => Some(("TERM".to_string(), "xterm-256color".to_string())),
+        _ => None,
+    }
+}
+
 pub(crate) async fn prepare_wrapper(
     init: &InitConfig,
     paths: &BeamPaths,
@@ -85,11 +107,15 @@ pub async fn run(init: InitConfig) -> Result<()> {
     } else {
         (spawn_spec.bin, spawn_spec.args)
     };
+    let mut env = Vec::new();
+    if let Some((k, v)) = maybe_inject_term(&init.cli_id, std::env::var("TERM").ok().as_deref()) {
+        env.push((k, v));
+    }
     let spawn_opts = SpawnOpts {
         cwd: init.working_dir.clone(),
         cols: DEFAULT_TERMINAL_COLS,
         rows: DEFAULT_TERMINAL_ROWS,
-        env: Vec::new(),
+        env,
     };
     backend_impl
         .spawn(&args.0, &args.1, spawn_opts)
