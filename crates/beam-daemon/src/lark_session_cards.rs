@@ -79,10 +79,31 @@ pub(crate) async fn begin_lark_turn_card(
         entry
     };
 
-    let state = state.clone();
+    let recall_state = state.clone();
+    let recall_session = updated_session.clone();
     tokio::spawn(async move {
-        let _ = recall_frozen_cards(&state, &updated_session).await;
+        let _ = recall_frozen_cards(&recall_state, &recall_session).await;
     });
+
+    // A new turn clears the card's image, but the worker may still have the
+    // same terminal frame cached. Re-send the mode so screenshot mode forces
+    // a fresh upload for the new card.
+    if updated_session.display_mode == Some(DisplayMode::Screenshot) {
+        if let Err(err) = send_worker_message(
+            &state.workers,
+            session_id,
+            &DaemonToWorker::SetDisplayMode {
+                mode: DisplayMode::Screenshot,
+            },
+        )
+        .await
+        {
+            warn!(
+                "failed to refresh screenshot for new turn {}: {}",
+                session_id, err
+            );
+        }
+    }
 
     Ok(())
 }

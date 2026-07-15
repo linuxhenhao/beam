@@ -22,7 +22,7 @@ pub fn create_adapter(init: &InitConfig) -> Result<CliAdapter> {
             kind: AdapterKind::Codex(codex::create_state(init)),
         },
         "traex" => CliAdapter {
-            kind: AdapterKind::Codex(codex::create_state(init)),
+            kind: AdapterKind::Codex(codex::create_traex_state(init)),
         },
         "opencode" => CliAdapter {
             kind: AdapterKind::OpenCode(opencode::create_state(init)),

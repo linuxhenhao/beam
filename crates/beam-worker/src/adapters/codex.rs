@@ -21,9 +21,28 @@ pub fn create_state(init: &InitConfig) -> CodexState {
         std::env::var("CODEX_HOME")
             .unwrap_or_else(|_| format!("{}/.codex", std::env::var("HOME").unwrap_or_default())),
     );
+    create_state_with_paths(init, codex_home.join("history.jsonl"), codex_home)
+}
+
+pub fn create_traex_state(init: &InitConfig) -> CodexState {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let (history_path, home_dir) = traex_paths(Path::new(&home));
+    create_state_with_paths(init, history_path, home_dir)
+}
+
+fn traex_paths(home: &Path) -> (PathBuf, PathBuf) {
+    // Trae keeps its submit history and rollout transcripts in separate homes.
+    (home.join(".trae/cli/history.json"), home.join(".traex/cli"))
+}
+
+fn create_state_with_paths(
+    init: &InitConfig,
+    history_path: PathBuf,
+    home_dir: PathBuf,
+) -> CodexState {
     CodexState {
-        history_path: codex_home.join("history.jsonl"),
-        home_dir: codex_home,
+        history_path,
+        home_dir,
         rollout_path: None,
         cli_pid: None,
         cli_session_id: init.cli_session_id.clone(),
@@ -48,10 +67,6 @@ pub fn build_spawn_spec(state: &CodexState, init: &InitConfig) -> SpawnSpec {
             args.push(cli_session_id);
         }
     }
-    if !init.disable_cli_bypass {
-        args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
-    }
-    args.push("--no-alt-screen".to_string());
     args.push("-C".to_string());
     args.push(init.working_dir.clone());
     args.extend(init.cli_args.clone());
@@ -78,12 +93,13 @@ pub async fn write_input(
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    let base_byte = file_size(&state.history_path);
+    let history_boundary = capture_history_boundary(&state.history_path)?;
     backend.paste_text(content).await?;
     tokio::time::sleep(Duration::from_millis(200)).await;
     backend.send_enter().await?;
     for _ in 0..4 {
-        if let Some(cli_session_id) = codex_history_match(&state.history_path, base_byte, content)?
+        if let Some(cli_session_id) =
+            codex_history_match(&state.history_path, &history_boundary, content)?
         {
             state.cli_session_id = Some(cli_session_id.clone());
             return Ok(SubmitResult {
@@ -110,7 +126,7 @@ pub fn poll(state: &mut CodexState) -> Result<PollResult> {
         if state.rollout_path.is_none() {
             if let Some(pid) = state.cli_pid {
                 if let ResolveOutcome::Found((path, cli_session_id)) =
-                    find_codex_rollout_by_pid(pid)
+                    find_codex_rollout_by_pid(pid, &state.home_dir)
                 {
                     state.rollout_path = Some(path);
                     state.cli_session_id = Some(cli_session_id);
@@ -213,58 +229,151 @@ fn latest_codex_session_for_beam_session(
     history_path: &Path,
     beam_session_id: &str,
 ) -> Option<String> {
-    let raw = std::fs::read_to_string(history_path).ok()?;
-    for line in raw.lines().rev() {
-        if !line.contains(beam_session_id) {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let Some(text) = value.get("text").and_then(Value::as_str) else {
+    let entries = read_history_entries(history_path).ok()?;
+    for value in entries.iter().rev() {
+        let Some(text) = history_text(value) else {
             continue;
         };
         if !text.contains(beam_session_id) {
             continue;
         }
-        if let Some(session_id) = value.get("session_id").and_then(Value::as_str) {
+        if let Some(session_id) = history_session_id(value) {
             return Some(session_id.to_string());
         }
     }
     None
 }
 
+#[derive(Debug, Clone)]
+enum HistoryBoundary {
+    Byte(u64),
+    DocumentEntries(Vec<Value>),
+}
+
+fn capture_history_boundary(history_path: &Path) -> Result<HistoryBoundary> {
+    let raw = match std::fs::read_to_string(history_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(
+                if history_path
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+                {
+                    HistoryBoundary::DocumentEntries(Vec::new())
+                } else {
+                    HistoryBoundary::Byte(0)
+                },
+            );
+        }
+        Err(error) => return Err(error.into()),
+    };
+    Ok(parse_history_document(&raw)
+        .map(HistoryBoundary::DocumentEntries)
+        .unwrap_or_else(|| HistoryBoundary::Byte(raw.len() as u64)))
+}
+
 fn codex_history_match(
     history_path: &Path,
-    from_byte: u64,
+    boundary: &HistoryBoundary,
     expected_text: &str,
 ) -> Result<Option<String>> {
     if !history_path.exists() {
         return Ok(None);
     }
-    let size = file_size(history_path);
-    if size <= from_byte {
-        return Ok(None);
-    }
-    let mut file = File::open(history_path)?;
-    file.seek(SeekFrom::Start(from_byte))?;
-    let mut text = String::new();
-    file.read_to_string(&mut text)?;
-    for line in text.lines() {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
+    let expected = normalize_history_text(expected_text);
+    for value in read_recent_history_entries(history_path, boundary)?
+        .into_iter()
+        .rev()
+    {
+        let Some(actual) = history_text(&value) else {
             continue;
         };
-        let Some(actual) = value.get("text").and_then(Value::as_str) else {
-            continue;
-        };
-        if normalize_history_text(actual) == normalize_history_text(expected_text) {
-            return Ok(value
-                .get("session_id")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned));
+        if normalize_history_text(actual) == expected {
+            return Ok(history_session_id(&value).map(ToOwned::to_owned));
         }
     }
     Ok(None)
+}
+
+fn read_recent_history_entries(
+    history_path: &Path,
+    boundary: &HistoryBoundary,
+) -> Result<Vec<Value>> {
+    let raw = std::fs::read_to_string(history_path)?;
+    if let Some(entries) = parse_history_document(&raw) {
+        return match boundary {
+            HistoryBoundary::DocumentEntries(previous) if entries.starts_with(previous) => {
+                Ok(entries[previous.len()..].to_vec())
+            }
+            HistoryBoundary::DocumentEntries(_) => Ok(Vec::new()),
+            // A JSON document that replaced JSONL has no trustworthy append boundary.
+            HistoryBoundary::Byte(_) => Ok(Vec::new()),
+        };
+    }
+    let HistoryBoundary::Byte(from_byte) = boundary else {
+        return Ok(Vec::new());
+    };
+    let size = file_size(history_path);
+    if size <= *from_byte {
+        return Ok(Vec::new());
+    }
+    let mut file = File::open(history_path)?;
+    file.seek(SeekFrom::Start(*from_byte))?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(parse_history_jsonl(&text))
+}
+
+fn read_history_entries(history_path: &Path) -> Result<Vec<Value>> {
+    let raw = std::fs::read_to_string(history_path)?;
+    if let Some(entries) = parse_history_document(&raw) {
+        return Ok(entries);
+    }
+    Ok(parse_history_jsonl(&raw))
+}
+
+fn parse_history_document(raw: &str) -> Option<Vec<Value>> {
+    let value = serde_json::from_str::<Value>(raw).ok()?;
+    match value {
+        Value::Array(items) => Some(items),
+        Value::Object(map) => {
+            for key in ["history", "entries", "items", "data"] {
+                if let Some(Value::Array(items)) = map.get(key) {
+                    return Some(items.clone());
+                }
+            }
+            if map.contains_key("text")
+                || map.contains_key("session_id")
+                || map.contains_key("sessionId")
+                || map.contains_key("message")
+            {
+                return Some(vec![Value::Object(map)]);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn parse_history_jsonl(raw: &str) -> Vec<Value> {
+    raw.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect()
+}
+
+fn history_text(value: &Value) -> Option<&str> {
+    value
+        .get("text")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("message").and_then(Value::as_str))
+        .or_else(|| value.get("content").and_then(Value::as_str))
+}
+
+fn history_session_id(value: &Value) -> Option<&str> {
+    value
+        .get("session_id")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("sessionId").and_then(Value::as_str))
 }
 
 fn extract_codex_text(content: Option<&Value>, block_type: &str) -> String {
@@ -377,11 +486,17 @@ fn find_codex_rollout_by_session_id(home_dir: &Path, cli_session_id: &str) -> Op
     None
 }
 
-fn find_codex_rollout_by_pid(pid: u32) -> ResolveOutcome<(PathBuf, String)> {
-    find_codex_rollout_by_fd_dir(&PathBuf::from(format!("/proc/{}/fd", pid)))
+fn find_codex_rollout_by_pid(pid: u32, home_dir: &Path) -> ResolveOutcome<(PathBuf, String)> {
+    find_codex_rollout_by_fd_dir(
+        &PathBuf::from(format!("/proc/{}/fd", pid)),
+        &home_dir.join("sessions"),
+    )
 }
 
-fn find_codex_rollout_by_fd_dir(fd_dir: &Path) -> ResolveOutcome<(PathBuf, String)> {
+fn find_codex_rollout_by_fd_dir(
+    fd_dir: &Path,
+    sessions_root: &Path,
+) -> ResolveOutcome<(PathBuf, String)> {
     let entries = match read_dir(fd_dir) {
         Ok(e) => e,
         Err(e) => {
@@ -395,10 +510,16 @@ fn find_codex_rollout_by_fd_dir(fd_dir: &Path) -> ResolveOutcome<(PathBuf, Strin
             Ok(t) => t,
             Err(_) => continue,
         };
-        let target_str = target.to_string_lossy();
-        if !target_str.ends_with(".jsonl") || !target_str.contains("/.codex/sessions/") {
+        if !target
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext == "jsonl")
+            .unwrap_or(false)
+            || !target.starts_with(sessions_root)
+        {
             continue;
         }
+        let target_str = target.to_string_lossy();
         if let Some(session_id) = codex_session_id_from_rollout_path(&target_str) {
             return ResolveOutcome::Found((target, session_id));
         }
@@ -428,388 +549,5 @@ fn codex_session_id_from_rollout_path(path: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::VecDeque;
-    use std::path::PathBuf;
-
-    use beam_core::FinalOutputKind;
-
-    fn temp_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("beam-codex-{}-{}", name, uuid::Uuid::new_v4()))
-    }
-
-    #[test]
-    fn rollout_path_extracts_session_id() {
-        let path = "/tmp/rollout-20260603-019c6e27-e55b-73d1-87d8-4e01f1f75043.jsonl";
-        assert_eq!(
-            codex_session_id_from_rollout_path(path).as_deref(),
-            Some("019c6e27-e55b-73d1-87d8-4e01f1f75043")
-        );
-    }
-
-    #[test]
-    fn history_match_finds_submitted_text() {
-        let path = temp_path("history.jsonl");
-        std::fs::write(
-            &path,
-            concat!(
-                "{\"text\":\"older\",\"session_id\":\"s0\"}\n",
-                "{\"text\":\"hello\\nworld\",\"session_id\":\"s1\"}\n"
-            ),
-        )
-        .unwrap();
-        let found = codex_history_match(&path, 0, "hello\r\nworld").unwrap();
-        assert_eq!(found.as_deref(), Some("s1"));
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn latest_session_uses_beam_session_marker() {
-        let path = temp_path("latest-history.jsonl");
-        std::fs::write(
-            &path,
-            concat!(
-                "{\"text\":\"no marker\",\"session_id\":\"s0\"}\n",
-                "{\"text\":\"session beam-123 marker\",\"session_id\":\"s1\"}\n"
-            ),
-        )
-        .unwrap();
-        let found = latest_codex_session_for_beam_session(&path, "beam-123");
-        assert_eq!(found.as_deref(), Some("s1"));
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn emits_final_output_from_rollout() {
-        let path = temp_path("rollout.jsonl");
-        std::fs::write(
-            &path,
-            concat!(
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"analysis\",\"content\":[{\"type\":\"output_text\",\"text\":\"ignore\"}]}}\n",
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}}\n"
-            ),
-        )
-        .unwrap();
-        let mut state = CodexState {
-            home_dir: PathBuf::new(),
-            history_path: PathBuf::new(),
-            rollout_path: Some(path.clone()),
-            cli_pid: None,
-            cli_session_id: Some("sid".to_string()),
-            transcript_offset: 0,
-            pending_tail: String::new(),
-            emitted_final_text: None,
-            adopt_mode: false,
-            adopt_restored_from_metadata: false,
-            adopt_preamble_emitted: false,
-            pending_remote_user_inputs: VecDeque::new(),
-            active_turn: None,
-        };
-        let result = poll(&mut state).unwrap();
-        assert_eq!(result.final_output.as_deref(), Some("done"));
-        assert!(result.prompt_ready);
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn adopt_emits_preamble_once_and_absorbs_history() {
-        let path = temp_path("codex-adopt-rollout.jsonl");
-        std::fs::write(
-            &path,
-            concat!(
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"ask\"}]}}\n",
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}}\n"
-            ),
-        )
-        .unwrap();
-        let mut state = CodexState {
-            home_dir: PathBuf::new(),
-            history_path: PathBuf::new(),
-            rollout_path: Some(path.clone()),
-            cli_pid: None,
-            cli_session_id: Some("sid".to_string()),
-            transcript_offset: 0,
-            pending_tail: String::new(),
-            emitted_final_text: None,
-            adopt_mode: true,
-            adopt_restored_from_metadata: false,
-            adopt_preamble_emitted: false,
-            pending_remote_user_inputs: VecDeque::new(),
-            active_turn: None,
-        };
-        let first = poll(&mut state).unwrap();
-        assert_eq!(
-            first.adopt_preamble,
-            Some(("ask".to_string(), "answer".to_string()))
-        );
-        assert!(first.final_output.is_none());
-        let second = poll(&mut state).unwrap();
-        assert!(second.adopt_preamble.is_none());
-        assert!(second.final_output.is_none());
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn adopt_emits_local_turn_when_user_text_is_not_from_daemon() {
-        let path = temp_path("codex-adopt-local-rollout.jsonl");
-        std::fs::write(
-            &path,
-            concat!(
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"local ask\"}]}}\n",
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"local answer\"}]}}\n"
-            ),
-        )
-        .unwrap();
-        let mut state = CodexState {
-            home_dir: PathBuf::new(),
-            history_path: PathBuf::new(),
-            rollout_path: Some(path.clone()),
-            cli_pid: None,
-            cli_session_id: Some("sid".to_string()),
-            transcript_offset: 0,
-            pending_tail: String::new(),
-            emitted_final_text: None,
-            adopt_mode: true,
-            adopt_restored_from_metadata: false,
-            adopt_preamble_emitted: true,
-            pending_remote_user_inputs: VecDeque::new(),
-            active_turn: None,
-        };
-        let result = poll(&mut state).unwrap();
-        assert_eq!(result.final_output.as_deref(), Some("local answer"));
-        assert_eq!(result.final_output_kind, Some(FinalOutputKind::LocalTurn));
-        assert_eq!(result.final_output_user_text.as_deref(), Some("local ask"));
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn adopt_keeps_remote_turn_as_bridge_output() {
-        let path = temp_path("codex-adopt-remote-rollout.jsonl");
-        std::fs::write(
-            &path,
-            concat!(
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"remote ask\"}]}}\n",
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"remote answer\"}]}}\n"
-            ),
-        )
-        .unwrap();
-        let mut state = CodexState {
-            home_dir: PathBuf::new(),
-            history_path: PathBuf::new(),
-            rollout_path: Some(path.clone()),
-            cli_pid: None,
-            cli_session_id: Some("sid".to_string()),
-            transcript_offset: 0,
-            pending_tail: String::new(),
-            emitted_final_text: None,
-            adopt_mode: true,
-            adopt_restored_from_metadata: false,
-            adopt_preamble_emitted: true,
-            pending_remote_user_inputs: VecDeque::from([crate::adapter::normalize_history_text(
-                "remote ask",
-            )]),
-            active_turn: None,
-        };
-        let result = poll(&mut state).unwrap();
-        assert_eq!(result.final_output.as_deref(), Some("remote answer"));
-        assert_eq!(result.final_output_kind, None);
-        assert_eq!(result.final_output_user_text, None);
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn adopt_restored_absorbs_history_without_preamble() {
-        let path = temp_path("codex-adopt-restored-rollout.jsonl");
-        std::fs::write(
-            &path,
-            concat!(
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"ask\"}]}}\n",
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}}\n"
-            ),
-        )
-        .unwrap();
-        let mut state = CodexState {
-            home_dir: PathBuf::new(),
-            history_path: PathBuf::new(),
-            rollout_path: Some(path.clone()),
-            cli_pid: None,
-            cli_session_id: Some("sid".to_string()),
-            transcript_offset: 0,
-            pending_tail: String::new(),
-            emitted_final_text: None,
-            adopt_mode: true,
-            adopt_restored_from_metadata: true,
-            adopt_preamble_emitted: false,
-            pending_remote_user_inputs: VecDeque::new(),
-            active_turn: None,
-        };
-        let first = poll(&mut state).unwrap();
-        assert!(first.adopt_preamble.is_none());
-        assert!(first.final_output.is_none());
-        let second = poll(&mut state).unwrap();
-        assert!(second.adopt_preamble.is_none());
-        assert!(second.final_output.is_none());
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn bridge_queue_final_answer_detection_across_turns() {
-        let path = temp_path("codex-bridge-queue.jsonl");
-        let mut state = CodexState {
-            home_dir: PathBuf::new(),
-            history_path: PathBuf::new(),
-            rollout_path: Some(path.clone()),
-            cli_pid: None,
-            cli_session_id: Some("sid".to_string()),
-            transcript_offset: 0,
-            pending_tail: String::new(),
-            emitted_final_text: None,
-            adopt_mode: false,
-            adopt_restored_from_metadata: false,
-            adopt_preamble_emitted: false,
-            pending_remote_user_inputs: VecDeque::new(),
-            active_turn: None,
-        };
-
-        let empty = poll(&mut state).unwrap();
-        assert!(empty.final_output.is_none());
-
-        std::fs::write(
-            &path,
-            concat!(
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"turn1\"}]}}\n",
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"analysis\",\"content\":[{\"type\":\"output_text\",\"text\":\"thinking\"}]}}\n",
-            ),
-        )
-        .unwrap();
-
-        let partial = poll(&mut state).unwrap();
-        assert!(partial.final_output.is_none());
-
-        std::fs::write(
-            &path,
-            concat!(
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"turn1\"}]}}\n",
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"analysis\",\"content\":[{\"type\":\"output_text\",\"text\":\"thinking\"}]}}\n",
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"turn1 result\"}]}}\n",
-            ),
-        )
-        .unwrap();
-
-        let done = poll(&mut state).unwrap();
-        assert_eq!(done.final_output.as_deref(), Some("turn1 result"));
-        assert!(done.prompt_ready);
-
-        state.emitted_final_text = Some("turn1 result".to_string());
-
-        std::fs::write(
-            &path,
-            concat!(
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"turn1\"}]}}\n",
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"analysis\",\"content\":[{\"type\":\"output_text\",\"text\":\"thinking\"}]}}\n",
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"turn1 result\"}]}}\n",
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"turn2\"}]}}\n",
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"turn2 result\"}]}}\n",
-            ),
-        )
-        .unwrap();
-
-        let second_turn = poll(&mut state).unwrap();
-        assert_eq!(second_turn.final_output.as_deref(), Some("turn2 result"));
-        assert!(second_turn.prompt_ready);
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    // ── pid-based strong anchoring ──────────────────────────────────
-
-    #[test]
-    #[cfg(unix)]
-    fn pid_anchoring_resolves_rollout_and_session_id_from_fd_dir() {
-        let tmp = temp_path("pid-anchor");
-        // Create mock ~/.codex/sessions/xxx/rollout-...-uuid.jsonl
-        let sessions_dir = tmp.join(".codex").join("sessions").join("abc123");
-        std::fs::create_dir_all(&sessions_dir).unwrap();
-        let rollout_path =
-            sessions_dir.join("rollout-20260603-019c6e27-e55b-73d1-87d8-4e01f1f75043.jsonl");
-        std::fs::write(&rollout_path, "{}").unwrap();
-
-        // Create mock fd dir with a symlink pointing to the rollout
-        let fd_dir = tmp.join("fake-fd");
-        std::fs::create_dir_all(&fd_dir).unwrap();
-        std::os::unix::fs::symlink(&rollout_path, fd_dir.join("3")).unwrap();
-
-        let result = find_codex_rollout_by_fd_dir(&fd_dir);
-        assert!(
-            matches!(result, ResolveOutcome::Found(_)),
-            "pid anchoring should find the rollout"
-        );
-        let (_found_path, session_id) = match result {
-            ResolveOutcome::Found(v) => v,
-            other => panic!("expected Found, got {:?}", other),
-        };
-        assert_eq!(
-            session_id, "019c6e27-e55b-73d1-87d8-4e01f1f75043",
-            "session_id should be extracted from rollout filename"
-        );
-
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn poll_with_rollout_resolved_by_pid_emits_preamble_without_cwd_fallback() {
-        // Simulates what happens AFTER find_codex_rollout_by_pid resolves
-        // the path: state has rollout_path and cli_session_id set from pid,
-        // and adopt mode works without any cwd-based fallback.
-        let path = temp_path("codex-pid-resolved.jsonl");
-        std::fs::write(
-            &path,
-            concat!(
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"adopted ask\"}]}}\n",
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"adopted answer\"}]}}\n"
-            ),
-        )
-        .unwrap();
-        let mut state = CodexState {
-            home_dir: PathBuf::new(),
-            history_path: PathBuf::new(),
-            rollout_path: Some(path.clone()),
-            cli_pid: Some(12345),
-            // cli_session_id resolved from pid — NOT from cwd/latest fallback
-            cli_session_id: Some("pid-resolved-sid".to_string()),
-            transcript_offset: 0,
-            pending_tail: String::new(),
-            emitted_final_text: None,
-            adopt_mode: true,
-            adopt_restored_from_metadata: false,
-            adopt_preamble_emitted: false,
-            pending_remote_user_inputs: VecDeque::new(),
-            active_turn: None,
-        };
-        let result = poll(&mut state).unwrap();
-        assert_eq!(
-            result.adopt_preamble,
-            Some(("adopted ask".to_string(), "adopted answer".to_string())),
-            "preamble should be emitted from pid-resolved rollout"
-        );
-        assert_eq!(
-            result.cli_session_id.as_deref(),
-            Some("pid-resolved-sid"),
-            "cli_session_id should come from pid resolution"
-        );
-        assert!(result.final_output.is_none());
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn pid_anchoring_session_id_from_rollout_path() {
-        // Verify codex_session_id_from_rollout_path works with
-        // the filename pattern that find_codex_rollout_by_pid discovers
-        let path = "/home/user/.codex/sessions/proj/rollout-20260603-019c6e27-e55b-73d1-87d8-4e01f1f75043.jsonl";
-        assert_eq!(
-            codex_session_id_from_rollout_path(path).as_deref(),
-            Some("019c6e27-e55b-73d1-87d8-4e01f1f75043")
-        );
-    }
-}
+#[path = "codex_tests.rs"]
+mod tests;
