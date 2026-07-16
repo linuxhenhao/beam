@@ -85,25 +85,13 @@ pub(crate) async fn begin_lark_turn_card(
         let _ = recall_frozen_cards(&recall_state, &recall_session).await;
     });
 
-    // A new turn clears the card's image, but the worker may still have the
-    // same terminal frame cached. Re-send the mode so screenshot mode forces
-    // a fresh upload for the new card.
-    if updated_session.display_mode == Some(DisplayMode::Screenshot) {
-        if let Err(err) = send_worker_message(
-            &state.workers,
-            session_id,
-            &DaemonToWorker::SetDisplayMode {
-                mode: DisplayMode::Screenshot,
-            },
-        )
-        .await
-        {
-            warn!(
-                "failed to refresh screenshot for new turn {}: {}",
-                session_id, err
-            );
-        }
-    }
+    // The new-turn first screenshot is handled by the coordinator via
+    // Message/TurnStarted + grace/pane update, so we do *not* send an
+    // additional SetDisplayMode here — that would trigger a potentially
+    // slow upload ahead of the Message, blocking the coordinator from
+    // consuming TurnStarted.
+    // Worker-ready display-mode restore and explicit toggle paths remain
+    // in resend_display_mode_after_worker_ready / toggle_display.
 
     Ok(())
 }
@@ -570,6 +558,9 @@ mod tests {
         session.terminal_url = Some("http://127.0.0.1:9000".to_string());
         session.stream_card_id = Some("om_old_turn".to_string());
         session.stream_card_nonce = Some("nonce_old_turn".to_string());
+        // display_mode is set to Screenshot so that build_streaming_card
+        // emits "waiting for screenshot" in the card body (see assertion
+        // below).  It no longer triggers a SetDisplayMode worker message.
         session.display_mode = Some(DisplayMode::Screenshot);
         session.current_screen = Some("old output".to_string());
         session.current_image_key = Some("img_old_turn".to_string());
@@ -743,7 +734,6 @@ mod tests {
         session.terminal_url = Some("http://127.0.0.1:9000".to_string());
         session.stream_card_id = Some("om_old_turn".to_string());
         session.stream_card_nonce = Some("nonce_old_turn".to_string());
-        session.display_mode = Some(DisplayMode::Screenshot);
         session.current_screen = Some("old output".to_string());
         session.current_image_key = Some("img_old_turn".to_string());
         session.last_screen_status = Some(ScreenStatus::Working);
@@ -809,6 +799,58 @@ mod tests {
         };
         assert_eq!(deleted_message_id, "om_turn_card_orphan");
         assert_ne!(deleted_message_id, "om_live_new");
+
+        maybe_remove_dir(&paths.root().to_path_buf());
+    }
+
+    #[tokio::test]
+    async fn begin_lark_turn_card_screenshot_mode_does_not_need_worker() {
+        // Regression: begin_lark_turn_card no longer sends SetDisplayMode
+        // for screenshot sessions — the new-turn first screenshot is handled
+        // by the coordinator via TurnStarted + grace/pane update.  This test
+        // verifies that the function completes without error even when no
+        // worker is present (the old code would warn "worker not running").
+        let _env_lock = lark_base_url_env_lock().lock().expect("lark env lock");
+        let (base_url, _server_state) = start_turn_card_mock_lark_server(StatusCode::OK).await;
+        let _env_guard = LarkBaseUrlEnvGuard::set(&base_url);
+
+        let paths = temp_paths("turn-screenshot-no-worker");
+        maybe_remove_dir(&paths.root().to_path_buf());
+
+        let app_id = "app-turn-screenshot";
+        let bot = make_bot(app_id);
+        let state = make_state(paths.clone(), HashMap::from([(app_id.to_string(), bot)]));
+        let mut session = make_session("sess-turn-screenshot");
+        session.status = SessionStatus::Active;
+        session.closed_at = None;
+        session.lark_app_id = app_id.to_string();
+        session.terminal_url = Some("http://127.0.0.1:9000".to_string());
+        session.stream_card_id = Some("om_old_card".to_string());
+        session.stream_card_nonce = Some("nonce_old".to_string());
+        session.display_mode = Some(DisplayMode::Screenshot);
+        {
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert(session.session_id.clone(), session.clone());
+        }
+
+        let result = begin_lark_turn_card(&state, &session.session_id, "starting").await;
+        assert!(
+            result.is_ok(),
+            "begin_lark_turn_card should succeed: {:?}",
+            result.err()
+        );
+
+        let stored = {
+            let sessions = state.sessions.lock().await;
+            sessions
+                .get(&session.session_id)
+                .cloned()
+                .expect("stored session")
+        };
+        // New card was posted (the mock lark server returns "om_turn_card").
+        assert_eq!(stored.stream_card_id.as_deref(), Some("om_turn_card"));
+        // display_mode is preserved unchanged.
+        assert_eq!(stored.display_mode, Some(DisplayMode::Screenshot));
 
         maybe_remove_dir(&paths.root().to_path_buf());
     }

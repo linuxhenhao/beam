@@ -11,6 +11,7 @@ mod connector_runtime;
 mod connector_store;
 mod daemon_types;
 mod dashboard_support;
+mod debug_simulate;
 mod dir_select;
 mod external_host_watcher;
 mod final_output;
@@ -811,7 +812,11 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         )
         .route("/sessions/{session_id}/final-output", post(final_output))
         .route("/api/asks", post(ask::create_ask))
-        .route("/api/attention", post(set_attention_route));
+        .route("/api/attention", post(set_attention_route))
+        .route(
+            "/debug/simulate/lark-message",
+            post(debug_simulate::simulate_lark_message_handler),
+        );
 
     // Start zellij web server and ensure tokens
     let zellij_web_port = state.config.web.proxy_base_port + 1;

@@ -329,6 +329,7 @@ pub(crate) fn make_session(session_id: &str) -> Session {
         resume_session_id: None,
         thread_id: None,
         agent_attention: None,
+        current_turn_id: None,
     }
 }
 

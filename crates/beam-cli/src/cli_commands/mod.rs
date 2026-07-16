@@ -368,10 +368,53 @@ pub(crate) async fn run(command: Command) -> Result<()> {
                         }
                     }
                 }
+                Command::Simulate { command } => match command {
+                    SimulateCommand::LarkMessage(args) => {
+                        validate_simulate_lark_message_args(
+                            &args.session,
+                            &args.sender,
+                            &args.text,
+                        )?;
+                        let (client, base) = api_client(&paths).await?;
+                        let resp = client
+                            .post(format!("{}/debug/simulate/lark-message", base))
+                            .json(&serde_json::json!({
+                                "session_id": args.session.trim(),
+                                "sender_open_id": args.sender.trim(),
+                                "text": args.text,
+                            }))
+                            .send()
+                            .await?;
+                        if !resp.status().is_success() {
+                            bail!("{}", resp.text().await.unwrap_or_default());
+                        }
+                        let out: serde_json::Value = resp.json().await?;
+                        println!("{}", serde_json::to_string_pretty(&out)?);
+                    }
+                },
                 Command::InternalDaemon | Command::InternalWorker(_) => unreachable!(),
             }
         }
     }
 
+    Ok(())
+}
+
+/// Trim-validate simulate lark-message args; returns Ok if all three are non-empty after trimming.
+/// The original string values are not mutated — callers should send `text` verbatim.
+pub(crate) fn validate_simulate_lark_message_args(
+    session: &str,
+    sender: &str,
+    text: &str,
+) -> Result<()> {
+    if session.trim().is_empty() {
+        bail!("--session must not be empty or whitespace");
+    }
+    if sender.trim().is_empty() {
+        bail!("--sender must not be empty or whitespace");
+    }
+    if text.trim().is_empty() {
+        bail!("text must not be empty or whitespace");
+    }
     Ok(())
 }

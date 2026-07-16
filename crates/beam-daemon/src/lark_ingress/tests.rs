@@ -891,6 +891,18 @@ async fn send_input_keeps_live_card_when_turn_card_begin_fails() {
         stored.last_final_output_turn_id.as_deref(),
         Some("turn-old")
     );
+    // Regression: turn_id must be set before begin_lark_turn_card, so it is
+    // always available for the screenshot-upload CAS guard (no race between
+    // card creation and current_turn_id write).
+    let persisted_turn_id = stored
+        .current_turn_id
+        .as_deref()
+        .expect("current_turn_id must be set after send_input");
+    assert_eq!(
+        persisted_turn_id.len(),
+        32,
+        "current_turn_id should be a 32-char uuid hex string"
+    );
 
     let mut worker = {
         let mut workers = state.workers.lock().await;

@@ -156,13 +156,12 @@ pub async fn run(init: InitConfig) -> Result<()> {
     let sample_display_mode = display_mode.clone();
     let sample_usage_limit_tracker = usage_limit_tracker.clone();
     let sample_current_turn_id = current_turn_id.clone();
-    let screenshot_app_id = init.lark_app_id.clone();
-    let screenshot_app_secret = init.lark_app_secret.clone();
     let last_uploaded_hash = Arc::new(Mutex::new(None::<String>));
-    let sample_last_uploaded_hash = last_uploaded_hash.clone();
     let last_broadcast_hash: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let sample_last_broadcast_hash = last_broadcast_hash.clone();
     let sample_analyzer_runtime = analyzer_runtime.clone();
+    // Channel for trigger events (TurnStarted, PaneUpdate, …) to the screenshot coordinator.
+    let (trigger_tx, trigger_rx) = mpsc::channel::<Trigger>(16);
     let screen_capture_task = tokio::spawn(async move {
         let mut last_emitted_status = ScreenStatus::Starting;
         let mut last_emitted_usage_limit: Option<CliUsageLimitState> = None;
@@ -217,22 +216,6 @@ pub async fn run(init: InitConfig) -> Result<()> {
                     .await;
                     last_emitted_status = status;
                     last_emitted_usage_limit = usage_limit.clone();
-                }
-
-                if mode == DisplayMode::Screenshot
-                    && screenshot_app_id != "local"
-                    && !screenshot_app_secret.is_empty()
-                {
-                    maybe_send_screenshot_upload(
-                        &sample_stdout,
-                        &screenshot_app_id,
-                        &screenshot_app_secret,
-                        &screen,
-                        status,
-                        usage_limit.clone(),
-                        &sample_last_uploaded_hash,
-                    )
-                    .await;
                 }
             }
 
@@ -409,6 +392,61 @@ pub async fn run(init: InitConfig) -> Result<()> {
         });
     }
 
+    // Coordinator task — owns the trigger receiver and the 5-second fallback.
+    {
+        let coord_backend = backend.clone();
+        let coord_stdout = stdout.clone();
+        let coord_session_id = init.session_id.clone();
+        let coord_app_id = init.lark_app_id.clone();
+        let coord_app_secret = init.lark_app_secret.clone();
+        let coord_display_mode = display_mode.clone();
+        let coord_analyzer_runtime = analyzer_runtime.clone();
+        let coord_usage_limit_tracker = usage_limit_tracker.clone();
+        let coord_last_uploaded_hash = last_uploaded_hash.clone();
+        let coord_latest_raw_screen = latest_raw_screen.clone();
+        let coord_rx = trigger_rx;
+        worker_joins.spawn(async move {
+            coordinator_loop(
+                coord_backend,
+                coord_stdout,
+                coord_session_id,
+                coord_app_id,
+                coord_app_secret,
+                coord_display_mode,
+                coord_analyzer_runtime,
+                coord_usage_limit_tracker,
+                coord_last_uploaded_hash,
+                coord_latest_raw_screen,
+                coord_rx,
+            )
+            .await;
+        });
+    }
+    // Subscribe task: forward backend pane-update notifications to the screenshot coordinator.
+    // Also caches the full viewport ANSI chunk so the coordinator can capture
+    // without waiting for the backend Mutex held by write_input().
+    {
+        let sub_backend = backend.clone();
+        let sub_trigger_tx = trigger_tx.clone();
+        let sub_latest_raw_screen = latest_raw_screen.clone();
+        worker_joins.spawn(async move {
+            let mut rx = sub_backend.lock().await.subscribe();
+            loop {
+                match rx.recv().await {
+                    Ok(chunk) => {
+                        // latest wins: the chunk is the full viewport (not incremental)
+                        *sub_latest_raw_screen.write().await = chunk;
+                        match sub_trigger_tx.try_send(Trigger::PaneUpdate) {
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
+                            _ => {} // Ok or Full → discard, keep listening
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                }
+            }
+        });
+    }
     if !init.prompt.is_empty() && !crate::adapters::passes_initial_prompt_via_args(&init.cli_id) {
         usage_limit_tracker.lock().await.begin_turn(
             "",
@@ -433,9 +471,7 @@ pub async fn run(init: InitConfig) -> Result<()> {
         }
     }
 
-    // Init-time transcript source resolution for OpenCode adapter.
-    // When cli_session_id is not yet known (typical for adopted sessions),
-    // try to resolve it before entering the main message loop.
+    // Init-time transcript source resolution for OpenCode (resolve cli_session_id before message loop).
     {
         let adapter_guard = adapter.lock().await;
         if let AdapterKind::OpenCode(ref opencode_state) = adapter_guard.kind {
@@ -521,6 +557,7 @@ pub async fn run(init: InitConfig) -> Result<()> {
         let msg: DaemonToWorker = serde_json::from_str(&line)?;
         match msg {
             DaemonToWorker::Message { content, turn_id } => {
+                info!(session = %init.session_id, %turn_id, "Message received, sending TurnStarted to coordinator");
                 handle_tui_prompt_override(&stdout, &analyzer_runtime).await;
                 let snapshot = latest_raw_screen.read().await.clone();
                 usage_limit_tracker.lock().await.begin_turn(
@@ -530,8 +567,16 @@ pub async fn run(init: InitConfig) -> Result<()> {
                         .unwrap_or_default()
                         .as_millis() as u64,
                 );
-                *current_turn_id.write().await = turn_id;
+                *current_turn_id.write().await = turn_id.clone();
                 *last_uploaded_hash.lock().await = None;
+                // Notify coordinator: a new turn has started (best-effort).
+                if trigger_tx
+                    .send(Trigger::TurnStarted { turn_id })
+                    .await
+                    .is_err()
+                {
+                    warn!("coordinator channel closed, TurnStarted not sent");
+                }
                 let guard = backend.lock().await;
                 let submit = adapter
                     .lock()
@@ -549,6 +594,7 @@ pub async fn run(init: InitConfig) -> Result<()> {
                 }
             }
             DaemonToWorker::RawInput { content, turn_id } => {
+                info!(session = %init.session_id, %turn_id, "RawInput received, sending TurnStarted to coordinator");
                 handle_tui_prompt_override(&stdout, &analyzer_runtime).await;
                 let snapshot = latest_raw_screen.read().await.clone();
                 usage_limit_tracker.lock().await.begin_turn(
@@ -558,8 +604,16 @@ pub async fn run(init: InitConfig) -> Result<()> {
                         .unwrap_or_default()
                         .as_millis() as u64,
                 );
-                *current_turn_id.write().await = turn_id;
+                *current_turn_id.write().await = turn_id.clone();
                 *last_uploaded_hash.lock().await = None;
+                // Notify coordinator: a new turn has started (best-effort).
+                if trigger_tx
+                    .send(Trigger::TurnStarted { turn_id })
+                    .await
+                    .is_err()
+                {
+                    warn!("coordinator channel closed, TurnStarted not sent");
+                }
                 let guard = backend.lock().await;
                 guard.raw_input(&content).await?;
             }
@@ -604,17 +658,9 @@ pub async fn run(init: InitConfig) -> Result<()> {
                 .await?;
                 let rendered_hash = lower_hex(&Sha256::digest(rendered.as_bytes()));
                 *last_broadcast_hash.lock().await = Some(rendered_hash);
-                if mode == DisplayMode::Screenshot {
-                    maybe_send_screenshot_upload(
-                        &stdout,
-                        &init.lark_app_id,
-                        &init.lark_app_secret,
-                        &screen,
-                        status,
-                        usage_limit,
-                        &last_uploaded_hash,
-                    )
-                    .await;
+                // Notify coordinator: refresh request (best-effort).
+                if trigger_tx.send(Trigger::Refresh).await.is_err() {
+                    warn!("coordinator channel closed, Refresh not sent");
                 }
             }
             DaemonToWorker::SetDisplayMode { mode } => {
@@ -644,17 +690,13 @@ pub async fn run(init: InitConfig) -> Result<()> {
                     },
                 )
                 .await?;
-                if mode == DisplayMode::Screenshot {
-                    maybe_send_screenshot_upload(
-                        &stdout,
-                        &init.lark_app_id,
-                        &init.lark_app_secret,
-                        &raw,
-                        status,
-                        usage_limit,
-                        &last_uploaded_hash,
-                    )
-                    .await;
+                // Notify coordinator: display mode changed (best-effort).
+                if trigger_tx
+                    .send(Trigger::SetDisplayMode(mode))
+                    .await
+                    .is_err()
+                {
+                    warn!("coordinator channel closed, SetDisplayMode not sent");
                 }
             }
             DaemonToWorker::TermAction { key } => {
@@ -693,7 +735,6 @@ pub async fn run(init: InitConfig) -> Result<()> {
     if let Some(marker) = cli_pid_marker {
         let _ = tokio::fs::remove_file(marker).await;
     }
-
     info!("worker exiting");
     Ok(())
 }

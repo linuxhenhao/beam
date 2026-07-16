@@ -17,7 +17,7 @@ pub(crate) use reqwest::{Client, header::HeaderMap};
 pub(crate) use serde::Deserialize;
 pub(crate) use sha2::{Digest, Sha256};
 pub(crate) use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-pub(crate) use tokio::sync::{Mutex, RwLock, broadcast};
+pub(crate) use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 pub(crate) use tracing::{info, warn};
 pub(crate) use unicode_width::UnicodeWidthChar;
 pub(crate) use uuid::Uuid;
@@ -27,11 +27,15 @@ pub(crate) use crate::adapter::{AdapterKind, ResolveOutcome};
 pub(crate) use crate::backend::{SessionBackend, SpawnOpts, ZellijBackend, ZellijObserveBackend};
 
 mod analyzer;
+mod coordinator;
+mod coordinator_runtime;
 mod run_loop;
 mod screenshot;
 mod tui;
 
 pub(crate) use analyzer::*;
+pub(crate) use coordinator::*;
+pub(crate) use coordinator_runtime::coordinator_loop;
 #[cfg(test)]
 pub(crate) use run_loop::maybe_inject_term;
 pub use run_loop::run;

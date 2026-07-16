@@ -12,6 +12,12 @@ pub(crate) async fn send_input(
     ensure_worker_for_session(&state, &session_id)
         .await
         .map_err(internal_error)?;
+    let turn_id = next_session_turn_id();
+    // Atomically persist last_cli_input and the new current_turn_id in a
+    // single write, BEFORE begin_lark_turn_card.  This ensures that the
+    // daemon already has the new turn_id for the CAS guard when the
+    // coordinator processes TurnStarted and sends the first screenshot
+    // upload, rejecting any stale uploads from the prior turn.
     {
         let snapshot = {
             let mut sessions = state.sessions.lock().await;
@@ -19,6 +25,7 @@ pub(crate) async fn send_input(
                 .get_mut(&session_id)
                 .ok_or_else(|| (StatusCode::NOT_FOUND, "session not found".to_string()))?;
             session.last_cli_input = Some(req.content.clone());
+            session.current_turn_id = Some(turn_id.clone());
             sessions.clone()
         };
         persist_sessions(&state.paths, &snapshot)
@@ -28,8 +35,6 @@ pub(crate) async fn send_input(
     if let Err(err) = begin_lark_turn_card(&state, &session_id, "starting").await {
         warn!("failed to begin lark turn card for {}: {}", session_id, err);
     }
-
-    let turn_id = next_session_turn_id();
     let msg = if req.raw {
         DaemonToWorker::RawInput {
             content: req.content,
@@ -366,6 +371,7 @@ pub(crate) async fn adopt_zellij_session(
         resume_session_id: None,
         thread_id: req.thread_id.clone(),
         agent_attention: None,
+        current_turn_id: None,
     };
     {
         let snapshot = {
