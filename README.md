@@ -162,6 +162,7 @@ beam dashboard    # 打开 dashboard
 - 当前对标状态：[docs/design/beam-parity-plan.md](docs/design/beam-parity-plan.md)
 - 平台与团队协作：[docs/platform-design.md](docs/platform-design.md)
 - 跨部署 federation：[docs/federation-design.md](docs/federation-design.md)
+- 日志规范与排障：[docs/design/logging.md](docs/design/logging.md)
 
 ## 许可证
 

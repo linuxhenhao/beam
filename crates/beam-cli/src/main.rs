@@ -10,8 +10,6 @@ use beam_core::{
 };
 use clap::{Args, Parser, Subcommand};
 use reqwest::Client;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::filter::LevelFilter;
 
 mod ask_hook;
 mod autostart;
@@ -290,16 +288,7 @@ mod tests;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::builder()
-                .with_default_directive(LevelFilter::INFO.into())
-                .from_env_lossy(),
-        )
-        .with_writer(std::io::stderr)
-        .with_target(false)
-        .compact()
-        .init();
+    beam_core::logging::init_tracing();
 
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

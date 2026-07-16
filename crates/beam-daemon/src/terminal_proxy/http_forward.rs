@@ -12,7 +12,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use reqwest::{Client, header as reqwest_header};
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::terminal_auth;
 use crate::terminal_auth::TICKET_QUERY_PARAM;
@@ -147,9 +147,10 @@ async fn proxy_to_zellij_root(
     let query = req.uri().query();
     if is_websocket_upgrade(req.headers()) {
         warn!(
-            "terminal proxy: rejecting websocket upgrade on HTTP proxy path {} {}",
-            method,
-            req.uri().path()
+            component = "terminal_proxy",
+            operation = "http_proxy",
+            outcome = "protocol_error",
+            "terminal proxy: rejecting websocket upgrade on HTTP proxy path"
         );
         return (
             StatusCode::UPGRADE_REQUIRED,
@@ -163,7 +164,12 @@ async fn proxy_to_zellij_root(
     let body_bytes = match axum::body::to_bytes(req.into_body(), 16 * 1024 * 1024).await {
         Ok(b) => b,
         Err(e) => {
-            warn!("terminal proxy: failed to read request body: {e}");
+            warn!(
+                component = "terminal_proxy",
+                operation = "http_proxy",
+                outcome = "bad_request",
+                "terminal proxy: failed to read request body: {e}"
+            );
             return (StatusCode::BAD_REQUEST, "failed to read request body").into_response();
         }
     };
@@ -177,10 +183,12 @@ async fn proxy_to_zellij_root(
 
     let upstream_resp = match upstream_req.send().await {
         Ok(resp) => resp,
-        Err(err) => {
+        Err(_err) => {
             warn!(
-                "terminal proxy: failed to proxy root {} {}: {err}",
-                method, target_url
+                component = "terminal_proxy",
+                operation = "http_proxy",
+                outcome = "upstream_error",
+                "terminal proxy: failed to proxy root request"
             );
             return (StatusCode::BAD_GATEWAY, "proxy error").into_response();
         }
@@ -220,9 +228,10 @@ async fn proxy_request_raw(
     let query = req.uri().query();
     if is_websocket_upgrade(req.headers()) {
         warn!(
-            "terminal proxy: rejecting websocket upgrade on HTTP proxy path {} {}",
-            method,
-            req.uri().path()
+            component = "terminal_proxy",
+            operation = "http_proxy",
+            outcome = "protocol_error",
+            "terminal proxy: rejecting websocket upgrade on HTTP proxy path"
         );
         return (
             StatusCode::UPGRADE_REQUIRED,
@@ -237,7 +246,12 @@ async fn proxy_request_raw(
     let body_bytes = match axum::body::to_bytes(req.into_body(), 16 * 1024 * 1024).await {
         Ok(b) => b,
         Err(e) => {
-            warn!("terminal proxy: failed to read request body: {e}");
+            warn!(
+                component = "terminal_proxy",
+                operation = "http_proxy",
+                outcome = "bad_request",
+                "terminal proxy: failed to read request body: {e}"
+            );
             return (StatusCode::BAD_REQUEST, "failed to read request body").into_response();
         }
     };
@@ -252,10 +266,12 @@ async fn proxy_request_raw(
 
     let upstream_resp = match upstream_req.send().await {
         Ok(resp) => resp,
-        Err(err) => {
+        Err(_err) => {
             warn!(
-                "terminal proxy: failed to proxy {} {}: {err}",
-                method, target_url
+                component = "terminal_proxy",
+                operation = "http_proxy",
+                outcome = "upstream_error",
+                "terminal proxy: failed to proxy request"
             );
             return (StatusCode::BAD_GATEWAY, "proxy error").into_response();
         }
@@ -300,7 +316,13 @@ pub(crate) async fn handle_session_terminal(
         .await
         .is_none()
     {
-        warn!("terminal proxy: session {session_id} not found");
+        debug!(
+            component = "terminal_proxy",
+            operation = "http_request",
+            outcome = "not_found",
+            session_id = session_id,
+            "terminal proxy: session {session_id} not found"
+        );
         return (StatusCode::NOT_FOUND, "session not found").into_response();
     }
 
@@ -309,7 +331,11 @@ pub(crate) async fn handle_session_terminal(
 
     let path = req.uri().path().to_string();
     let has_cookie = headers.get("cookie").is_some();
-    info!(
+    debug!(
+        component = "terminal_proxy",
+        operation = "http_request",
+        outcome = "received",
+        session_id = session_id,
         "terminal proxy: GET {path} session={session_id} ticket={} has_cookie={has_cookie}",
         ticket.is_some()
     );
@@ -319,7 +345,13 @@ pub(crate) async fn handle_session_terminal(
         if let Some(auth) = auth::authenticate_via_beam_cookie(&state, &session_id, &headers).await
         {
             // Authenticated via cookie — proxy with injected zellij cookie
-            info!("terminal proxy: cookie auth OK for session {session_id}, proxying to zellij");
+            debug!(
+                component = "terminal_proxy",
+                operation = "http_request",
+                outcome = "success",
+                session_id = session_id,
+                "terminal proxy: cookie auth OK for session {session_id}, proxying to zellij"
+            );
             let zellij_session = resolve_zellij_session(&state.sessions, &session_id)
                 .await
                 .unwrap();
@@ -337,29 +369,57 @@ pub(crate) async fn handle_session_terminal(
             )
             .await;
         } else {
-            info!("terminal proxy: no valid beam cookie for session {session_id}");
+            debug!(
+                component = "terminal_proxy",
+                operation = "http_request",
+                outcome = "missing_cookie",
+                session_id = session_id,
+                "terminal proxy: no valid beam cookie for session {session_id}"
+            );
         }
     }
 
     // Step 2: Try ticket login
     if ticket.is_some() {
-        info!("terminal proxy: trying ticket/login for session {session_id}");
+        debug!(
+            component = "terminal_proxy",
+            operation = "http_request",
+            outcome = "ticket_login",
+            session_id = session_id,
+            "terminal proxy: trying ticket/login for session {session_id}"
+        );
         match auth::try_ticket_login(&state, &session_id, ticket).await {
             Ok(response) => {
-                info!(
+                debug!(
+                    component = "terminal_proxy",
+                    operation = "http_request",
+                    outcome = "success",
+                    session_id = session_id,
                     "terminal proxy: ticket/login OK for session {session_id}, redirecting with cookie"
                 );
                 return response;
             }
             Err(error_response) => {
-                warn!("terminal proxy: ticket/login failed for session {session_id}");
+                debug!(
+                    component = "terminal_proxy",
+                    operation = "http_request",
+                    outcome = "auth_failed",
+                    session_id = session_id,
+                    "terminal proxy: ticket/login failed for session {session_id}"
+                );
                 return error_response;
             }
         }
     }
 
     // Step 4: No auth
-    warn!("terminal proxy: no auth for session {session_id}, returning 401");
+    debug!(
+        component = "terminal_proxy",
+        operation = "http_request",
+        outcome = "denied",
+        session_id = session_id,
+        "terminal proxy: no auth for session {session_id}, returning 401"
+    );
     (
         StatusCode::UNAUTHORIZED,
         "terminal authentication required — provide ?beam_terminal_ticket= or login first",
@@ -380,19 +440,31 @@ pub(crate) async fn handle_session_path(
 ) -> Response {
     // All session-scoped paths require Beam cookie authentication.
     // Static assets, APIs, commands — everything needs a valid session cookie.
-    info!(
+    debug!(
+        component = "terminal_proxy",
+        operation = "http_request",
+        outcome = "received",
+        session_id = session_id,
         "terminal proxy: path={} session={session_id} (session-scoped, checking cookie)",
         path
     );
     let Some(auth) = auth::authenticate_via_beam_cookie(&state, &session_id, req.headers()).await
     else {
-        warn!(
+        debug!(
+            component = "terminal_proxy",
+            operation = "http_request",
+            outcome = "missing_cookie",
+            session_id = session_id,
             "terminal proxy: path={} session={session_id} missing cookie, returning 401",
             path
         );
         return (StatusCode::UNAUTHORIZED, "terminal authentication required").into_response();
     };
-    info!(
+    debug!(
+        component = "terminal_proxy",
+        operation = "http_request",
+        outcome = "success",
+        session_id = session_id,
         "terminal proxy: path={} session={session_id} cookie OK, proxying",
         path
     );

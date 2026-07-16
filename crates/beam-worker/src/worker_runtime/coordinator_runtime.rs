@@ -23,6 +23,51 @@
 
 use super::*;
 
+/// Unified helper: decide log level for a `screenshot_visual_hash`
+/// failure and emit the structured log event (WARN or DEBUG).
+///
+/// Computes a fallback hash from `screen` (SHA-256 of raw bytes) for
+/// rate-limiting.  Uses [`ScreenshotFailureLogState::should_warn`] so that
+/// repeated failures on the same screen are demoted to DEBUG.
+///
+/// This is the **single production decision + logging point** for all
+/// coordinator visual-hash failure paths.  Every call site calls only this
+/// function, never `should_warn` or `warn!`/`debug!` directly for
+/// visual-hash failures.
+async fn log_visual_hash_failure(
+    failure_state: &Mutex<ScreenshotFailureLogState>,
+    screen: &str,
+    session_id: &str,
+    error: String,
+) {
+    let fallback_hash = lower_hex(&Sha256::digest(screen.as_bytes()));
+    let should_warn = {
+        let mut fs = failure_state.lock().await;
+        fs.should_warn(&fallback_hash, "visual_hash")
+    };
+    if should_warn {
+        warn!(
+            component = "screenshot",
+            operation = "hash",
+            outcome = "failure",
+            session_id = %session_id,
+            stage = "visual_hash",
+            error = %error,
+            "coordinator: screenshot_visual_hash failed",
+        );
+    } else {
+        debug!(
+            component = "screenshot",
+            operation = "hash",
+            outcome = "failure",
+            session_id = %session_id,
+            stage = "visual_hash",
+            error = %error,
+            "coordinator: screenshot_visual_hash failed (rate-limited)",
+        );
+    }
+}
+
 /// Pure cache-first selection: returns `Some(cached)` when the cache is
 /// non-empty, `None` otherwise.
 ///
@@ -109,6 +154,7 @@ fn spawn_upload(
     turn_id: String,
     upload_tx: &mpsc::UnboundedSender<UploadCompleted>,
     upload_joins: &mut tokio::task::JoinSet<()>,
+    failure_state: Arc<Mutex<ScreenshotFailureLogState>>,
 ) {
     let stdout = stdout.clone();
     let session_id = session_id.to_string();
@@ -135,6 +181,7 @@ fn spawn_upload(
             } else {
                 Some(turn_id_clone.clone())
             },
+            &failure_state,
         )
         .await;
         let _ = tx.send(UploadCompleted {
@@ -207,6 +254,11 @@ pub(crate) async fn coordinator_loop(
     // Track spawned upload tasks so they are cleaned up on loop exit.
     let mut upload_joins = tokio::task::JoinSet::new();
 
+    // Per-session screenshot failure log state for rate-limiting repeated
+    // failure warnings. Shared with spawned upload tasks.
+    let failure_state: Arc<Mutex<ScreenshotFailureLogState>> =
+        Arc::new(Mutex::new(ScreenshotFailureLogState::default()));
+
     loop {
         // Biased select ensures deterministic priority when multiple
         // branches are ready simultaneously:
@@ -253,7 +305,29 @@ pub(crate) async fn coordinator_loop(
                     }
                     record_upload(&mut state, &upload_result.turn_id, &upload_result.hash);
                 } else if !upload_result.success {
-                    info!(session = %session_id, hash = %upload_result.hash, "coordinator: upload failed, will retry via fallback tick");
+                    let should_warn = {
+                        let mut fs = failure_state.lock().await;
+                        fs.should_warn(&upload_result.hash, "upload")
+                    };
+                    if should_warn {
+                        warn!(
+                            component = "screenshot",
+                            operation = "upload",
+                            outcome = "failure",
+                            session_id = %session_id,
+                            hash = %upload_result.hash,
+                            "coordinator: upload failed, will retry via fallback tick",
+                        );
+                    } else {
+                        debug!(
+                            component = "screenshot",
+                            operation = "upload",
+                            outcome = "failure",
+                            session_id = %session_id,
+                            hash = %upload_result.hash,
+                            "coordinator: upload failed, will retry via fallback tick (rate-limited)",
+                        );
+                    }
                 }
                 // else: turn mismatch — old upload finished on a new turn,
                 // discard silently.
@@ -312,10 +386,10 @@ pub(crate) async fn coordinator_loop(
                     // \r, bare ESC) don't cause false-positive uploads.
                     let hash = match screenshot_visual_hash(&screen) {
                         Ok(h) => h,
-                        Err(e) => {
-                            warn!(session = %session_id, "coordinator: screenshot_visual_hash failed: {e}");
-                            continue;
-                        }
+                            Err(e) => {
+                                log_visual_hash_failure(&failure_state, &screen, &session_id, e.to_string()).await;
+                                continue;
+                            }
                     };
 
                     // Grace, Refresh, SetDisplayMode always upload (no dedup).
@@ -344,6 +418,7 @@ pub(crate) async fn coordinator_loop(
                         &stdout, &session_id, &app_id, &app_secret,
                         screen, hash, status, usage_limit, trigger_source,
                         upload_turn_id, &upload_tx, &mut upload_joins,
+                        failure_state.clone(),
                     );
                 }
             }
@@ -396,7 +471,7 @@ pub(crate) async fn coordinator_loop(
                 let hash = match screenshot_visual_hash(&screen) {
                     Ok(h) => h,
                     Err(e) => {
-                        warn!(session = %session_id, "coordinator: screenshot_visual_hash failed: {e}");
+                        log_visual_hash_failure(&failure_state, &screen, &session_id, e.to_string()).await;
                         continue;
                     }
                 };
@@ -407,6 +482,7 @@ pub(crate) async fn coordinator_loop(
                     &stdout, &session_id, &app_id, &app_secret,
                     screen, hash, status, usage_limit, "message-grace",
                     upload_turn_id, &upload_tx, &mut upload_joins,
+                    failure_state.clone(),
                 );
             }
 
@@ -458,7 +534,7 @@ pub(crate) async fn coordinator_loop(
                 let hash = match screenshot_visual_hash(&screen) {
                     Ok(h) => h,
                     Err(e) => {
-                        warn!(session = %session_id, "coordinator: screenshot_visual_hash failed: {e}");
+                        log_visual_hash_failure(&failure_state, &screen, &session_id, e.to_string()).await;
                         continue;
                     }
                 };
@@ -475,6 +551,7 @@ pub(crate) async fn coordinator_loop(
                     &stdout, &session_id, &app_id, &app_secret,
                     screen, hash, status, usage_limit, "pane-debounce",
                     upload_turn_id, &upload_tx, &mut upload_joins,
+                    failure_state.clone(),
                 );
             }
 
@@ -487,6 +564,8 @@ pub(crate) async fn coordinator_loop(
                         debounce_scheduled = false;
                         debounce.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(100_000_000));
                         grace.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(500));
+                        // Reset screenshot failure tracking on new turn.
+                        failure_state.lock().await.reset();
                     }
                     Some(Trigger::PaneUpdate) => {
                         let action = handle_trigger(&mut state, Trigger::PaneUpdate, None);
@@ -553,7 +632,7 @@ pub(crate) async fn coordinator_loop(
                             let hash = match screenshot_visual_hash(&screen) {
                                 Ok(h) => h,
                                 Err(e) => {
-                                    warn!(session = %session_id, "coordinator: screenshot_visual_hash failed: {e}");
+                                    log_visual_hash_failure(&failure_state, &screen, &session_id, e.to_string()).await;
                                     continue;
                                 }
                             };
@@ -563,6 +642,7 @@ pub(crate) async fn coordinator_loop(
                                 &stdout, &session_id, &app_id, &app_secret,
                                 screen, hash, status, usage_limit, kind,
                                 upload_turn_id, &upload_tx, &mut upload_joins,
+                                failure_state.clone(),
                             );
                         }
                     }
@@ -602,7 +682,7 @@ pub(crate) async fn coordinator_loop(
                 let hash = match screenshot_visual_hash(&screen) {
                     Ok(h) => h,
                     Err(e) => {
-                        warn!(session = %session_id, "coordinator: screenshot_visual_hash failed: {e}");
+                        log_visual_hash_failure(&failure_state, &screen, &session_id, e.to_string()).await;
                         continue;
                     }
                 };
@@ -625,6 +705,7 @@ pub(crate) async fn coordinator_loop(
                     &stdout, &session_id, &app_id, &app_secret,
                     screen, hash, status, usage_limit, "sampler",
                     upload_turn_id, &upload_tx, &mut upload_joins,
+                    failure_state.clone(),
                 );
             }
         }
@@ -717,5 +798,23 @@ mod tests {
     fn cached_screen_or_none_whitespace_only_is_non_empty() {
         let result = cached_screen_or_none("   ");
         assert_eq!(result, Some("   "));
+    }
+
+    // ── log_visual_hash_failure ───────────────────────────────────────
+
+    /// The production `log_visual_hash_failure` helper is the single
+    /// decision+logging point for all coordinator visual-hash failure
+    /// paths.  This test exercises it end-to-end and verifies it does
+    /// not panic.  Rate-limiting correctness of the underlying
+    /// `ScreenshotFailureLogState::should_warn` is tested in
+    /// `screenshot.rs`.
+    #[tokio::test]
+    async fn log_visual_hash_failure_smoke() {
+        let state = Arc::new(Mutex::new(ScreenshotFailureLogState::default()));
+        let screen = "test screen content";
+        // Two calls with same screen — second should not panic and
+        // should produce a DEBUG-level log (rate-limited).
+        log_visual_hash_failure(&state, screen, "sess-1", "mock error".into()).await;
+        log_visual_hash_failure(&state, screen, "sess-1", "mock error".into()).await;
     }
 }

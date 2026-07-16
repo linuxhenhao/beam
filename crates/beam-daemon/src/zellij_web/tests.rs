@@ -6,7 +6,8 @@ use super::lifecycle::{
     parse_zellij_web_version_response,
 };
 use super::tokens::{
-    TokenStrategy, extract_uuid_from_line, is_name_conflict, is_token_name_rejected,
+    TokenStrategy, diag_from_output, err_bare_generic_failure, err_bare_name_conflict,
+    err_bare_parse_failure, extract_uuid_from_line, is_name_conflict, is_token_name_rejected,
     parse_token_from_output,
 };
 
@@ -450,4 +451,119 @@ fn partial_tokens_respected() {
     };
     assert!(!ro_only.is_complete());
     assert!(ro_only.has_any_token());
+}
+
+// ── token creation diagnostic sanitization ──
+
+#[test]
+fn no_token_leak_in_error_diagnostics() {
+    // Sentinel: a plausible hex token and a UUID that could appear in zellij output.
+    let sentinel_hex = "deadbeefdeadbeefdeadbeefdeadbeef";
+    let sentinel_uuid = "550e8400-e29b-41d4-a716-446655440000";
+
+    // Sample stdout/stderr that a real zellij invocation might return,
+    // including sentinel tokens deliberately.
+    let stdout = format!(
+        "Created token successfully\n\ntoken_1: {} (read-only)\n",
+        sentinel_uuid
+    );
+    let stderr = format!("Warning: {}\n", sentinel_hex);
+
+    // ── Path A: bare success but can't parse ──
+    let diag = diag_from_output(&stdout, &stderr, Some(0));
+    let err_a = err_bare_parse_failure(&diag);
+    let text_a = format!("{:#}", err_a);
+    assert!(
+        !text_a.contains(sentinel_hex),
+        "parse-failure error leaked sentinel hex: {text_a}"
+    );
+    assert!(
+        !text_a.contains(sentinel_uuid),
+        "parse-failure error leaked sentinel uuid: {text_a}"
+    );
+
+    // ── Path B: name conflict ──
+    let diag = diag_from_output(&stdout, &stderr, Some(2));
+    let err_b = err_bare_name_conflict(&diag);
+    let text_b = format!("{:#}", err_b);
+    assert!(
+        !text_b.contains(sentinel_hex),
+        "name-conflict error leaked sentinel hex: {text_b}"
+    );
+    assert!(
+        !text_b.contains(sentinel_uuid),
+        "name-conflict error leaked sentinel uuid: {text_b}"
+    );
+
+    // ── Path C: bare failure (general) ──
+    let diag = diag_from_output(&stdout, &stderr, Some(1));
+    let err_c = err_bare_generic_failure(&diag);
+    let text_c = format!("{:#}", err_c);
+    assert!(
+        !text_c.contains(sentinel_hex),
+        "bare-failure error leaked sentinel hex: {text_c}"
+    );
+    assert!(
+        !text_c.contains(sentinel_uuid),
+        "bare-failure error leaked sentinel uuid: {text_c}"
+    );
+}
+
+#[test]
+fn parse_token_from_sentinel_data_still_works() {
+    // Sentinel tokens placed in stdout/stderr — the parser must still extract them.
+    let sentinel_hex = "deadbeefdeadbeefdeadbeefdeadbeef";
+    let sentinel_uuid = "550e8400-e29b-41d4-a716-446655440000";
+
+    // UUID in stdout as zellij 0.44.x format
+    let stdout = format!("token_1: {} (read-only)\n", sentinel_uuid);
+    let parsed = parse_token_from_output(&stdout, "");
+    assert_eq!(parsed.as_deref(), Some(sentinel_uuid));
+
+    // Hex token in stdout as bare format
+    let parsed = parse_token_from_output(sentinel_hex, "");
+    assert_eq!(parsed.as_deref(), Some(sentinel_hex));
+
+    // Hex token mixed with stderr noise (from stderr)
+    let parsed = parse_token_from_output("", sentinel_hex);
+    assert_eq!(parsed.as_deref(), Some(sentinel_hex));
+
+    // Fallback: >= 16 chars, no whitespace (from stderr)
+    let sentinel_fallback = "abcdefghijklmnopq";
+    let parsed = parse_token_from_output("", sentinel_fallback);
+    assert_eq!(parsed.as_deref(), Some(sentinel_fallback));
+}
+
+#[test]
+fn all_diagnostic_paths_produce_clean_output() {
+    // Covers all bare diagnostic paths using the production helpers,
+    // ensuring they never leak raw stdout/stderr content.
+    let hex = "deadbeefdeadbeefdeadbeefdeadbeef";
+    let uuid = "550e8400-e29b-41d4-a716-446655440000";
+    let stdout = format!("{hex}\n{uuid}\n");
+    let stderr = format!("error: {hex}\n{uuid}\n");
+
+    for exit in [None, Some(1), Some(0)] {
+        let diag = diag_from_output(&stdout, &stderr, exit);
+
+        // Path: bare success but parse failure (exit=0 only applies)
+        if exit == Some(0) {
+            let e = err_bare_parse_failure(&diag);
+            let t = format!("{:#}", e);
+            assert!(!t.contains(hex), "parse-fail path leaked hex: {t}");
+            assert!(!t.contains(uuid), "parse-fail path leaked uuid: {t}");
+        }
+
+        // Path: name conflict
+        let e = err_bare_name_conflict(&diag);
+        let t = format!("{:#}", e);
+        assert!(!t.contains(hex), "name-conflict path leaked hex: {t}");
+        assert!(!t.contains(uuid), "name-conflict path leaked uuid: {t}");
+
+        // Path: bare failure (general)
+        let e = err_bare_generic_failure(&diag);
+        let t = format!("{:#}", e);
+        assert!(!t.contains(hex), "bare-failure path leaked hex: {t}");
+        assert!(!t.contains(uuid), "bare-failure path leaked uuid: {t}");
+    }
 }

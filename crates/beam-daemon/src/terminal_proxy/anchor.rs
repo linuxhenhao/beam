@@ -16,7 +16,7 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use beam_core::{DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS};
 
@@ -183,7 +183,13 @@ pub(crate) async fn ensure_read_only_anchor(
     zellij_session: &str,
 ) {
     if !should_ensure_read_only_anchor(TerminalPermission::ReadOnly, &state.zellij_tokens) {
-        warn!("terminal proxy: read-only anchor skipped for {session_id}: write token unavailable");
+        warn!(
+            component = "terminal_proxy",
+            operation = "anchor",
+            outcome = "token_unavailable",
+            session_id = session_id,
+            "terminal proxy: read-only anchor skipped for {session_id}: write token unavailable"
+        );
         return;
     }
 
@@ -216,6 +222,10 @@ pub(crate) async fn ensure_read_only_anchor(
         .await
         {
             warn!(
+                component = "terminal_proxy",
+                operation = "anchor",
+                outcome = "error",
+                session_id = session_id_for_log,
                 "terminal proxy: zellij read-only anchor ended for session {} zellij={}: {}",
                 session_id_for_log, zellij_session_for_task, err
             );
@@ -278,7 +288,10 @@ async fn run_zellij_anchor_client(
     // take effect; waiting for the first terminal frame guarantees that.
     let mut terminal_ws =
         super::ws_relay::connect_ws_with_cookie(&terminal_url, Some(&zellij_cookie)).await?;
-    info!(
+    debug!(
+        component = "terminal_proxy",
+        operation = "anchor",
+        outcome = "connecting",
         "terminal proxy: anchor terminal WS connected for {zellij_session}, waiting for first frame..."
     );
     {
@@ -305,7 +318,12 @@ async fn run_zellij_anchor_client(
                 _ = &mut deadline => {
                     // No terminal frame within timeout — proceed anyway; the
                     // resize might still work.
-                    warn!("terminal proxy: anchor no terminal frame after 5 s, proceeding for {zellij_session}");
+                    warn!(
+                        component = "terminal_proxy",
+                        operation = "anchor",
+                        outcome = "timeout",
+                        "terminal proxy: anchor no terminal frame after 5 s, proceeding for {zellij_session}"
+                    );
                     break;
                 }
             }
@@ -315,7 +333,12 @@ async fn run_zellij_anchor_client(
     // Connect control WS after the terminal listener is ready.
     let mut control_ws =
         super::ws_relay::connect_ws_with_cookie(&control_url, Some(&zellij_cookie)).await?;
-    info!("terminal proxy: zellij read-only anchor fully connected for {zellij_session}");
+    debug!(
+        component = "terminal_proxy",
+        operation = "anchor",
+        outcome = "success",
+        "terminal proxy: zellij read-only anchor fully connected for {zellij_session}"
+    );
 
     // Wait for the server to send SetConfig (or any initial message) so we
     // don't race the resize before the control channel is fully set up.
@@ -347,7 +370,12 @@ async fn run_zellij_anchor_client(
                 }
                 _ = &mut deadline => {
                     // No SetConfig within timeout — proceed with resize anyway.
-                    warn!("terminal proxy: anchor no SetConfig after 3 s, proceeding for {zellij_session}");
+                    warn!(
+                        component = "terminal_proxy",
+                        operation = "anchor",
+                        outcome = "timeout",
+                        "terminal proxy: anchor no SetConfig after 3 s, proceeding for {zellij_session}"
+                    );
                     break;
                 }
             }
@@ -365,7 +393,10 @@ async fn run_zellij_anchor_client(
     control_ws
         .send(TungsteniteMessage::Text(initial_resize.to_string().into()))
         .await?;
-    info!(
+    debug!(
+        component = "terminal_proxy",
+        operation = "anchor",
+        outcome = "resize",
         "terminal proxy: anchor sent initial TerminalResize {DEFAULT_TERMINAL_COLS}x{DEFAULT_TERMINAL_ROWS} for {zellij_session}"
     );
 
@@ -379,7 +410,12 @@ async fn run_zellij_anchor_client(
                         let _ = terminal_ws.send(TungsteniteMessage::Pong(data)).await;
                     }
                     Some(Ok(TungsteniteMessage::Close(_))) | None => {
-                        info!("terminal proxy: anchor terminal WS closed for {zellij_session}");
+                        debug!(
+                            component = "terminal_proxy",
+                            operation = "anchor",
+                            outcome = "closed",
+                            "terminal proxy: anchor terminal WS closed for {zellij_session}"
+                        );
                         break;
                     }
                     Some(Ok(_)) => {}
@@ -393,7 +429,12 @@ async fn run_zellij_anchor_client(
                         let _ = control_ws.send(TungsteniteMessage::Pong(data)).await;
                     }
                     Some(Ok(TungsteniteMessage::Close(_))) | None => {
-                        info!("terminal proxy: anchor control WS closed for {zellij_session}");
+                        debug!(
+                            component = "terminal_proxy",
+                            operation = "anchor",
+                            outcome = "closed",
+                            "terminal proxy: anchor control WS closed for {zellij_session}"
+                        );
                         break;
                     }
                     Some(Ok(_)) => {}
@@ -414,11 +455,17 @@ async fn run_zellij_anchor_client(
                             .await
                         {
                             warn!(
+                                component = "terminal_proxy",
+                                operation = "anchor",
+                                outcome = "error",
                                 "terminal proxy: anchor failed to send ResizeToDefault for {zellij_session}: {e}"
                             );
                             return Err(e.into());
                         }
-                        info!(
+                        debug!(
+                            component = "terminal_proxy",
+                            operation = "anchor",
+                            outcome = "resize",
                             "terminal proxy: anchor reset {zellij_session} to {DEFAULT_TERMINAL_COLS}x{DEFAULT_TERMINAL_ROWS}"
                         );
                     }

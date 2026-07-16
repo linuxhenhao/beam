@@ -13,7 +13,7 @@ use axum::{
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::terminal_auth;
 
@@ -30,15 +30,33 @@ pub(crate) async fn handle_session_ws(
     req: axum::extract::Request,
 ) -> Result<impl IntoResponse, (StatusCode, &'static str)> {
     let Some(zellij_session) = resolve_zellij_session(&state.sessions, &session_id).await else {
-        warn!("terminal proxy: WS session {session_id} not found");
+        debug!(
+            component = "terminal_proxy",
+            operation = "ws_upgrade",
+            outcome = "not_found",
+            session_id = session_id,
+            "terminal proxy: WS session {session_id} not found"
+        );
         return Err((StatusCode::NOT_FOUND, "session not found"));
     };
 
     // WS auth: check Beam cookie (browsers send cookies on WS upgrade)
-    info!("terminal proxy: WS upgrade for session {session_id} zellij={zellij_session}");
+    debug!(
+        component = "terminal_proxy",
+        operation = "ws_upgrade",
+        outcome = "received",
+        session_id = session_id,
+        "terminal proxy: WS upgrade for session {session_id} zellij={zellij_session}"
+    );
     let headers = req.headers().clone();
     let Some(auth) = auth::authenticate_via_beam_cookie(&state, &session_id, &headers).await else {
-        warn!("terminal proxy: WS session {session_id} missing cookie");
+        debug!(
+            component = "terminal_proxy",
+            operation = "ws_upgrade",
+            outcome = "missing_cookie",
+            session_id = session_id,
+            "terminal proxy: WS session {session_id} missing cookie"
+        );
         return Err((StatusCode::UNAUTHORIZED, "terminal authentication required"));
     };
 
@@ -67,9 +85,13 @@ pub(crate) async fn handle_session_ws(
             Ok(zellij_ws) => {
                 relay_ws(client_socket, zellij_ws).await;
             }
-            Err(err) => {
+            Err(_err) => {
                 warn!(
-                    "terminal proxy: failed to connect to zellij session WS {zellij_session_for_count}: {err}"
+                    component = "terminal_proxy",
+                    operation = "ws_connect",
+                    outcome = "upstream_error",
+                    session_id = session_id,
+                    "terminal proxy: failed to connect to zellij session WS"
                 );
             }
         }
@@ -98,17 +120,35 @@ pub(crate) async fn handle_session_root_ws(
 ) -> Result<impl IntoResponse, (StatusCode, &'static str)> {
     // Resolve actual zellij session name
     let Some(zellij_session) = resolve_zellij_session(&state.sessions, &session_id).await else {
-        warn!("terminal proxy: root WS session {session_id} not found");
+        debug!(
+            component = "terminal_proxy",
+            operation = "ws_upgrade",
+            outcome = "not_found",
+            session_id = session_id,
+            "terminal proxy: root WS session {session_id} not found"
+        );
         return Err((StatusCode::NOT_FOUND, "session not found"));
     };
 
     // Authenticate via Beam cookie (required — no unauthenticated WS)
-    info!("terminal proxy: root WS upgrade for session {session_id} rest={rest}");
+    debug!(
+        component = "terminal_proxy",
+        operation = "ws_upgrade",
+        outcome = "received",
+        session_id = session_id,
+        "terminal proxy: root WS upgrade for session {session_id}"
+    );
     let headers = req.headers().clone();
     let auth = auth::authenticate_via_beam_cookie(&state, &session_id, &headers)
         .await
         .ok_or((StatusCode::UNAUTHORIZED, "terminal authentication required"))?;
-    info!("terminal proxy: root WS cookie auth OK for session {session_id}");
+    debug!(
+        component = "terminal_proxy",
+        operation = "ws_upgrade",
+        outcome = "success",
+        session_id = session_id,
+        "terminal proxy: root WS cookie auth OK for session {session_id}"
+    );
 
     if should_ensure_read_only_anchor(auth.permission, &state.zellij_tokens) {
         anchor::ensure_read_only_anchor(&state, &session_id, &zellij_session).await;
@@ -119,7 +159,6 @@ pub(crate) async fn handle_session_root_ws(
 
     let query = req.uri().query().map(|q| q.to_string());
     let zellij_web_port = state.zellij_web_port;
-    let rest_for_log = rest.clone();
     let viewer_counter = state.viewer_counter.clone();
     let is_terminal = is_terminal_ws_rest(&rest);
     let zellij_session_for_count = zellij_session.clone();
@@ -139,8 +178,14 @@ pub(crate) async fn handle_session_root_ws(
             Ok(zellij_ws) => {
                 relay_ws(client_socket, zellij_ws).await;
             }
-            Err(err) => {
-                warn!("terminal proxy: failed to connect to zellij root WS {rest_for_log}: {err}");
+            Err(_err) => {
+                warn!(
+                    component = "terminal_proxy",
+                    operation = "ws_connect",
+                    outcome = "upstream_error",
+                    session_id = session_id,
+                    "terminal proxy: failed to connect to zellij root WS"
+                );
             }
         }
 
@@ -174,12 +219,27 @@ pub(crate) async fn connect_ws_with_cookie(
         builder = builder.with_header("Cookie", cookie);
     }
 
-    info!("terminal proxy: connecting WS to {url}");
+    debug!(
+        component = "terminal_proxy",
+        operation = "ws_connect",
+        outcome = "connecting",
+        "terminal proxy: connecting WS"
+    );
     let result = connect_async(builder).await.map(|(ws, _)| ws);
-    if let Err(ref e) = result {
-        warn!("terminal proxy: WS connect to {url} failed: {e}");
+    if let Err(ref _e) = result {
+        warn!(
+            component = "terminal_proxy",
+            operation = "ws_connect",
+            outcome = "upstream_error",
+            "terminal proxy: WS connect failed"
+        );
     } else {
-        info!("terminal proxy: WS connect to {url} OK");
+        debug!(
+            component = "terminal_proxy",
+            operation = "ws_connect",
+            outcome = "success",
+            "terminal proxy: WS connect OK"
+        );
     }
     result
 }

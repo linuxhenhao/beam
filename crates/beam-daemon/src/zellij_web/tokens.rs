@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -93,16 +93,18 @@ impl TokenStrategy {
     }
 }
 
-/// Run a token creation command; returns (stdout_lines, stderr_lines, success).
-fn run_token_create(strategy: &TokenStrategy) -> (String, String, bool) {
+/// Run a token creation command; returns (stdout, stderr, exit_code).
+/// exit_code is `Some(0)` on clean exit, `Some(n)` for non-zero exit,
+/// or `None` when the command could not be executed (e.g. zellij not found).
+fn run_token_create(strategy: &TokenStrategy) -> (String, String, Option<i32>) {
     let output = Command::new("zellij").args(strategy.args()).output();
     match output {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            (stdout, stderr, out.status.success())
+            (stdout, stderr, out.status.code())
         }
-        Err(_) => (String::new(), String::new(), false),
+        Err(_) => (String::new(), String::new(), None),
     }
 }
 
@@ -175,6 +177,61 @@ pub(crate) fn is_token_name_rejected(stderr: &str) -> bool {
     let lower = stderr.to_lowercase();
     lower.contains("cannot be used") && lower.contains("token-name")
         || lower.contains("cannot be used") && lower.contains("create-token")
+}
+
+// ── sanitized bare-token error helpers ─────────────────────────────────
+
+/// Diagnostic metadata for bare token creation failures.
+/// Intentionally excludes raw stdout/stderr content to prevent
+/// sensitive token values from leaking into logs or error messages.
+pub(crate) struct BareTokenDiag {
+    pub(crate) exit_status: Option<i32>,
+    pub(crate) stdout_len: usize,
+    pub(crate) stderr_len: usize,
+}
+
+/// Construct a sanitized diagnostic from raw command output.
+/// Only metadata (lengths, exit status) is preserved; output content
+/// is intentionally dropped so callers cannot accidentally log tokens.
+pub(crate) fn diag_from_output(
+    stdout: &str,
+    stderr: &str,
+    exit_status: Option<i32>,
+) -> BareTokenDiag {
+    BareTokenDiag {
+        exit_status,
+        stdout_len: stdout.len(),
+        stderr_len: stderr.len(),
+    }
+}
+
+/// Error: bare token creation succeeded (exit 0) but no token could be
+/// parsed from output.
+pub(crate) fn err_bare_parse_failure(diag: &BareTokenDiag) -> anyhow::Error {
+    anyhow::anyhow!(
+        "bare token creation succeeded (exit 0) but could not parse token from output (stdout_len={}, stderr_len={})",
+        diag.stdout_len,
+        diag.stderr_len,
+    )
+}
+
+/// Error: bare token creation failed due to a name-conflict with an
+/// existing token.
+pub(crate) fn err_bare_name_conflict(diag: &BareTokenDiag) -> anyhow::Error {
+    anyhow::anyhow!(
+        "bare token creation failed: name conflict (exit_status={:?})",
+        diag.exit_status,
+    )
+}
+
+/// Error: bare token creation failed for an unknown / generic reason.
+pub(crate) fn err_bare_generic_failure(diag: &BareTokenDiag) -> anyhow::Error {
+    anyhow::anyhow!(
+        "bare token creation failed (exit_status={:?}, stdout_len={}, stderr_len={})",
+        diag.exit_status,
+        diag.stdout_len,
+        diag.stderr_len,
+    )
 }
 
 // ── persistence ───────────────────────────────────────────────────────
@@ -362,21 +419,31 @@ fn try_create_token(want_write: bool, is_read_only: bool) -> Result<String> {
         },
         read_only: is_read_only,
     };
-    let (stdout, stderr, success) = run_token_create(&strategy);
-    if success {
+    let (stdout, stderr, exit_code) = run_token_create(&strategy);
+    if exit_code == Some(0) {
         if let Some(tok) = parse_token_from_output(&stdout, &stderr) {
             return Ok(tok);
         }
-        warn!("token created but could not parse output: stdout={stdout:?} stderr={stderr:?}");
+        warn!(
+            strategy = "named",
+            read_only = is_read_only,
+            exit_status = 0,
+            stdout_len = stdout.len(),
+            stderr_len = stderr.len(),
+            "token created but could not parse output",
+        );
         // Fall through to bare strategy — the token was created but we can't read it
     } else if is_token_name_rejected(&stderr) {
         info!("--token-name rejected by zellij, falling back to bare creation");
     } else {
         // Some other failure — try bare strategy anyway
         warn!(
-            "named token creation failed (name={}): stderr={}",
-            token_name,
-            stderr.trim()
+            strategy = "named",
+            read_only = is_read_only,
+            exit_status = ?exit_code,
+            stdout_len = stdout.len(),
+            stderr_len = stderr.len(),
+            "named token creation failed",
         );
     }
 
@@ -384,20 +451,19 @@ fn try_create_token(want_write: bool, is_read_only: bool) -> Result<String> {
     let strategy = TokenStrategy::Bare {
         read_only: is_read_only,
     };
-    let (stdout, stderr, success) = run_token_create(&strategy);
-    if success {
+    let (stdout, stderr, exit_code) = run_token_create(&strategy);
+    if exit_code == Some(0) {
         if let Some(tok) = parse_token_from_output(&stdout, &stderr) {
             return Ok(tok);
         }
-        bail!("bare token created but could not parse output: stdout={stdout:?} stderr={stderr:?}");
+        let diag = diag_from_output(&stdout, &stderr, exit_code);
+        return Err(err_bare_parse_failure(&diag));
     }
 
+    let diag = diag_from_output(&stdout, &stderr, exit_code);
     if is_name_conflict(&stderr) {
-        bail!(
-            "bare token creation name-conflict: {} (a token with the default name already exists)",
-            stderr.trim()
-        );
+        return Err(err_bare_name_conflict(&diag));
     }
 
-    bail!("bare token creation failed: stderr={}", stderr.trim());
+    return Err(err_bare_generic_failure(&diag));
 }

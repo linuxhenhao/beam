@@ -161,6 +161,7 @@ That split is intentional. A stuck or noisy CLI should not take down the entire 
 - Current parity status: [docs/design/beam-parity-plan.md](docs/design/beam-parity-plan.md)
 - Platform and team collaboration: [docs/platform-design.md](docs/platform-design.md)
 - Cross-deployment federation: [docs/federation-design.md](docs/federation-design.md)
+- Logging specification and troubleshooting: [docs/design/logging.en.md](docs/design/logging.en.md)
 
 ## License
 
