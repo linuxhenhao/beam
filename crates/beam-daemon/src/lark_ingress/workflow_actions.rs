@@ -512,7 +512,15 @@ pub(crate) async fn cancel_workflow_run(
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, String)> {
     let outcome = workflow_commands::cancel_run(&state, &run_id, req.reason)
         .await
-        .map_err(internal_error)?;
+        .map_err(|e| {
+            error!(
+                operation = "cancel_run",
+                run_id = %run_id,
+                error = %e,
+                "workflow cancel execution failed"
+            );
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        })?;
 
     if outcome.ok {
         Ok((
@@ -853,7 +861,17 @@ pub(crate) async fn handle_workflow_card_action(
     let (response_content, is_success) = match handler_result {
         Ok(Ok(msg)) => (msg, true),
         Ok(Err(err)) => (err, false),
-        Err(err) => (format!("workflow action failed: {}", err), false),
+        Err(err) => {
+            error!(
+                operation = %action_str,
+                run_id = %run_id,
+                activity_id = %activity_id,
+                attempt_id = %attempt_id,
+                error = %err,
+                "workflow command execution failed"
+            );
+            (format!("workflow action failed: {}", err), false)
+        }
     };
 
     if !is_success {

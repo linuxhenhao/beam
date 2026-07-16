@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 
 use anyhow::Result;
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::adapter::OpenCodeState;
 use crate::backend::SessionBackend;
@@ -58,9 +58,10 @@ pub(crate) async fn disambiguate_by_screen(
     };
 
     if score_too_low || score_gap_too_small {
-        debug!(
-            "screen disambiguation rejected: candidates={} top_score={:.3}<{:.3} or scores too close",
-            candidates.len(),
+        info!(
+            adapter = "opencode",
+            candidate_count = candidates.len(),
+            "screen disambiguation rejected: top_score={:.3}<{:.3} or scores too close",
             top_score,
             MIN_DISAMBIGUATION_SCORE
         );
@@ -68,8 +69,10 @@ pub(crate) async fn disambiguate_by_screen(
     }
 
     info!(
-        "screen disambiguation selected session {} (score={:.3}, lead={:.2}x)",
-        top_source.session_id,
+        adapter = "opencode",
+        candidate_count = candidates.len(),
+        transcript_session = %top_source.session_id,
+        "screen disambiguation selected (score={:.3}, lead={:.2}x)",
         top_score,
         top_score / scored.get(1).map(|s| s.0).unwrap_or(1.0)
     );

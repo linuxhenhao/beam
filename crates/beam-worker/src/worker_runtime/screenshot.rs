@@ -524,6 +524,108 @@ pub(crate) async fn upload_image_buffer(
         .context("lark image upload missing image_key")
 }
 
+// ── Screenshot failure log rate-limiter ──────────────────────────────
+
+/// Bounded per-session screenshot failure state for log rate-limiting.
+///
+/// Tracks consecutive failures by (hash, stage) pair. On success or reset,
+/// failure tracking is cleared. State is O(1) — no unbounded growth.
+///
+/// This struct only affects log verbosity; it NEVER changes upload
+/// decisions, dedup behavior, or any business logic.
+#[derive(Debug, Clone)]
+pub(crate) struct ScreenshotFailureLogState {
+    /// Hash of the last failure event (visual hash or fallback).
+    last_failure_hash: Option<String>,
+    /// Stage of the last failure event ("render", "upload", "ipc").
+    last_failure_stage: Option<String>,
+    /// Consecutive count for the same (hash, stage) pair.
+    consecutive_count: u64,
+    /// Whether the last completed operation was a success.
+    last_success: bool,
+}
+
+impl Default for ScreenshotFailureLogState {
+    fn default() -> Self {
+        Self {
+            last_failure_hash: None,
+            last_failure_stage: None,
+            consecutive_count: 0,
+            last_success: true,
+        }
+    }
+}
+
+impl ScreenshotFailureLogState {
+    /// Decide whether this failure event should be logged at WARN level.
+    ///
+    /// Returns `true` (WARN) for:
+    /// - First failure after success or reset (transition).
+    /// - First occurrence of a new (hash, stage) pair.
+    ///
+    /// Returns `false` (DEBUG) for:
+    /// - Repeated same (hash, stage) consecutive failures (rate-limited).
+    ///
+    /// The caller MUST log at WARN when this returns `true`, DEBUG otherwise.
+    /// This method is pure (no IO, no async, no side effects beyond internal
+    /// state mutation) — it can be unit-tested directly.
+    pub(crate) fn should_warn(&mut self, hash: &str, stage: &str) -> bool {
+        // Transition from success to failure is always WARN.
+        if self.last_success {
+            self.last_success = false;
+            self.last_failure_hash = Some(hash.to_string());
+            self.last_failure_stage = Some(stage.to_string());
+            self.consecutive_count = 1;
+            return true;
+        }
+        // Same (hash, stage) pair repeating — rate-limit after the first.
+        if self.last_failure_hash.as_deref() == Some(hash)
+            && self.last_failure_stage.as_deref() == Some(stage)
+        {
+            self.consecutive_count = self.consecutive_count.saturating_add(1);
+            // First occurrence still WARNs; subsequent repeats are DEBUG.
+            self.consecutive_count == 1
+        } else {
+            // Different hash or stage — new failure, always WARN.
+            self.last_failure_hash = Some(hash.to_string());
+            self.last_failure_stage = Some(stage.to_string());
+            self.consecutive_count = 1;
+            true
+        }
+    }
+
+    /// Record a successful pipeline completion; resets failure tracking.
+    ///
+    /// The next failure after this call will be logged at WARN (transition).
+    pub(crate) fn mark_success(&mut self) {
+        self.last_success = true;
+        self.last_failure_hash = None;
+        self.last_failure_stage = None;
+        self.consecutive_count = 0;
+    }
+
+    /// Full reset (e.g. on TurnStarted or session restart).
+    ///
+    /// Equivalent to replacing with `ScreenshotFailureLogState::default()`.
+    pub(crate) fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+// ── Core screenshot pipeline ─────────────────────────────────────────
+
+/// Macro to emit a failure log at WARN or DEBUG depending on `$should_warn`.
+/// Eliminates duplicated if/else blocks in the hot path.
+macro_rules! screenshot_failure_event {
+    ($should_warn:expr, $($arg:tt)*) => {
+        if $should_warn {
+            warn!($($arg)*);
+        } else {
+            debug!($($arg)*);
+        }
+    };
+}
+
 /// Core screenshot pipeline: render → Feishu upload → IPC.
 ///
 /// Does **not** update the shared `last_uploaded_hash` — the caller is
@@ -540,11 +642,15 @@ pub(crate) async fn do_screenshot_upload(
     screen: &str,
     status: ScreenStatus,
     usage_limit: Option<CliUsageLimitState>,
-    _hash: &str,
+    hash: &str,
     turn_id: Option<String>,
+    failure_state: &Mutex<ScreenshotFailureLogState>,
 ) -> bool {
     let t0 = std::time::Instant::now();
-    info!(
+    debug!(
+        component = "screenshot",
+        operation = "upload",
+        outcome = "started",
         session_id = %session_id,
         trigger = %trigger_source,
         "screenshot_upload start",
@@ -554,7 +660,15 @@ pub(crate) async fn do_screenshot_upload(
         Ok(png) => png,
         Err(err) => {
             let elapsed_ms = t0.elapsed().as_millis() as u64;
-            warn!(
+            let should_warn = {
+                let mut fs = failure_state.lock().await;
+                fs.should_warn(hash, "render")
+            };
+            screenshot_failure_event!(
+                should_warn,
+                component = "screenshot",
+                operation = "upload",
+                outcome = "failure",
                 session_id = %session_id,
                 trigger = %trigger_source,
                 stage = "render",
@@ -573,7 +687,15 @@ pub(crate) async fn do_screenshot_upload(
         Ok(image_key) => image_key,
         Err(err) => {
             let elapsed_ms = t0.elapsed().as_millis() as u64;
-            warn!(
+            let should_warn = {
+                let mut fs = failure_state.lock().await;
+                fs.should_warn(hash, "upload")
+            };
+            screenshot_failure_event!(
+                should_warn,
+                component = "screenshot",
+                operation = "upload",
+                outcome = "failure",
                 session_id = %session_id,
                 trigger = %trigger_source,
                 stage = "upload",
@@ -600,7 +722,15 @@ pub(crate) async fn do_screenshot_upload(
     .is_err()
     {
         let elapsed_ms = t0.elapsed().as_millis() as u64;
-        warn!(
+        let should_warn = {
+            let mut fs = failure_state.lock().await;
+            fs.should_warn(hash, "ipc")
+        };
+        screenshot_failure_event!(
+            should_warn,
+            component = "screenshot",
+            operation = "upload",
+            outcome = "failure",
             session_id = %session_id,
             trigger = %trigger_source,
             stage = "ipc",
@@ -610,7 +740,15 @@ pub(crate) async fn do_screenshot_upload(
         return false;
     }
 
-    info!(
+    // Success — reset failure tracking and log at DEBUG.
+    {
+        let mut fs = failure_state.lock().await;
+        fs.mark_success();
+    }
+    debug!(
+        component = "screenshot",
+        operation = "upload",
+        outcome = "success",
         session_id = %session_id,
         trigger = %trigger_source,
         render_ms = render_ms,
@@ -651,6 +789,7 @@ pub(crate) async fn perform_screenshot_upload(
     last_uploaded_hash: &Arc<Mutex<Option<String>>>,
     hash: &str,
     turn_id: Option<String>,
+    failure_state: &Mutex<ScreenshotFailureLogState>,
 ) -> bool {
     let ok = do_screenshot_upload(
         stdout,
@@ -663,6 +802,7 @@ pub(crate) async fn perform_screenshot_upload(
         usage_limit,
         hash,
         turn_id,
+        failure_state,
     )
     .await;
     if ok {
@@ -788,5 +928,57 @@ mod tests {
             h1, h2,
             "visual hashes must differ when visible text content differs"
         );
+    }
+
+    // ── ScreenshotFailureLogState ─────────────────────────────────────
+
+    use super::ScreenshotFailureLogState;
+
+    /// Comprehensive rule table: tests all rate-limiting boundaries in one
+    /// test so the strategy is exercised by production code, not copied into
+    /// individual tests.
+    #[test]
+    fn failure_state_rate_limit_rule_table() {
+        let mut s = ScreenshotFailureLogState::default();
+        // Rule: first failure → WARN.
+        assert!(s.should_warn("h1", "s1"), "first failure → WARN");
+        // Rule: same (hash, stage) repeat → DEBUG.
+        assert!(!s.should_warn("h1", "s1"), "2nd same → DEBUG");
+        assert!(!s.should_warn("h1", "s1"), "3rd same → DEBUG");
+        // Rule: different hash → WARN (new failure).
+        assert!(s.should_warn("h2", "s1"), "new hash → WARN");
+        // Rule: different stage → WARN (new failure).
+        assert!(s.should_warn("h2", "s2"), "new stage → WARN");
+    }
+
+    /// After mark_success, next failure must WARN (transition).
+    #[test]
+    fn failure_state_success_transition_warns() {
+        let mut s = ScreenshotFailureLogState::default();
+        s.should_warn("hash_a", "upload"); // WARN
+        s.should_warn("hash_a", "upload"); // DEBUG
+        s.mark_success();
+        // Transition from success to failure → WARN.
+        assert!(s.should_warn("hash_a", "upload"));
+        // Subsequent same failure → DEBUG.
+        assert!(!s.should_warn("hash_a", "upload"));
+    }
+
+    /// reset() forgets all prior failures; next failure = WARN.
+    #[test]
+    fn failure_state_reset_clears_all() {
+        let mut s = ScreenshotFailureLogState::default();
+        s.should_warn("hash_a", "upload");
+        s.reset();
+        assert!(s.should_warn("hash_a", "upload"));
+    }
+
+    /// Double mark_success is harmless.
+    #[test]
+    fn failure_state_double_mark_success_noop() {
+        let mut s = ScreenshotFailureLogState::default();
+        s.mark_success();
+        s.mark_success();
+        assert!(s.should_warn("hash_x", "ipc"));
     }
 }

@@ -3,6 +3,7 @@ pub mod ask;
 pub mod config;
 pub mod i18n;
 pub mod ipc;
+pub mod logging;
 pub mod paths;
 pub mod permissions;
 pub mod persist;

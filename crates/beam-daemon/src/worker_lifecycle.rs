@@ -248,9 +248,13 @@ pub(crate) async fn spawn_worker(
                                 let entry = match sessions.get(&session_id_for_task) {
                                     Some(e) => e,
                                     None => {
-                                        warn!(
-                                            "ScreenshotUploaded: session {} not found",
-                                            session_id_for_task
+                                        debug!(
+                                            component = "worker_lifecycle",
+                                            operation = "screenshot_cas",
+                                            outcome = "discarded",
+                                            session_id = %session_id_for_task,
+                                            received_turn = %tid,
+                                            "ScreenshotUploaded discarded: session not found"
                                         );
                                         continue;
                                     }
@@ -258,18 +262,27 @@ pub(crate) async fn spawn_worker(
                                 (entry.status, entry.current_turn_id.clone())
                             };
                             if sess_status != SessionStatus::Active {
-                                warn!(
-                                    "ScreenshotUploaded: session {} not Active (status={:?}), skipping turn_id={}",
-                                    session_id_for_task, sess_status, tid
+                                debug!(
+                                    component = "worker_lifecycle",
+                                    operation = "screenshot_cas",
+                                    outcome = "discarded",
+                                    session_id = %session_id_for_task,
+                                    session_status = ?sess_status,
+                                    received_turn = %tid,
+                                    current_turn = ?sess_turn,
+                                    "ScreenshotUploaded discarded: session not Active"
                                 );
                                 continue;
                             }
                             if sess_turn.as_deref() != Some(tid.as_str()) {
-                                warn!(
-                                    "ScreenshotUploaded: turn_id mismatch for session {}: got={:?}, expected={:?}, skipping",
-                                    session_id_for_task,
-                                    Some(tid.as_str()),
-                                    sess_turn
+                                debug!(
+                                    component = "worker_lifecycle",
+                                    operation = "screenshot_cas",
+                                    outcome = "discarded",
+                                    session_id = %session_id_for_task,
+                                    received_turn = %tid,
+                                    current_turn = ?sess_turn,
+                                    "ScreenshotUploaded discarded: turn_id mismatch"
                                 );
                                 continue;
                             }

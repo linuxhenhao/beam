@@ -228,7 +228,14 @@ pub async fn create_ask(
     let result = match tokio::time::timeout(Duration::from_millis(request.timeout_ms), rx).await {
         Ok(Ok(answer)) => answer,
         _ => {
-            warn!(ask_id = %ask_id, "ask timed out");
+            info!(
+                session_id = %request.session_id,
+                chat_id = %request.chat_id,
+                lark_app_id = %request.lark_app_id,
+                ask_id = %ask_id,
+                timeout_ms = request.timeout_ms,
+                "ask timed out"
+            );
             let mut pending = state.ask_pending.lock().await;
             pending.remove(&ask_id);
             drop(pending);
@@ -320,9 +327,12 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use beam_core::{BeamPaths, BotConfig, Session, SessionScope, SessionStatus};
+    use beam_core::{AskResult, BeamPaths, BotConfig, Session, SessionScope, SessionStatus};
     use chrono::Utc;
     use tokio::sync::Mutex;
+
+    // Bring in test helpers for integration-style tests (mock Lark server).
+    use crate::tests::test_helpers;
 
     fn make_state(session_owner: Option<&str>, allowed_users: Vec<&str>) -> AppState {
         let paths = BeamPaths::from_root(
@@ -501,6 +511,48 @@ mod tests {
 
         let approvers = resolve_ask_approvers(&state, &req).await;
         assert_eq!(approvers, HashSet::from(["ou_explicit".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn create_ask_timeout_returns_timed_out_result() {
+        let _env_lock = test_helpers::lark_base_url_env_lock().lock().expect("lark env lock");
+        let base_url = test_helpers::start_mock_lark_server().await;
+        let _env_guard = test_helpers::LarkBaseUrlEnvGuard::set(&base_url);
+        let app_id = "app-ask-timeout";
+        let mut bot = test_helpers::make_bot(app_id);
+        bot.allowed_users = vec!["ou_approver".to_string()];
+        let state = test_helpers::make_state(
+            test_helpers::temp_paths("ask-timeout"),
+            HashMap::from([(app_id.to_string(), bot)]),
+        );
+
+        let body = serde_json::json!({
+            "sessionId": "sess-to-1",
+            "chatId": "chat-1",
+            "larkAppId": app_id,
+            "questions": [{
+                "prompt": "pick one",
+                "options": [{"key": "a", "label": "A"}],
+                "multiSelect": false,
+            }],
+            "timeoutMs": 1000,
+            "approvers": ["ou_approver"],
+        });
+
+        let result = create_ask(axum::extract::State(state), axum::Json(body)).await;
+
+        assert!(
+            result.is_ok(),
+            "expected Ok for ask timeout, got {:?}",
+            result
+        );
+        let ask_result: AskResult =
+            serde_json::from_value(result.unwrap().0).expect("valid AskResult JSON");
+        assert!(
+            matches!(ask_result, AskResult::TimedOut { timed_out: true, .. }),
+            "expected TimedOut, got {:?}",
+            ask_result
+        );
     }
 }
 

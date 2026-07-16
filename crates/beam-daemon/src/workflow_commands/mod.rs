@@ -13,17 +13,15 @@ pub use cancel::*;
 pub use runtime::run_workflow_runtime_once;
 
 // ---------------------------------------------------------------------------
-// Shared helper macro — converts any Display error into anyhow::Error, logging
+// Shared helper macro — converts any Display error into anyhow::Error
 // ---------------------------------------------------------------------------
 
-/// Convert any Display error into an `anyhow::Error`, logging on the way.
+/// Convert any Display error into an `anyhow::Error` (no logging — callers log
+/// at the request execution boundary).
 /// Used inside functions that return `anyhow::Result` (Lark handler, cancel handler).
 macro_rules! map_anyhow {
     ($e:expr) => {
-        $e.map_err(|e| {
-            tracing::error!("workflow_commands: {}", e);
-            anyhow::anyhow!("{}", e)
-        })?
+        $e.map_err(|e| anyhow::anyhow!("{}", e))?
     };
 }
 // Make it visible to sibling submodules.

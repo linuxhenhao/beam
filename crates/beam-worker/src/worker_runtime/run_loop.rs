@@ -483,7 +483,7 @@ pub async fn run(init: InitConfig) -> Result<()> {
                 )
                 .await
                 .unwrap_or_else(|err| {
-                    warn!("resolve_transcript_source error: {:?}", err);
+                    warn!(session = %init.session_id, adapter = "opencode", "resolve_transcript_source error: {:?}", err);
                     ResolveOutcome::NotFound {
                         reason: format!("OpenCode transcript source resolution failed: {}", err),
                     }
@@ -506,14 +506,16 @@ pub async fn run(init: InitConfig) -> Result<()> {
                             state.cli_session_id = Some(source.session_id.clone());
                         }
                         info!(
-                            "transcript source resolved automatically: session={}",
-                            source.session_id
+                            session = %init.session_id, adapter = "opencode",
+                            transcript_session = %source.session_id,
+                            "transcript source resolved automatically"
                         );
                     }
                     ResolveOutcome::Ambiguous { candidates, .. } => {
-                        warn!(
-                            "transcript source ambiguous ({} candidates), requesting user choice",
-                            candidates.len()
+                        info!(
+                            session = %init.session_id, adapter = "opencode",
+                            candidate_count = candidates.len(),
+                            "transcript source ambiguous, requesting user choice"
                         );
                         let turn_id = Uuid::new_v4().to_string();
                         let choices: Vec<TranscriptChoice> = candidates
@@ -534,7 +536,7 @@ pub async fn run(init: InitConfig) -> Result<()> {
                         drop(adapter_guard);
                     }
                     ResolveOutcome::NotFound { reason } => {
-                        warn!("transcript source not found: {}", reason);
+                        info!(session = %init.session_id, adapter = "opencode", "transcript source not found: {}", reason);
                         send_message(&stdout, &WorkerToDaemon::UserNotify { message: reason })
                             .await?;
                     }
@@ -719,7 +721,7 @@ pub async fn run(init: InitConfig) -> Result<()> {
                     state.expected_session_id = Some(cli_session_id.clone());
                     state.cli_session_id = Some(cli_session_id.clone());
                 }
-                info!("transcript source set by user: session={}", cli_session_id);
+                info!(session = %init.session_id, adapter = "opencode", transcript_session = %cli_session_id, "transcript source set by user");
                 send_message(&stdout, &WorkerToDaemon::CliSessionId { cli_session_id }).await?;
             }
             DaemonToWorker::Init(_) => {}

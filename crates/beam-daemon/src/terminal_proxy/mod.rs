@@ -247,13 +247,21 @@ pub async fn start_proxy(
     let listener = tokio::net::TcpListener::bind(format!("{host}:{port}")).await?;
     let addr = listener.local_addr()?;
     info!(
+        component = "terminal_proxy",
+        operation = "start",
+        outcome = "success",
         "terminal proxy listening on {host}:{} (zellij web on 127.0.0.1:{})",
         addr.port(),
         zellij_web_port
     );
     tokio::spawn(async move {
         if let Err(err) = axum::serve(listener, app).await {
-            warn!("terminal proxy server error: {err}");
+            warn!(
+                component = "terminal_proxy",
+                operation = "serve",
+                outcome = "error",
+                "terminal proxy server error: {err}"
+            );
         }
     });
     Ok(addr.port())
