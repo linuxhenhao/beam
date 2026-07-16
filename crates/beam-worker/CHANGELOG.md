@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.6.4...beam-worker-v0.7.0) - 2026-07-16
+
+### Added
+
+- *(logging)* 优化运行与排障日志分级
+- *(screenshot)* 优化事件驱动截图刷新
+
+### Other
+
+- Merge pull request #40 from linuxhenhao/feat/event-driven-screenshot-refresh
+
 ## [0.6.4](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.6.3...beam-worker-v0.6.4) - 2026-07-15
 
 ### Fixed
