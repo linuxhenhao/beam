@@ -245,21 +245,41 @@ pub(crate) fn lower_hex(bytes: &[u8]) -> String {
     out
 }
 
+/// Compute a content-based hash from the **visual** screenshot (rendered
+/// PNG bytes), not the raw terminal string.
+///
+/// Invisible control characters (e.g. `\r`, bare `\x1b`, private CSI) that
+/// don't change the rendered image are ignored by this hash.  The
+/// coordinator uses this hash for dedup (`should_upload` /
+/// `record_upload`) so that consecutive identical-looking screenshots are
+/// not re-uploaded.
+///
+/// Returns an error only when PNG rendering itself fails (unlikely for
+/// in-memory rendering; the fallback bitmap path is infallible).
+pub(crate) fn screenshot_visual_hash(screen: &str) -> Result<String> {
+    let png = render_text_screenshot_png(screen)?;
+    Ok(lower_hex(&Sha256::digest(&png)))
+}
+
 pub(crate) fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\x1b' {
             if chars.peek() == Some(&'[') {
-                chars.next();
+                chars.next(); // consume '['
+                // Consume CSI parameter bytes (0x30..=0x3F), intermediate bytes
+                // (0x20..=0x2F), and the final byte (0x40..=0x7E), so that
+                // private-mode sequences like \x1b[?25h are fully stripped.
                 while let Some(&c) = chars.peek() {
-                    if c.is_ascii_alphanumeric() || c == ';' {
+                    let cu = c as u32;
+                    if (0x30..=0x3F).contains(&cu) || (0x20..=0x2F).contains(&cu) {
                         chars.next();
-                        if c.is_ascii_alphabetic() {
-                            break;
-                        }
-                    } else {
+                    } else if (0x40..=0x7E).contains(&cu) {
+                        chars.next(); // final byte
                         break;
+                    } else {
+                        break; // unexpected character, stop consuming
                     }
                 }
             } else if chars.peek() == Some(&']') {
@@ -504,49 +524,151 @@ pub(crate) async fn upload_image_buffer(
         .context("lark image upload missing image_key")
 }
 
-pub(crate) async fn maybe_send_screenshot_upload(
+/// Core screenshot pipeline: render → Feishu upload → IPC.
+///
+/// Does **not** update the shared `last_uploaded_hash` — the caller is
+/// responsible for dedup state.
+///
+/// Use [`perform_screenshot_upload`] when the caller wants the shared hash
+/// update to happen inside the same await (blocking path).
+pub(crate) async fn do_screenshot_upload(
     stdout: &Arc<Mutex<tokio::io::Stdout>>,
+    session_id: &str,
+    trigger_source: &str,
+    app_id: &str,
+    app_secret: &str,
+    screen: &str,
+    status: ScreenStatus,
+    usage_limit: Option<CliUsageLimitState>,
+    _hash: &str,
+    turn_id: Option<String>,
+) -> bool {
+    let t0 = std::time::Instant::now();
+    info!(
+        session_id = %session_id,
+        trigger = %trigger_source,
+        "screenshot_upload start",
+    );
+
+    let png = match render_text_screenshot_png(screen) {
+        Ok(png) => png,
+        Err(err) => {
+            let elapsed_ms = t0.elapsed().as_millis() as u64;
+            warn!(
+                session_id = %session_id,
+                trigger = %trigger_source,
+                stage = "render",
+                elapsed_ms = elapsed_ms,
+                error = %err,
+                "screenshot_upload failed",
+            );
+            return false;
+        }
+    };
+    let render_ms = t0.elapsed().as_millis() as u64;
+    let png_bytes = png.len();
+
+    let t1 = std::time::Instant::now();
+    let image_key = match upload_image_buffer(app_id, app_secret, png).await {
+        Ok(image_key) => image_key,
+        Err(err) => {
+            let elapsed_ms = t0.elapsed().as_millis() as u64;
+            warn!(
+                session_id = %session_id,
+                trigger = %trigger_source,
+                stage = "upload",
+                elapsed_ms = elapsed_ms,
+                error = %err,
+                "screenshot_upload failed",
+            );
+            return false;
+        }
+    };
+    let upload_ms = t1.elapsed().as_millis() as u64;
+    let total_ms = t0.elapsed().as_millis() as u64;
+
+    if send_message(
+        stdout,
+        &WorkerToDaemon::ScreenshotUploaded {
+            image_key,
+            status,
+            usage_limit,
+            turn_id,
+        },
+    )
+    .await
+    .is_err()
+    {
+        let elapsed_ms = t0.elapsed().as_millis() as u64;
+        warn!(
+            session_id = %session_id,
+            trigger = %trigger_source,
+            stage = "ipc",
+            elapsed_ms = elapsed_ms,
+            "screenshot_upload failed: IPC send error",
+        );
+        return false;
+    }
+
+    info!(
+        session_id = %session_id,
+        trigger = %trigger_source,
+        render_ms = render_ms,
+        upload_ms = upload_ms,
+        total_ms = total_ms,
+        png_bytes = png_bytes,
+        "screenshot_upload success",
+    );
+    true
+}
+
+/// Perform the full screenshot render + Feishu upload + ScreenshotUploaded IPC
+/// without dedup checks.
+///
+/// Convenience wrapper: calls [`do_screenshot_upload`] and also updates the
+/// shared `last_uploaded_hash` on success.
+///
+/// Returns `true` when all three stages (render, Feishu upload, IPC send)
+/// succeeded.  The caller should only update its own dedup state (e.g.
+/// [`crate::worker_runtime::coordinator::record_upload`]) when this returns
+/// `true`.
+///
+/// On failure the shared `last_uploaded_hash` is **not** updated, so the next
+/// tick will retry.
+///
+/// Note: kept for API completeness; new code should prefer
+/// [`do_screenshot_upload`] and manage dedup state separately.
+#[allow(dead_code)]
+pub(crate) async fn perform_screenshot_upload(
+    stdout: &Arc<Mutex<tokio::io::Stdout>>,
+    session_id: &str,
+    trigger_source: &str,
     app_id: &str,
     app_secret: &str,
     screen: &str,
     status: ScreenStatus,
     usage_limit: Option<CliUsageLimitState>,
     last_uploaded_hash: &Arc<Mutex<Option<String>>>,
-) {
-    if app_id == "local" || app_secret.is_empty() {
-        return;
-    }
-    let hash = lower_hex(&Sha256::digest(strip_ansi(screen).as_bytes()));
-    {
-        let guard = last_uploaded_hash.lock().await;
-        if guard.as_deref() == Some(hash.as_str()) {
-            return;
-        }
-    }
-    let png = match render_text_screenshot_png(screen) {
-        Ok(png) => png,
-        Err(err) => {
-            warn!("failed to render terminal screenshot: {err:#}");
-            return;
-        }
-    };
-    let image_key = match upload_image_buffer(app_id, app_secret, png).await {
-        Ok(image_key) => image_key,
-        Err(err) => {
-            warn!("failed to upload terminal screenshot: {err:#}");
-            return;
-        }
-    };
-    let _ = send_message(
+    hash: &str,
+    turn_id: Option<String>,
+) -> bool {
+    let ok = do_screenshot_upload(
         stdout,
-        &WorkerToDaemon::ScreenshotUploaded {
-            image_key,
-            status,
-            usage_limit,
-        },
+        session_id,
+        trigger_source,
+        app_id,
+        app_secret,
+        screen,
+        status,
+        usage_limit,
+        hash,
+        turn_id,
     )
     .await;
-    *last_uploaded_hash.lock().await = Some(hash);
+    if ok {
+        *last_uploaded_hash.lock().await = Some(hash.to_string());
+    }
+    ok
 }
 
 #[derive(Debug, Default)]
@@ -583,5 +705,88 @@ impl UsageLimitTracker {
         self.suppressed_retry_ready_key = None;
         self.detected_turn = Some(self.turn_seq);
         (ScreenStatus::Limited, Some(detected))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_ansi;
+
+    #[test]
+    fn strip_ansi_private_csi_cursor_show_hide() {
+        // \x1b[?25h and \x1b[?25l should be fully consumed — no residue.
+        let input = "\x1b[?25hHello\x1b[?25l";
+        assert_eq!(strip_ansi(input), "Hello");
+
+        let input2 = "A\x1b[?25hB\x1b[?25lC";
+        assert_eq!(strip_ansi(input2), "ABC");
+    }
+
+    #[test]
+    fn strip_ansi_mixed_sgr_private_and_cursor() {
+        let input = "\x1b[1;31mRed\x1b[0m \x1b[?25h\x1b[10;20HCursor\x1b[2J\nNext line";
+        let expected = "Red Cursor\nNext line";
+        assert_eq!(strip_ansi(input), expected);
+    }
+
+    #[test]
+    fn strip_ansi_incomplete_csi_safe_no_panic() {
+        // End-of-string right after ESC [
+        assert_eq!(strip_ansi("\x1b["), "");
+
+        // End-of-string with partial parameter bytes (no final byte)
+        assert_eq!(strip_ansi("abc\x1b[?25"), "abc");
+
+        // End-of-string with longer partial params
+        assert_eq!(strip_ansi("x\x1b[38;2;"), "x");
+
+        // Only the param marker '>' without final byte — nothing leaked
+        assert_eq!(strip_ansi("x\x1b[>"), "x");
+    }
+
+    // ── screenshot_visual_hash ────────────────────────────────────────
+
+    /// Two raw inputs that differ only in invisible control characters
+    /// (`\r` carriage return) must produce the same visual hash, because
+    /// the rendered PNG is identical.
+    ///
+    /// `strip_ansi` does NOT strip `\r`, so the old dedup
+    /// (`Sha256::digest(strip_ansi(&screen))`) would see them as
+    /// different.  `render_text_screenshot_png` uses `.lines()` which
+    /// treats `\r\n` as a single line ending → identical visual output.
+    #[test]
+    fn screenshot_visual_hash_same_when_only_control_chars_differ() {
+        let screen1 = "hello world\n";
+        // \r\n is invisible in the rendered PNG — .lines() treats it as
+        // one line ending, same as a bare \n.
+        let screen2 = "hello world\r\n";
+
+        let h1 =
+            super::screenshot_visual_hash(screen1).expect("visual hash should succeed for screen1");
+        let h2 =
+            super::screenshot_visual_hash(screen2).expect("visual hash should succeed for screen2");
+
+        assert_eq!(
+            h1, h2,
+            "visual hashes must match when only invisible control chars differ"
+        );
+    }
+
+    /// When the visible text content differs, the visual hash must also
+    /// differ.
+    #[test]
+    fn screenshot_visual_hash_different_when_text_differs() {
+        let screen1 = "hello world\n";
+        let screen2 = "goodbye world\n";
+
+        let h1 =
+            super::screenshot_visual_hash(screen1).expect("visual hash should succeed for screen1");
+        let h2 =
+            super::screenshot_visual_hash(screen2).expect("visual hash should succeed for screen2");
+
+        assert_ne!(
+            h1, h2,
+            "visual hashes must differ when visible text content differs"
+        );
     }
 }

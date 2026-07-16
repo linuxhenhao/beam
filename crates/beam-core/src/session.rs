@@ -192,6 +192,12 @@ pub struct Session {
     /// Cleared on next user inbound message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_attention: Option<AgentAttention>,
+    /// The turn_id of the most recent input sent to this session.
+    /// Set atomically by send_input before dispatching to the worker.
+    /// Used by the daemon to validate screenshot uploads (CAS check).
+    /// New/restart sessions with no input remain None.
+    #[serde(default)]
+    pub current_turn_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -294,5 +300,47 @@ mod tests {
         assert_eq!(aa.kind, "blocked");
         assert_eq!(aa.reason, "need approval");
         assert_eq!(aa.at.to_rfc3339(), "2025-06-01T12:00:00+00:00");
+    }
+
+    #[test]
+    fn session_deser_old_data_without_current_turn_id() {
+        // Old session JSON (before current_turn_id was added)
+        // must deserialize with the field defaulting to None.
+        let json = r#"{
+            "session_id": "test-sess-5",
+            "title": "test",
+            "chat_id": "chat-1",
+            "root_message_id": "root-1",
+            "scope": "thread",
+            "status": "active",
+            "created_at": "2025-01-01T00:00:00Z",
+            "lark_app_id": "app-1"
+        }"#;
+        let session: Session = serde_json::from_str(json).expect("should deserialize old session");
+        assert_eq!(
+            session.current_turn_id, None,
+            "old sessions without the field should default to None"
+        );
+    }
+
+    #[test]
+    fn session_deser_with_current_turn_id() {
+        let json = r#"{
+            "session_id": "test-sess-6",
+            "title": "test",
+            "chat_id": "chat-1",
+            "root_message_id": "root-1",
+            "scope": "thread",
+            "status": "active",
+            "created_at": "2025-01-01T00:00:00Z",
+            "lark_app_id": "app-1",
+            "current_turn_id": "turn-abc"
+        }"#;
+        let session: Session = serde_json::from_str(json).expect("should deserialize session");
+        assert_eq!(
+            session.current_turn_id.as_deref(),
+            Some("turn-abc"),
+            "new sessions should preserve current_turn_id"
+        );
     }
 }

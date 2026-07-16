@@ -88,6 +88,10 @@ enum Command {
         #[command(subcommand)]
         command: SessionCommand,
     },
+    Simulate {
+        #[command(subcommand)]
+        command: SimulateCommand,
+    },
     #[command(hide = true, name = "__daemon")]
     InternalDaemon,
     #[command(hide = true, name = "__worker")]
@@ -257,6 +261,24 @@ struct QuotedArgs {
 struct WorkerArgs {
     #[arg(long)]
     init_path: PathBuf,
+}
+
+#[derive(Debug, Subcommand)]
+enum SimulateCommand {
+    #[command(name = "lark-message")]
+    LarkMessage(SimulateLarkMessageArgs),
+}
+
+#[derive(Debug, Args)]
+struct SimulateLarkMessageArgs {
+    /// Session ID to simulate the message in.
+    #[arg(long, value_name = "SESSION_ID")]
+    session: String,
+    /// Sender's open ID.
+    #[arg(long = "sender", value_name = "OPEN_ID")]
+    sender: String,
+    /// Message text content.
+    text: String,
 }
 
 mod cli_commands;

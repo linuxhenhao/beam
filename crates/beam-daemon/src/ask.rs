@@ -381,6 +381,7 @@ mod tests {
                     initial_prompt: None,
                     thread_id: Some("omt_1".to_string()),
                     agent_attention: None,
+                    current_turn_id: None,
                 },
             );
         }

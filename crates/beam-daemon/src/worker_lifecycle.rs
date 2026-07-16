@@ -81,6 +81,7 @@ pub(crate) async fn execute_schedule_task(
         last_screen_status: None,
         closed_at: None,
         agent_attention: None,
+        current_turn_id: None,
     };
 
     // Persist session
@@ -235,32 +236,77 @@ pub(crate) async fn spawn_worker(
                     image_key,
                     status,
                     usage_limit,
+                    turn_id,
                 }) => {
-                    {
-                        let snapshot = {
-                            let mut sessions = state.sessions.lock().await;
-                            if let Some(entry) = sessions.get_mut(&session_id_for_task) {
-                                entry.current_image_key = Some(image_key);
-                                entry.last_screen_status = Some(status);
-                                entry.usage_limit = usage_limit.clone();
+                    // Compare-and-swap (CAS) guard: only accept screenshot
+                    // uploads when the session is Active and the turn_id
+                    // matches the session's current_turn_id.
+                    let cas_ok = match &turn_id {
+                        Some(tid) => {
+                            let (sess_status, sess_turn) = {
+                                let sessions = state.sessions.lock().await;
+                                let entry = match sessions.get(&session_id_for_task) {
+                                    Some(e) => e,
+                                    None => {
+                                        warn!(
+                                            "ScreenshotUploaded: session {} not found",
+                                            session_id_for_task
+                                        );
+                                        continue;
+                                    }
+                                };
+                                (entry.status, entry.current_turn_id.clone())
+                            };
+                            if sess_status != SessionStatus::Active {
+                                warn!(
+                                    "ScreenshotUploaded: session {} not Active (status={:?}), skipping turn_id={}",
+                                    session_id_for_task, sess_status, tid
+                                );
+                                continue;
                             }
-                            sessions.clone()
-                        };
-                        let _ = persist_sessions(&state.paths, &snapshot).await;
+                            if sess_turn.as_deref() != Some(tid.as_str()) {
+                                warn!(
+                                    "ScreenshotUploaded: turn_id mismatch for session {}: got={:?}, expected={:?}, skipping",
+                                    session_id_for_task,
+                                    Some(tid.as_str()),
+                                    sess_turn
+                                );
+                                continue;
+                            }
+                            true
+                        }
+                        None => {
+                            // No turn_id from old worker; use existing path.
+                            true
+                        }
+                    };
+                    if cas_ok {
+                        {
+                            let snapshot = {
+                                let mut sessions = state.sessions.lock().await;
+                                if let Some(entry) = sessions.get_mut(&session_id_for_task) {
+                                    entry.current_image_key = Some(image_key);
+                                    entry.last_screen_status = Some(status);
+                                    entry.usage_limit = usage_limit.clone();
+                                }
+                                sessions.clone()
+                            };
+                            let _ = persist_sessions(&state.paths, &snapshot).await;
+                        }
+                        if let Some(usage_limit) = usage_limit.clone() {
+                            arm_usage_limit_retry_timer(
+                                state.clone(),
+                                session_id_for_task.clone(),
+                                usage_limit,
+                            );
+                        }
+                        let _ = patch_lark_streaming_card(
+                            &state,
+                            &session_id_for_task,
+                            screen_status_card_label(status),
+                        )
+                        .await;
                     }
-                    if let Some(usage_limit) = usage_limit.clone() {
-                        arm_usage_limit_retry_timer(
-                            state.clone(),
-                            session_id_for_task.clone(),
-                            usage_limit,
-                        );
-                    }
-                    let _ = patch_lark_streaming_card(
-                        &state,
-                        &session_id_for_task,
-                        screen_status_card_label(status),
-                    )
-                    .await;
                 }
                 Ok(WorkerToDaemon::CliSessionId { cli_session_id }) => {
                     let snapshot = {

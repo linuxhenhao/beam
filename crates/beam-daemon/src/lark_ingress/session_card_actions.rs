@@ -384,6 +384,7 @@ async fn handle_retry_last_task(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
+    let turn_id = next_session_turn_id();
     let session_snapshot = {
         let snapshot = {
             let mut sessions = state.sessions.lock().await;
@@ -400,6 +401,7 @@ async fn handle_retry_last_task(
                 )));
             };
             *entry = updated.clone();
+            entry.current_turn_id = Some(turn_id.clone());
             let snapshot = sessions.clone();
             (updated, cli_input, snapshot)
         };
@@ -414,7 +416,7 @@ async fn handle_retry_last_task(
         session_id,
         &DaemonToWorker::Message {
             content: session_snapshot.1.clone(),
-            turn_id: next_session_turn_id(),
+            turn_id,
         },
     )
     .await;

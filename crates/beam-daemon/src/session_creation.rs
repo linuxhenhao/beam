@@ -200,6 +200,7 @@ pub(crate) async fn create_session_internal(
         locale: spec.locale.clone(),
         resume_session_id: None,
         agent_attention: None,
+        current_turn_id: None,
     };
     {
         let snapshot = {

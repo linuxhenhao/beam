@@ -2,9 +2,9 @@ use crate::cli_commands::{
     BotInfoEntry, active_sessions, bin_candidates_for_cli_id, build_send_request,
     default_cli_args_for_cli_id, discover_session_id_from_pid, format_bot_info_entries_for_cli,
     format_duration, parse_cli_args_input, parse_mention, parse_migrate_flags,
-    resolve_allowed_users, setup_backup_file,
+    resolve_allowed_users, setup_backup_file, validate_simulate_lark_message_args,
 };
-use crate::{Cli, Command, SendArgs, SessionCommand};
+use crate::{Cli, Command, SendArgs, SessionCommand, SimulateCommand};
 use beam_core::{BeamPaths, SessionStatus, SessionSummary};
 use chrono::Utc;
 use clap::{FromArgMatches, Parser};
@@ -671,4 +671,110 @@ fn send_parse_mention_valid_formats() {
 fn send_parse_mention_rejects_empty() {
     assert!(parse_mention("").is_err());
     assert!(parse_mention(":Name").is_err());
+}
+
+// ---- beam simulate lark-message parse tests ----
+
+#[test]
+fn simulate_lark_message_parse_success() {
+    let cli = Cli::try_parse_from([
+        "beam",
+        "simulate",
+        "lark-message",
+        "--session",
+        "sid-abc",
+        "--sender",
+        "ou_123",
+        "hello world",
+    ])
+    .expect("parse simulate lark-message");
+    match cli.command {
+        Command::Simulate {
+            command: SimulateCommand::LarkMessage(args),
+        } => {
+            assert_eq!(args.session, "sid-abc");
+            assert_eq!(args.sender, "ou_123");
+            assert_eq!(args.text, "hello world");
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[test]
+fn simulate_lark_message_missing_session_fails() {
+    let err = Cli::try_parse_from([
+        "beam",
+        "simulate",
+        "lark-message",
+        "--sender",
+        "ou_123",
+        "hello",
+    ])
+    .expect_err("missing --session should fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("--session") || msg.contains("session"),
+        "error should mention session: {msg}"
+    );
+}
+
+#[test]
+fn simulate_lark_message_missing_sender_fails() {
+    let err = Cli::try_parse_from([
+        "beam",
+        "simulate",
+        "lark-message",
+        "--session",
+        "sid-abc",
+        "hello",
+    ])
+    .expect_err("missing --sender should fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("--sender") || msg.contains("sender"),
+        "error should mention sender: {msg}"
+    );
+}
+
+// ---- validate_simulate_lark_message_args tests ----
+
+#[test]
+fn validate_simulate_args_rejects_blank_session() {
+    let err =
+        validate_simulate_lark_message_args("  ", "ou_123", "hello").expect_err("blank session");
+    assert!(err.to_string().contains("--session"));
+}
+
+#[test]
+fn validate_simulate_args_rejects_blank_sender() {
+    let err = validate_simulate_lark_message_args("sid", "  ", "hello").expect_err("blank sender");
+    assert!(err.to_string().contains("--sender"));
+}
+
+#[test]
+fn validate_simulate_args_rejects_blank_text() {
+    let err = validate_simulate_lark_message_args("sid", "ou_123", "   ").expect_err("blank text");
+    assert!(err.to_string().contains("text"));
+}
+
+#[test]
+fn validate_simulate_args_accepts_valid_input() {
+    validate_simulate_lark_message_args("sid", "ou_123", "hello world")
+        .expect("valid args should pass");
+}
+
+#[test]
+fn validate_simulate_args_accepts_trimmed_non_empty() {
+    // Trailing/leading whitespace is ok as long as trimmed value is non-empty.
+    validate_simulate_lark_message_args("  sid  ", "  ou_123  ", "  hello  ")
+        .expect("trimmed non-empty should pass");
+}
+
+#[test]
+fn validate_simulate_args_preserves_original_text() {
+    // The helper takes &str and doesn't mutate — original text is preserved.
+    let text = "  hello world  ";
+    validate_simulate_lark_message_args("sid", "ou_123", text).expect("valid args should pass");
+    // Original binding is untouched.
+    assert_eq!(text, "  hello world  ");
 }

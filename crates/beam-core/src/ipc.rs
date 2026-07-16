@@ -151,6 +151,8 @@ pub enum WorkerToDaemon {
         status: ScreenStatus,
         #[serde(default)]
         usage_limit: Option<CliUsageLimitState>,
+        #[serde(default)]
+        turn_id: Option<String>,
     },
     CliSessionId {
         cli_session_id: String,
