@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1](https://github.com/linuxhenhao/beam/compare/beam-cli-v0.7.0...beam-cli-v0.7.1) - 2026-07-17
+
+### Added
+
+- *(worker)* 新增 kimi-code CLI 适配器
+
+### Other
+
+- *(beam-worker)* CLI adapter 改为 trait + 注册表架构
+
 ## [0.7.0](https://github.com/linuxhenhao/beam/compare/beam-cli-v0.6.4...beam-cli-v0.7.0) - 2026-07-16
 
 ### Added
