@@ -1,7 +1,14 @@
 # Adding a New CLI Adapter
 
-> Based on the `kimi` (Kimi Code CLI) integration landed in 2026-07. This is the complete checklist for adding support for a new AI coding CLI.
+> Reflects the trait + registry architecture introduced in the 2026-07 refactor.
 > Chinese source: [add-cli-adapter.md](add-cli-adapter.md).
+
+## 0. Architecture at a glance
+
+- `crates/beam-worker/src/adapter.rs` defines the `Adapter` trait (async_trait), shared helpers (`TranscriptCursor`, `confirm_submit_loop`, `drain_jsonl`, `file_size`, `normalize_history_text`, `realpath_cwd`), and the `test_support` module (`home_test_lock` / `set_home` / `temp_home` / `test_init`).
+- Each adapter is **a single file** `crates/beam-worker/src/adapters/<name>.rs`: its own state struct + `impl Adapter` + `pub fn create(init: &InitConfig) -> Box<dyn Adapter>`.
+- `REGISTRY` in `crates/beam-worker/src/adapters/mod.rs` maps cli_id → factory; a test guarantees REGISTRY and `CLI_SPECS` stay in sync.
+- `CLI_SPECS` in `crates/beam-core/src/cli_specs.rs` is the **single source of truth for cross-crate CLI metadata**: the setup wizard (label, bin probing, default args), zellij adopt recognition, the workflow resume allowlist, TERM injection, and initial-prompt-via-args all read it. beam-cli, beam-daemon, and beam-worker consume this table directly.
 
 ## 1. Investigation first (the most important step)
 
@@ -22,43 +29,57 @@ You must answer three questions:
 ### 1.2 Spawn arguments
 
 - Auto-approve flag: kimi `--yolo`, claude `--dangerously-skip-permissions`, codex `--dangerously-bypass-approvals-and-sandbox`. Uniformly gated by `init.disable_cli_bypass` (omit the flag when true).
-- Model: `init.model` → kimi `-m <model>`, gemini `--model <model>`.
+- Model: `init.model` → kimi `--model <model>`, gemini `--model <model>`.
 - Resume: when `init.resume` is set, use `init.cli_session_id` (falling back to `resume_session_id` / `session_id`); kimi maps to `--session <id>`.
-- Initial prompt: only CLIs that support "interactive mode with an initial prompt passed via argv" may be added to `passes_initial_prompt_via_args` (gemini `-i`, opencode). kimi's `-p` is a one-shot non-interactive mode and does **not** qualify — its initial prompt is typed into the TUI by the worker via `write_input`.
+- Initial prompt: only CLIs that support "interactive mode with an initial prompt passed via argv" may set `passes_initial_prompt_via_args: true` in `CLI_SPECS` (gemini `-i`, opencode). kimi's `-p` is a one-shot non-interactive mode and does **not** qualify — its initial prompt is typed into the TUI by the worker via `write_input`.
 
-## 2. Change checklist
+## 2. Change checklist (3 code touch points)
 
-### 2.1 `crates/beam-worker/src/adapter.rs`
+### 2.1 `crates/beam-core/src/cli_specs.rs`: add one `CliSpec` row
 
-- Add a variant to the `AdapterKind` enum.
-- Add the `XxxState` struct. Typical fields: `data_dir`, `working_dir`, `transcript_path`, `transcript_offset`, `pending_tail`, `emitted_final_text`, `cli_session_id`.
+```rust
+CliSpec {
+    cli_id: "mynewcli",
+    label: "MyNewCli",                    // setup wizard display name
+    bin_candidates: &["mynewcli"],        // PATH candidates probed by setup
+    default_cli_args: &[],                // default launch args suggested by setup
+    adopt_command_patterns: &["mynewcli"],// zellij adopt substring match; empty = never auto-recognized
+    supports_resume: true,                // only when the adapter implements init.resume
+    passes_initial_prompt_via_args: false,// see §1.2
+    inject_term_xterm: false,             // only when the CLI requires xterm-256color
+},
+```
 
-### 2.2 `crates/beam-worker/src/adapters/<name>.rs`
+This single row drives the setup wizard, bin probing, `default_cli_args_for_cli_id`, zellij adopt recognition, the workflow resume allowlist, and the worker's TERM injection — **no match arms to add anywhere else**. The table's unit tests lock the field semantics; `adapters/mod.rs` has a test ensuring every `CLI_SPECS` entry has a factory.
 
-Implement the four functions: `create_state` / `build_spawn_spec` / `write_input` / `poll`.
+### 2.2 `crates/beam-worker/src/adapters/<name>.rs`: implement `Adapter`
 
-- Template: `antigravity.rs` for a single-file transcript; `hermes.rs` or `opencode/` for DB-backed or complex resolution.
-- Reuse the shared helpers from `crate::adapter`: `drain_jsonl`, `file_size`, `normalize_history_text`, `realpath_cwd`.
-- `poll` contract:
-  - Set `final_output`, `final_output_kind = FinalOutputKind::Bridge`, and `prompt_ready = true` together.
-  - Deduplicate with `emitted_final_text`; reset the dedup state when a new user turn starts.
-  - On truncation (`size < transcript_offset`), reset `transcript_offset` / `pending_tail` / `emitted_final_text`.
-- `write_input` contract: `send_text` → 200ms → `send_enter`, then confirm the submit against the transcript with 4×800ms retries, re-sending Enter in between; on final failure return `failure_reason` — never report `submitted` falsely.
+One file holds everything: the state struct, a `state_from_init` constructor, `pub fn create(init: &InitConfig) -> Box<dyn Adapter>`, and `#[async_trait] impl Adapter`.
 
-### 2.3 `crates/beam-worker/src/adapters/mod.rs`
+- Template: `antigravity.rs` for a single-file JSONL transcript; `kimi.rs` for workDir-based transcript resolution; `hermes.rs` / `opencode.rs` for DB-backed or complex resolution.
+- **Required** methods: `build_spawn_spec` / `write_input` / `poll`.
+- **Do not hand-roll boilerplate** — use the shared pieces in `crate::adapter`:
+  - `TranscriptCursor` (for JSONL transcripts): `drain(path)` handles truncation resets and offset/tail bookkeeping; `emit_if_new(text)` dedupes same-text finals; `reset_dedupe()` when a new user turn starts; `skip_to(size)` to baseline an adopted session past its history. Do not carry `transcript_offset` / `pending_tail` / `emitted_final_text` fields in your state.
+  - `confirm_submit_loop(backend, || ...)`: the uniform "4×800ms confirm against transcript, re-send Enter between attempts" policy. The typing phase (`send_text`, newline style, the sleep before the first Enter) differs per adapter and stays in your code; the confirmation phase always goes through this helper. On final failure return `failure_reason` — never report `submitted` falsely.
+- `poll` contract: set `final_output`, `final_output_kind = FinalOutputKind::Bridge`, and `prompt_ready = true` together; never emit intermediate-step text.
+- **Optional capability hooks** (default no-op; most adapters don't need them):
+  - `on_spawned(child_pid)`: when you need the CLI process PID (claude, codex).
+  - `resolve_transcript_source` / `set_transcript_source`: resolve the transcript source at init/adopt time and let the user pick on ambiguity (see `opencode.rs`; returning `None` means "no such capability" and the run loop skips it automatically).
 
-- `pub mod <name>;`
-- Add one arm to each of the 5 dispatch points: `create_adapter` / `build_spawn_spec` / `write_input` / `poll` / `on_spawned`.
+### 2.3 `crates/beam-worker/src/adapters/mod.rs`: `pub mod` + one REGISTRY row
 
-### 2.4 Registration points in other crates
+```rust
+pub mod mynewcli;
+// in REGISTRY:
+("mynewcli", mynewcli::create),
+```
 
-| File | When needed |
+### 2.4 Optional registration points (most adapters don't touch these)
+
+| Location | When needed |
 | --- | --- |
-| `CLI_CHOICES` in `beam-cli/src/cli_commands/setup.rs` | Always, otherwise the setup wizard cannot see the CLI |
-| `default_cli_args_for_cli_id` in `beam-cli/src/cli_commands/setup.rs` | Only when default args (e.g. bypass flags) should not live inside the adapter |
-| `cli_id_from_zellij_command` in `beam-daemon/src/zellij_adopt.rs` | When zellij adopt should recognize the CLI |
-| Resume allowlist in `beam-daemon/src/lark_ingress/workflow_actions.rs` | Only when the adapter implements `init.resume` |
-| `maybe_inject_term` in `beam-worker/src/worker_runtime/run_loop.rs` | Only when the CLI requires a specific TERM (e.g. codex/traex) |
+| `parse_questions` / `format_answer` / `passthrough` in `beam-cli/src/ask_hook.rs` | Only when the CLI has a question/permission hook protocol (see claude/opencode) |
+| `install_hooks_at` in `beam-cli/src/hook_setup.rs` | Only when hook config must be written into the CLI's config directory |
 
 ### 2.5 Docs
 
@@ -70,7 +91,7 @@ Implement the four functions: `create_state` / `build_spawn_spec` / `write_input
 
 ### 3.1 Unit tests (`#[cfg(test)]` inside `adapters/<name>.rs`)
 
-- Use a temp HOME plus `crate::adapter::home_test_lock()` to serialize HOME-dependent tests (see `HomeGuard` in `antigravity.rs`).
+- Use `crate::adapter::test_support`: `test_init(cli_id)` builds the 24-field `InitConfig` (override fields with struct-update syntax, `..test_init("...")`); `temp_home` + `set_home` (`HomeGuard`) + `home_test_lock` serialize HOME-dependent tests. **Do not** re-declare these four per adapter.
 - Write a `RecordingBackend` mocking `SessionBackend`: on `send_enter`, flush the buffered input into the fake transcript to simulate the CLI recording user input.
 - Cover at least:
   - Spawn args: default bypass flag, `disable_cli_bypass`, model, resume.

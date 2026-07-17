@@ -1,7 +1,13 @@
 # 新增 CLI Adapter 指南
 
-> 以 `kimi`（Kimi Code CLI，2026-07 接入）为例，总结新增一个 AI coding CLI adapter 的完整流程。
-> 英文镜像：[add-cli-adapter.en.md](add-cli-adapter.en.md)。
+> 本文对应 2026-07 重构后的 trait + 注册表架构。英文镜像：[add-cli-adapter.en.md](add-cli-adapter.en.md)。
+
+## 0. 架构速览
+
+- `crates/beam-worker/src/adapter.rs` 定义 `trait Adapter`（async_trait）、共享 helper（`TranscriptCursor`、`confirm_submit_loop`、`drain_jsonl`、`file_size`、`normalize_history_text`、`realpath_cwd`）以及测试支持 `test_support`（`home_test_lock` / `set_home` / `temp_home` / `test_init`）。
+- 每个 adapter 就是 `crates/beam-worker/src/adapters/<name>.rs` **一个文件**：自己的 state 结构体 + `impl Adapter` + `pub fn create(init: &InitConfig) -> Box<dyn Adapter>`。
+- `crates/beam-worker/src/adapters/mod.rs` 里的 `REGISTRY` 把 cli_id 映射到工厂函数，并有测试保证 REGISTRY 与 `CLI_SPECS` 一致。
+- `crates/beam-core/src/cli_specs.rs` 的 `CLI_SPECS` 是**跨 crate 元数据的唯一来源**：setup 向导（label、bin 探测、默认参数）、zellij adopt 识别、workflow resume 允许列表、TERM 注入、initial-prompt-via-args 全部由它驱动。beam-cli / beam-daemon / beam-worker 都直接读这张表。
 
 ## 1. 动手前调研（最关键的一步）
 
@@ -22,43 +28,57 @@ beam 的最终输出依赖「读 CLI 落盘的会话记录」，而不是解析�
 ### 1.2 启动参数
 
 - 自动批准 flag：kimi `--yolo`、claude `--dangerously-skip-permissions`、codex `--dangerously-bypass-approvals-and-sandbox`。统一受 `init.disable_cli_bypass` 控制（true 时不加）。
-- model：`init.model` → kimi `-m <model>`、gemini `--model <model>`。
+- model：`init.model` → kimi `--model <model>`、gemini `--model <model>`。
 - resume：`init.resume` 时用 `init.cli_session_id`（fallback `resume_session_id` / `session_id`），kimi 对应 `--session <id>`。
-- 初始 prompt：只有支持「交互模式 + 命令行传入初始 prompt」的 CLI 才能加入 `passes_initial_prompt_via_args`（gemini `-i`、opencode）。kimi 的 `-p` 是一次性非交互模式，**不能**算——它的初始 prompt 由 worker 经 `write_input` 在 TUI 里输入。
+- 初始 prompt：只有支持「交互模式 + 命令行传入初始 prompt」的 CLI 才能在 `CLI_SPECS` 里设 `passes_initial_prompt_via_args: true`（gemini `-i`、opencode）。kimi 的 `-p` 是一次性非交互模式，**不能**算——它的初始 prompt 由 worker 经 `write_input` 在 TUI 里输入。
 
-## 2. 改动清单
+## 2. 改动清单（3 个代码触点）
 
-### 2.1 `crates/beam-worker/src/adapter.rs`
+### 2.1 `crates/beam-core/src/cli_specs.rs`：加一行 `CliSpec`
 
-- `AdapterKind` 枚举加变体。
-- 新增 `XxxState` 结构体。常规字段：`data_dir`、`working_dir`、`transcript_path`、`transcript_offset`、`pending_tail`、`emitted_final_text`、`cli_session_id`。
+```rust
+CliSpec {
+    cli_id: "mynewcli",
+    label: "MyNewCli",                    // setup 向导显示名
+    bin_candidates: &["mynewcli"],        // setup 探测 PATH 用的候选 bin 名
+    default_cli_args: &[],                // setup 向导默认启动参数（如必须）
+    adopt_command_patterns: &["mynewcli"],// zellij adopt 子串识别；空数组 = 不自动识别
+    supports_resume: true,                // 实现了 init.resume 才为 true
+    passes_initial_prompt_via_args: false,// 见 §1.2
+    inject_term_xterm: false,             // 仅当 CLI 要求 xterm-256color
+},
+```
 
-### 2.2 `crates/beam-worker/src/adapters/<name>.rs`
+这一行同时驱动 setup 向导、bin 探测、`default_cli_args_for_cli_id`、zellij adopt 识别、workflow resume 允许列表和 worker 的 TERM 注入——**不再需要在其它 crate 里加任何 match 臂**。表自带单测锁住字段语义；`adapters/mod.rs` 有测试保证每个 `CLI_SPECS` 条目都有对应工厂。
 
-实现四件套：`create_state` / `build_spawn_spec` / `write_input` / `poll`。
+### 2.2 `crates/beam-worker/src/adapters/<name>.rs`：实现 `Adapter`
 
-- 模板选择：单文件 transcript 参考 `antigravity.rs`；DB / 复杂定位参考 `hermes.rs`、`opencode/`。
-- 公共 helper 直接复用 `crate::adapter`：`drain_jsonl`、`file_size`、`normalize_history_text`、`realpath_cwd`。
-- `poll` 约定：
-  - `final_output`、`final_output_kind = FinalOutputKind::Bridge`、`prompt_ready = true` 三者一起设置。
-  - 用 `emitted_final_text` 对同文去重；检测到新用户 turn 开始时重置去重状态。
-  - 文件截断（`size < transcript_offset`）时重置 `transcript_offset` / `pending_tail` / `emitted_final_text`。
-- `write_input` 约定：`send_text` → 200ms → `send_enter`，随后 4×800ms 用 transcript 确认提交，未确认时补 Enter；最终失败返回 `failure_reason`，不要谎报 `submitted`。
+一个文件装下全部：state 结构体、`state_from_init` 构造函数、`pub fn create(init: &InitConfig) -> Box<dyn Adapter>`、`#[async_trait] impl Adapter`。
 
-### 2.3 `crates/beam-worker/src/adapters/mod.rs`
+- 模板选择：单文件 JSONL transcript 参考 `antigravity.rs`；按 workDir 定位 transcript 参考 `kimi.rs`；DB / 复杂定位参考 `hermes.rs`、`opencode.rs`。
+- **必须实现**三个方法：`build_spawn_spec` / `write_input` / `poll`。
+- **不要手写样板**，直接用 `crate::adapter` 的共享件：
+  - `TranscriptCursor`（JSONL transcript 专用）：`drain(path)` 内含截断重置与 offset/tail 维护；`emit_if_new(text)` 同文去重；`reset_dedupe()` 新用户 turn 时调用；`skip_to(size)` adopt 基线跳过历史。state 里不要再带 `transcript_offset` / `pending_tail` / `emitted_final_text` 字段。
+  - `confirm_submit_loop(backend, || ...)`：实现「4×800ms 用 transcript 确认提交，未确认时补 Enter」的统一策略。发送阶段（`send_text`、换行方式、首个 Enter 前的 sleep）各 adapter 不同，自行保留；确认阶段一律用这个 helper。最终失败必须返回 `failure_reason`，不要谎报 `submitted`。
+- `poll` 约定：`final_output`、`final_output_kind = FinalOutputKind::Bridge`、`prompt_ready = true` 三者一起设置；中间步骤文本不产出。
+- **可选能力钩子**（默认 no-op，多数 adapter 不需要）：
+  - `on_spawned(child_pid)`：需要跟踪 CLI 进程 PID 时（claude、codex）。
+  - `resolve_transcript_source` / `set_transcript_source`：init/adopt 时解析 transcript 源、歧义时交给用户选择（参考 `opencode.rs`；返回 `None` 表示无此能力，run_loop 自动跳过）。
 
-- `pub mod <name>;`
-- 5 处分发各加一臂：`create_adapter` / `build_spawn_spec` / `write_input` / `poll` / `on_spawned`。
+### 2.3 `crates/beam-worker/src/adapters/mod.rs`：`pub mod` + 一行 REGISTRY
 
-### 2.4 其他 crate 注册点
+```rust
+pub mod mynewcli;
+// REGISTRY 里加：
+("mynewcli", mynewcli::create),
+```
 
-| 文件 | 何时需要 |
+### 2.4 可选注册点（多数 adapter 不用动）
+
+| 位置 | 何时需要 |
 | --- | --- |
-| `beam-cli/src/cli_commands/setup.rs` 的 `CLI_CHOICES` | 必须，否则 setup 向导看不到 |
-| `beam-cli/src/cli_commands/setup.rs` 的 `default_cli_args_for_cli_id` | 仅当 bypass 等默认参数不适合写死在 adapter 里 |
-| `beam-daemon/src/zellij_adopt.rs` 的 `cli_id_from_zellij_command` | 需要 zellij adopt 识别时 |
-| `beam-daemon/src/lark_ingress/workflow_actions.rs` 的 resume 允许列表 | 仅当 adapter 实现了 `init.resume` |
-| `beam-worker/src/worker_runtime/run_loop.rs` 的 `maybe_inject_term` | 仅当 CLI 要求特定 TERM（如 codex/traex） |
+| `beam-cli/src/ask_hook.rs` 的 `parse_questions` / `format_answer` / `passthrough` | 仅当 CLI 有提问/权限确认 hook 协议（参考 claude/opencode） |
+| `beam-cli/src/hook_setup.rs` 的 `install_hooks_at` | 仅当需要向 CLI 的安装目录写 hook 配置 |
 
 ### 2.5 文档
 
@@ -70,7 +90,7 @@ beam 的最终输出依赖「读 CLI 落盘的会话记录」，而不是解析�
 
 ### 3.1 单元测试（`adapters/<name>.rs` 的 `#[cfg(test)]`）
 
-- 用临时 HOME + `crate::adapter::home_test_lock()` 串行化对 HOME 的依赖（参考 `antigravity.rs` 的 `HomeGuard`）。
+- 用 `crate::adapter::test_support`：`test_init(cli_id)` 构造 24 字段 `InitConfig`（需要覆盖字段时用结构体更新语法 `..test_init("...")`）；`temp_home` + `set_home`（`HomeGuard`）+ `home_test_lock` 串行化对 HOME 的依赖。**不要**再在测试里自定义这四件套。
 - 写一个 `RecordingBackend` mock `SessionBackend`：`send_enter` 时把缓冲的输入写进假 transcript，模拟 CLI 记录用户输入。
 - 至少覆盖：
   - spawn 参数：默认 bypass flag、`disable_cli_bypass`、model、resume。

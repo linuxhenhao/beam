@@ -7,12 +7,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use async_trait::async_trait;
 use beam_core::{FinalOutputKind, InitConfig};
 use serde_json::Value;
 
 use crate::adapter::{
-    ClaudeState, PendingTurnKind, PollResult, ResolveOutcome, SpawnSpec, SubmitResult, drain_jsonl,
-    file_size, normalize_history_text, realpath_cwd,
+    Adapter, PendingTurnKind, PollResult, ResolveOutcome, SpawnSpec, SubmitResult, TranscriptCursor,
+    confirm_submit_loop, file_size, normalize_history_text, realpath_cwd,
 };
 use crate::backend::SessionBackend;
 
@@ -21,7 +22,24 @@ const CLAUDE_SUBMIT_MARKERS: [&str; 2] = [
     "\"operation\":\"enqueue\"",
 ];
 
-pub fn create_state(init: &InitConfig) -> ClaudeState {
+#[derive(Debug, Clone)]
+pub(crate) struct ClaudeState {
+    data_dir: PathBuf,
+    session_jsonl: PathBuf,
+    cli_pid: Option<u32>,
+    cli_cwd: String,
+    cli_session_id: Option<String>,
+    cursor: TranscriptCursor,
+    pending_final_text: Option<String>,
+    pending_final_since: Option<Instant>,
+    adopt_mode: bool,
+    adopt_restored_from_metadata: bool,
+    adopt_preamble_emitted: bool,
+    pending_remote_user_inputs: VecDeque<String>,
+    active_turn: Option<PendingTurnKind>,
+}
+
+fn state_from_init(init: &InitConfig) -> ClaudeState {
     let data_dir = PathBuf::from(
         std::env::var("CLAUDE_CONFIG_DIR")
             .unwrap_or_else(|_| format!("{}/.claude", std::env::var("HOME").unwrap_or_default())),
@@ -37,11 +55,9 @@ pub fn create_state(init: &InitConfig) -> ClaudeState {
         cli_pid: None,
         cli_cwd: init.working_dir.clone(),
         cli_session_id: init.cli_session_id.clone(),
-        transcript_offset: 0,
-        pending_tail: String::new(),
+        cursor: TranscriptCursor::new(),
         pending_final_text: None,
         pending_final_since: None,
-        emitted_final_text: None,
         adopt_mode: init.adopted_from.is_some(),
         adopt_restored_from_metadata: init.adopt_restored_from_metadata,
         adopt_preamble_emitted: false,
@@ -50,181 +66,184 @@ pub fn create_state(init: &InitConfig) -> ClaudeState {
     }
 }
 
-pub fn build_spawn_spec(_state: &ClaudeState, init: &InitConfig) -> SpawnSpec {
-    let mut args = Vec::new();
-    if init.resume {
-        args.push("--resume".to_string());
-        args.push(
-            init.cli_session_id
-                .clone()
-                .unwrap_or_else(|| init.session_id.clone()),
-        );
-    } else {
-        args.push("--session-id".to_string());
-        args.push(init.session_id.clone());
-    }
-    if !init.disable_cli_bypass {
-        args.push("--dangerously-skip-permissions".to_string());
-    }
-    args.push("--settings".to_string());
-    args.push(
-        serde_json::json!({
-            "skipDangerousModePermissionPrompt": true,
-            "permissions": { "defaultMode": "bypassPermissions" },
-        })
-        .to_string(),
-    );
-    args.push("--disallowed-tools".to_string());
-    args.push("EnterPlanMode,ExitPlanMode".to_string());
-    args.extend(init.cli_args.clone());
-    SpawnSpec {
-        bin: init.cli_bin.clone(),
-        args,
-    }
+pub fn create(init: &InitConfig) -> Box<dyn Adapter> {
+    Box::new(state_from_init(init))
 }
 
-pub async fn write_input(
-    state: &mut ClaudeState,
-    backend: &dyn SessionBackend,
-    content: &str,
-) -> Result<SubmitResult> {
-    if state.adopt_mode {
-        state
-            .pending_remote_user_inputs
-            .push_back(normalize_history_text(content));
-    }
-    refresh_claude_pid_state(state);
-    let base_byte = file_size(&state.session_jsonl);
-    let lines: Vec<&str> = content.split('\n').collect();
-    for (index, line) in lines.iter().enumerate() {
-        if !line.is_empty() {
-            backend.send_text(line).await?;
-            tokio::time::sleep(Duration::from_millis(30)).await;
+#[async_trait]
+impl Adapter for ClaudeState {
+    fn build_spawn_spec(&self, init: &InitConfig) -> SpawnSpec {
+        let mut args = Vec::new();
+        if init.resume {
+            args.push("--resume".to_string());
+            args.push(
+                init.cli_session_id
+                    .clone()
+                    .unwrap_or_else(|| init.session_id.clone()),
+            );
+        } else {
+            args.push("--session-id".to_string());
+            args.push(init.session_id.clone());
         }
-        if index < lines.len() - 1 {
-            backend.send_text("\\").await?;
-            tokio::time::sleep(Duration::from_millis(30)).await;
-            backend.send_enter().await?;
-            tokio::time::sleep(Duration::from_millis(30)).await;
+        if !init.disable_cli_bypass {
+            args.push("--dangerously-skip-permissions".to_string());
+        }
+        args.push("--settings".to_string());
+        args.push(
+            serde_json::json!({
+                "skipDangerousModePermissionPrompt": true,
+                "permissions": { "defaultMode": "bypassPermissions" },
+            })
+            .to_string(),
+        );
+        args.push("--disallowed-tools".to_string());
+        args.push("EnterPlanMode,ExitPlanMode".to_string());
+        args.extend(init.cli_args.clone());
+        SpawnSpec {
+            bin: init.cli_bin.clone(),
+            args,
         }
     }
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    backend.send_enter().await?;
-    for _ in 0..4 {
-        if claude_submit_seen(&state.session_jsonl, base_byte)? {
+
+    async fn write_input(
+        &mut self,
+        backend: &dyn SessionBackend,
+        content: &str,
+    ) -> Result<SubmitResult> {
+        if self.adopt_mode {
+            self.pending_remote_user_inputs
+                .push_back(normalize_history_text(content));
+        }
+        refresh_claude_pid_state(self);
+        let base_byte = file_size(&self.session_jsonl);
+        let lines: Vec<&str> = content.split('\n').collect();
+        for (index, line) in lines.iter().enumerate() {
+            if !line.is_empty() {
+                backend.send_text(line).await?;
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+            if index < lines.len() - 1 {
+                backend.send_text("\\").await?;
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                backend.send_enter().await?;
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        backend.send_enter().await?;
+        let confirmed = confirm_submit_loop(backend, || {
+            claude_submit_seen(&self.session_jsonl, base_byte)
+        })
+        .await?;
+        if confirmed {
             return Ok(SubmitResult {
                 submitted: true,
-                cli_session_id: state.cli_session_id.clone(),
+                cli_session_id: self.cli_session_id.clone(),
                 ..Default::default()
             });
         }
-        tokio::time::sleep(Duration::from_millis(800)).await;
-        backend.send_enter().await?;
+        Ok(SubmitResult {
+            submitted: false,
+            cli_session_id: self.cli_session_id.clone(),
+            failure_reason: Some("Claude transcript did not confirm submit".to_string()),
+        })
     }
-    Ok(SubmitResult {
-        submitted: false,
-        cli_session_id: state.cli_session_id.clone(),
-        failure_reason: Some("Claude transcript did not confirm submit".to_string()),
-    })
-}
 
-pub fn poll(state: &mut ClaudeState) -> Result<PollResult> {
-    refresh_claude_pid_state(state);
-    if state.adopt_mode && !state.adopt_preamble_emitted {
-        let baseline = if state.adopt_restored_from_metadata {
-            None
-        } else {
-            baseline_claude_adopt_preamble(&state.session_jsonl)?
-        };
-        state.transcript_offset = file_size(&state.session_jsonl);
-        state.pending_tail.clear();
-        state.pending_final_text = None;
-        state.pending_final_since = None;
-        state.adopt_preamble_emitted = true;
-        return Ok(PollResult {
-            cli_session_id: state.cli_session_id.clone(),
+    fn poll(&mut self) -> Result<PollResult> {
+        refresh_claude_pid_state(self);
+        if self.adopt_mode && !self.adopt_preamble_emitted {
+            let baseline = if self.adopt_restored_from_metadata {
+                None
+            } else {
+                baseline_claude_adopt_preamble(&self.session_jsonl)?
+            };
+            self.cursor.skip_to(file_size(&self.session_jsonl));
+            self.pending_final_text = None;
+            self.pending_final_since = None;
+            self.adopt_preamble_emitted = true;
+            return Ok(PollResult {
+                cli_session_id: self.cli_session_id.clone(),
+                final_output: None,
+                final_output_kind: None,
+                final_output_user_text: None,
+                adopt_preamble: baseline,
+                prompt_ready: false,
+            });
+        }
+        let path = self.session_jsonl.clone();
+        let lines = self.cursor.drain(&path)?;
+        for line in &lines {
+            let Ok(value) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if let Some(role) = value.pointer("/message/role").and_then(Value::as_str) {
+                match role {
+                    "user" if self.adopt_mode => {
+                        let text = extract_claude_message_text(&value);
+                        if !text.trim().is_empty() {
+                            let normalized = normalize_history_text(&text);
+                            let kind = if self
+                                .pending_remote_user_inputs
+                                .front()
+                                .map(|expected| *expected == normalized)
+                                .unwrap_or(false)
+                            {
+                                let _ = self.pending_remote_user_inputs.pop_front();
+                                PendingTurnKind::Remote
+                            } else {
+                                PendingTurnKind::Local { user_text: text }
+                            };
+                            self.active_turn = Some(kind);
+                        }
+                    }
+                    "assistant" => {
+                        let text = extract_claude_assistant_text(&value);
+                        if !text.is_empty() {
+                            if self.adopt_mode && self.active_turn.is_none() {
+                                self.active_turn = Some(PendingTurnKind::LocalHeadless);
+                            }
+                            self.pending_final_text = Some(text);
+                            self.pending_final_since = Some(Instant::now());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut result = PollResult {
+            cli_session_id: self.cli_session_id.clone(),
             final_output: None,
             final_output_kind: None,
             final_output_user_text: None,
-            adopt_preamble: baseline,
+            adopt_preamble: None,
             prompt_ready: false,
-        });
-    }
-    let drain = drain_jsonl(
-        &state.session_jsonl,
-        state.transcript_offset,
-        &state.pending_tail,
-    )?;
-    state.transcript_offset = drain.new_offset;
-    state.pending_tail = drain.pending_tail;
-    for line in &drain.lines {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
-            continue;
         };
-        if let Some(role) = value.pointer("/message/role").and_then(Value::as_str) {
-            match role {
-                "user" if state.adopt_mode => {
-                    let text = extract_claude_message_text(&value);
-                    if !text.trim().is_empty() {
-                        let normalized = normalize_history_text(&text);
-                        let kind = if state
-                            .pending_remote_user_inputs
-                            .front()
-                            .map(|expected| *expected == normalized)
-                            .unwrap_or(false)
-                        {
-                            let _ = state.pending_remote_user_inputs.pop_front();
-                            PendingTurnKind::Remote
-                        } else {
-                            PendingTurnKind::Local { user_text: text }
-                        };
-                        state.active_turn = Some(kind);
-                    }
-                }
-                "assistant" => {
-                    let text = extract_claude_assistant_text(&value);
-                    if !text.is_empty() {
-                        if state.adopt_mode && state.active_turn.is_none() {
-                            state.active_turn = Some(PendingTurnKind::LocalHeadless);
+        if let (Some(text), Some(since)) = (&self.pending_final_text, self.pending_final_since) {
+            if since.elapsed() >= Duration::from_millis(1200) {
+                if let Some(emitted) = self.cursor.emit_if_new(text) {
+                    let kind = self.active_turn.take();
+                    result.final_output = Some(emitted);
+                    match kind {
+                        Some(PendingTurnKind::Local { user_text }) => {
+                            result.final_output_kind = Some(FinalOutputKind::LocalTurn);
+                            result.final_output_user_text = Some(user_text);
                         }
-                        state.pending_final_text = Some(text);
-                        state.pending_final_since = Some(Instant::now());
+                        Some(PendingTurnKind::LocalHeadless) => {
+                            result.final_output_kind = Some(FinalOutputKind::LocalTurnHeadless);
+                        }
+                        _ => {}
                     }
+                    result.prompt_ready = true;
                 }
-                _ => {}
             }
         }
+        Ok(result)
     }
 
-    let mut result = PollResult {
-        cli_session_id: state.cli_session_id.clone(),
-        final_output: None,
-        final_output_kind: None,
-        final_output_user_text: None,
-        adopt_preamble: None,
-        prompt_ready: false,
-    };
-    if let (Some(text), Some(since)) = (&state.pending_final_text, state.pending_final_since) {
-        if since.elapsed() >= Duration::from_millis(1200)
-            && state.emitted_final_text.as_deref() != Some(text.as_str())
-        {
-            let kind = state.active_turn.take();
-            state.emitted_final_text = Some(text.clone());
-            result.final_output = Some(text.clone());
-            match kind {
-                Some(PendingTurnKind::Local { user_text }) => {
-                    result.final_output_kind = Some(FinalOutputKind::LocalTurn);
-                    result.final_output_user_text = Some(user_text);
-                }
-                Some(PendingTurnKind::LocalHeadless) => {
-                    result.final_output_kind = Some(FinalOutputKind::LocalTurnHeadless);
-                }
-                _ => {}
-            }
-            result.prompt_ready = true;
-        }
+    fn on_spawned(&mut self, child_pid: Option<u32>) {
+        self.cli_pid = child_pid;
     }
-    Ok(result)
 }
 
 fn claude_jsonl_path_for_session(session_id: &str, cwd: &str, data_dir: &Path) -> PathBuf {
@@ -440,22 +459,20 @@ mod tests {
             cli_pid: None,
             cli_cwd: ".".to_string(),
             cli_session_id: Some("sid".to_string()),
-            transcript_offset: 0,
-            pending_tail: String::new(),
+            cursor: TranscriptCursor::new(),
             pending_final_text: None,
             pending_final_since: None,
-            emitted_final_text: None,
             adopt_mode: false,
             adopt_restored_from_metadata: false,
             adopt_preamble_emitted: false,
             pending_remote_user_inputs: VecDeque::new(),
             active_turn: None,
         };
-        let first = poll(&mut state).unwrap();
+        let first = state.poll().unwrap();
         assert!(first.final_output.is_none());
         assert!(!first.prompt_ready);
         state.pending_final_since = Some(Instant::now() - Duration::from_millis(1300));
-        let second = poll(&mut state).unwrap();
+        let second = state.poll().unwrap();
         assert_eq!(second.final_output.as_deref(), Some("ready"));
         assert!(second.prompt_ready);
         let _ = std::fs::remove_file(path);
@@ -478,24 +495,22 @@ mod tests {
             cli_pid: None,
             cli_cwd: ".".to_string(),
             cli_session_id: Some("sid".to_string()),
-            transcript_offset: 0,
-            pending_tail: String::new(),
+            cursor: TranscriptCursor::new(),
             pending_final_text: None,
             pending_final_since: None,
-            emitted_final_text: None,
             adopt_mode: true,
             adopt_restored_from_metadata: false,
             adopt_preamble_emitted: false,
             pending_remote_user_inputs: VecDeque::new(),
             active_turn: None,
         };
-        let first = poll(&mut state).unwrap();
+        let first = state.poll().unwrap();
         assert_eq!(
             first.adopt_preamble,
             Some(("ask".to_string(), "answer".to_string()))
         );
         assert!(first.final_output.is_none());
-        let second = poll(&mut state).unwrap();
+        let second = state.poll().unwrap();
         assert!(second.adopt_preamble.is_none());
         assert!(second.final_output.is_none());
         let _ = std::fs::remove_file(path);
@@ -518,21 +533,19 @@ mod tests {
             cli_pid: None,
             cli_cwd: ".".to_string(),
             cli_session_id: Some("sid".to_string()),
-            transcript_offset: 0,
-            pending_tail: String::new(),
+            cursor: TranscriptCursor::new(),
             pending_final_text: None,
             pending_final_since: None,
-            emitted_final_text: None,
             adopt_mode: true,
             adopt_restored_from_metadata: false,
             adopt_preamble_emitted: true,
             pending_remote_user_inputs: VecDeque::new(),
             active_turn: None,
         };
-        let first = poll(&mut state).unwrap();
+        let first = state.poll().unwrap();
         assert!(first.final_output.is_none());
         state.pending_final_since = Some(Instant::now() - Duration::from_millis(1300));
-        let second = poll(&mut state).unwrap();
+        let second = state.poll().unwrap();
         assert_eq!(second.final_output.as_deref(), Some("local answer"));
         assert_eq!(second.final_output_kind, Some(FinalOutputKind::LocalTurn));
         assert_eq!(second.final_output_user_text.as_deref(), Some("local ask"));
@@ -553,21 +566,19 @@ mod tests {
             cli_pid: None,
             cli_cwd: ".".to_string(),
             cli_session_id: Some("sid".to_string()),
-            transcript_offset: 0,
-            pending_tail: String::new(),
+            cursor: TranscriptCursor::new(),
             pending_final_text: None,
             pending_final_since: None,
-            emitted_final_text: None,
             adopt_mode: true,
             adopt_restored_from_metadata: false,
             adopt_preamble_emitted: true,
             pending_remote_user_inputs: VecDeque::new(),
             active_turn: None,
         };
-        let first = poll(&mut state).unwrap();
+        let first = state.poll().unwrap();
         assert!(first.final_output.is_none());
         state.pending_final_since = Some(Instant::now() - Duration::from_millis(1300));
-        let second = poll(&mut state).unwrap();
+        let second = state.poll().unwrap();
         assert_eq!(second.final_output.as_deref(), Some("headless answer"));
         assert_eq!(
             second.final_output_kind,
@@ -594,11 +605,9 @@ mod tests {
             cli_pid: None,
             cli_cwd: ".".to_string(),
             cli_session_id: Some("sid".to_string()),
-            transcript_offset: 0,
-            pending_tail: String::new(),
+            cursor: TranscriptCursor::new(),
             pending_final_text: None,
             pending_final_since: None,
-            emitted_final_text: None,
             adopt_mode: true,
             adopt_restored_from_metadata: false,
             adopt_preamble_emitted: true,
@@ -607,10 +616,10 @@ mod tests {
             )]),
             active_turn: None,
         };
-        let first = poll(&mut state).unwrap();
+        let first = state.poll().unwrap();
         assert!(first.final_output.is_none());
         state.pending_final_since = Some(Instant::now() - Duration::from_millis(1300));
-        let second = poll(&mut state).unwrap();
+        let second = state.poll().unwrap();
         assert_eq!(second.final_output.as_deref(), Some("remote answer"));
         assert_eq!(second.final_output_kind, None);
         assert_eq!(second.final_output_user_text, None);
@@ -634,21 +643,19 @@ mod tests {
             cli_pid: None,
             cli_cwd: ".".to_string(),
             cli_session_id: Some("sid".to_string()),
-            transcript_offset: 0,
-            pending_tail: String::new(),
+            cursor: TranscriptCursor::new(),
             pending_final_text: None,
             pending_final_since: None,
-            emitted_final_text: None,
             adopt_mode: true,
             adopt_restored_from_metadata: true,
             adopt_preamble_emitted: false,
             pending_remote_user_inputs: VecDeque::new(),
             active_turn: None,
         };
-        let first = poll(&mut state).unwrap();
+        let first = state.poll().unwrap();
         assert!(first.adopt_preamble.is_none());
         assert!(first.final_output.is_none());
-        let second = poll(&mut state).unwrap();
+        let second = state.poll().unwrap();
         assert!(second.adopt_preamble.is_none());
         assert!(second.final_output.is_none());
         let _ = std::fs::remove_file(path);
@@ -663,11 +670,9 @@ mod tests {
             cli_pid: None,
             cli_cwd: ".".to_string(),
             cli_session_id: Some("sid".to_string()),
-            transcript_offset: 0,
-            pending_tail: String::new(),
+            cursor: TranscriptCursor::new(),
             pending_final_text: None,
             pending_final_since: None,
-            emitted_final_text: None,
             adopt_mode: false,
             adopt_restored_from_metadata: false,
             adopt_preamble_emitted: false,
@@ -675,7 +680,7 @@ mod tests {
             active_turn: None,
         };
 
-        let round1 = poll(&mut state).unwrap();
+        let round1 = state.poll().unwrap();
         assert!(round1.final_output.is_none());
 
         std::fs::write(
@@ -684,7 +689,7 @@ mod tests {
         )
         .unwrap();
 
-        let round2 = poll(&mut state).unwrap();
+        let round2 = state.poll().unwrap();
         assert!(round2.final_output.is_none());
 
         std::fs::write(
@@ -694,17 +699,16 @@ mod tests {
         )
         .unwrap();
 
-        let round3 = poll(&mut state).unwrap();
+        let round3 = state.poll().unwrap();
         assert!(round3.final_output.is_none());
 
         state.pending_final_since = Some(Instant::now() - Duration::from_millis(1300));
-        let round4 = poll(&mut state).unwrap();
+        let round4 = state.poll().unwrap();
         assert_eq!(round4.final_output.as_deref(), Some("turn1 answer"));
         assert!(round4.prompt_ready);
 
         state.pending_final_text = None;
         state.pending_final_since = None;
-        state.emitted_final_text = Some("turn1 answer".to_string());
 
         std::fs::write(
             &path,
@@ -715,11 +719,11 @@ mod tests {
         )
         .unwrap();
 
-        let round5 = poll(&mut state).unwrap();
+        let round5 = state.poll().unwrap();
         assert!(round5.final_output.is_none());
 
         state.pending_final_since = Some(Instant::now() - Duration::from_millis(1300));
-        let round6 = poll(&mut state).unwrap();
+        let round6 = state.poll().unwrap();
         assert_eq!(round6.final_output.as_deref(), Some("turn2 answer"));
 
         let _ = std::fs::remove_file(path);
@@ -780,11 +784,9 @@ mod tests {
             cli_pid: Some(99999),
             cli_cwd: cwd_str.clone(),
             cli_session_id: None,
-            transcript_offset: 0,
-            pending_tail: String::new(),
+            cursor: TranscriptCursor::new(),
             pending_final_text: None,
             pending_final_since: None,
-            emitted_final_text: None,
             adopt_mode: false,
             adopt_restored_from_metadata: false,
             adopt_preamble_emitted: false,
@@ -793,7 +795,7 @@ mod tests {
         };
 
         // poll calls refresh_claude_pid_state internally
-        let _result = poll(&mut state).unwrap();
+        let _result = state.poll().unwrap();
 
         // After poll, the state should be corrected from pid
         assert_eq!(
@@ -824,11 +826,9 @@ mod tests {
             cli_pid: None,
             cli_cwd: "/orig/cwd".to_string(),
             cli_session_id: Some("orig-sid".to_string()),
-            transcript_offset: 42,
-            pending_tail: "tail".to_string(),
+            cursor: TranscriptCursor::new(),
             pending_final_text: None,
             pending_final_since: None,
-            emitted_final_text: None,
             adopt_mode: false,
             adopt_restored_from_metadata: false,
             adopt_preamble_emitted: false,
@@ -839,7 +839,7 @@ mod tests {
         let cli_session_id_before = state.cli_session_id.clone();
         let cli_cwd_before = state.cli_cwd.clone();
 
-        let _result = poll(&mut state).unwrap();
+        let _result = state.poll().unwrap();
 
         assert_eq!(
             state.session_jsonl, session_jsonl_before,
@@ -894,11 +894,9 @@ mod tests {
             cli_pid: Some(11111),
             cli_cwd: cwd_str.clone(),
             cli_session_id: None,
-            transcript_offset: 0,
-            pending_tail: String::new(),
+            cursor: TranscriptCursor::new(),
             pending_final_text: None,
             pending_final_since: None,
-            emitted_final_text: None,
             adopt_mode: true,
             adopt_restored_from_metadata: false,
             adopt_preamble_emitted: false,
@@ -906,7 +904,7 @@ mod tests {
             active_turn: None,
         };
 
-        let first = poll(&mut state).unwrap();
+        let first = state.poll().unwrap();
         // Preamble should come from the pid-corrected transcript
         assert_eq!(
             first.adopt_preamble,
@@ -916,7 +914,7 @@ mod tests {
         assert!(first.final_output.is_none());
 
         // Second poll should absorb history (preamble already emitted)
-        let second = poll(&mut state).unwrap();
+        let second = state.poll().unwrap();
         assert!(second.adopt_preamble.is_none());
         assert!(second.final_output.is_none());
 

@@ -7,7 +7,8 @@
 mod test_helpers;
 
 use super::*;
-use crate::adapter::{OpenCodeState, ResolveOutcome};
+use super::OpenCodeState;
+use crate::adapter::ResolveOutcome;
 use beam_core::FinalOutputKind;
 use std::fs;
 use std::process::Command;
@@ -52,12 +53,12 @@ fn opencode_reader_finds_sessions_and_final_output() {
         emitted_final_text: None,
         adopted_pid: None,
     };
-    let first = poll(&mut state).expect("first poll");
+    let first = state.poll().expect("first poll");
     assert_eq!(first.final_output.as_deref(), Some("hi there"));
     assert_eq!(first.final_output_kind, Some(FinalOutputKind::Bridge));
     assert!(first.prompt_ready);
     assert_eq!(state.transcript_offset, 1500);
-    let second = poll(&mut state).expect("second poll");
+    let second = state.poll().expect("second poll");
     assert!(second.final_output.is_none());
     assert!(second.prompt_ready == false);
     let _ = fs::remove_dir_all(root);
@@ -80,12 +81,12 @@ fn opencode_reader_dedupes_repeat_final_output_and_recovers_offset() {
         emitted_final_text: None,
         adopted_pid: None,
     };
-    let first = poll(&mut state).expect("first poll");
+    let first = state.poll().expect("first poll");
     assert_eq!(first.final_output.as_deref(), Some("hi there"));
     assert_eq!(state.transcript_offset, 1500);
 
     append_user_submit(&db_path, "sess-1", "hello opencode", 1600, 1601);
-    let second = poll(&mut state).expect("second poll");
+    let second = state.poll().expect("second poll");
     assert!(second.final_output.is_none());
 
     let mut script = String::from(
@@ -122,7 +123,7 @@ conn.commit()
         .expect("python3 available");
     assert!(status.success(), "failed to rewrite sqlite db");
 
-    let third = poll(&mut state).expect("third poll");
+    let third = state.poll().expect("third poll");
     assert_eq!(third.final_output.as_deref(), Some("after truncate"));
     assert_eq!(third.final_output_kind, Some(FinalOutputKind::Bridge));
     assert_eq!(state.transcript_offset, 2200);
@@ -191,7 +192,7 @@ conn.commit()
         adopted_pid: None,
     };
     let backend = RecordingBackend::new(db_path.clone(), true, 1000);
-    let result = write_input(&mut state, &backend, "hello opencode")
+    let result = state.write_input(&backend, "hello opencode")
         .await
         .expect("write input");
     assert!(result.submitted);
@@ -258,7 +259,7 @@ conn.commit()
         adopted_pid: None,
     };
     let backend = RecordingBackend::new(db_path.clone(), false, 1000);
-    let result = write_input(&mut state, &backend, "hello opencode")
+    let result = state.write_input(&backend, "hello opencode")
         .await
         .expect("write input");
     assert!(!result.submitted);
@@ -317,7 +318,7 @@ fn opencode_source_resolution_single_candidate_returns_found_with_session_backfi
         adopted_pid: None,
     };
     // poll should backfill cli_session_id when exactly one candidate
-    let result = poll(&mut state).expect("poll");
+    let result = state.poll().expect("poll");
     assert!(result.final_output.is_none());
     assert_eq!(state.cli_session_id.as_deref(), Some("sess-abc"));
     let _ = fs::remove_dir_all(root);
@@ -347,7 +348,7 @@ fn opencode_source_resolution_multiple_candidates_returns_ambiguous_no_auto_bind
         adopted_pid: None,
     };
     // poll should NOT auto-bind when ambiguous
-    let result = poll(&mut state).expect("poll");
+    let result = state.poll().expect("poll");
     assert!(result.cli_session_id.is_none());
     assert_eq!(state.cli_session_id, None);
     let _ = fs::remove_dir_all(root);
@@ -511,7 +512,7 @@ async fn opencode_write_input_returns_ambiguous_failure_for_multiple_candidates(
         adopted_pid: None,
     };
     let backend = RecordingBackend::new(db_path.clone(), false, 1000);
-    let result = write_input(&mut state, &backend, "hello")
+    let result = state.write_input(&backend, "hello")
         .await
         .expect("write input");
     assert!(!result.submitted);
@@ -591,7 +592,7 @@ async fn disambiguation_screen_matches_one_candidate_clearly_selects_it() {
     let backend = RecordingBackend::new(db_path.clone(), true, 2001)
         .with_target_session("sess-a")
         .with_screen("The tests all passed, 42 assertions succeeded.".to_string());
-    let result = write_input(&mut state, &backend, "next command")
+    let result = state.write_input(&backend, "next command")
         .await
         .expect("write input");
     assert!(result.submitted, "should auto-select sess-a and submit");
@@ -614,7 +615,7 @@ async fn disambiguation_screen_matches_one_candidate_clearly_selects_it() {
         3000,
         3001,
     );
-    let poll = poll(&mut state).expect("poll");
+    let poll = state.poll().expect("poll");
     assert_eq!(
         poll.final_output.as_deref(),
         Some("selected session answer")
@@ -676,7 +677,7 @@ async fn disambiguation_screen_does_not_match_weakly_stays_ambiguous() {
     // screen contains unrelated text – neither candidate will score well.
     let backend = RecordingBackend::new(db_path.clone(), false, 2001)
         .with_screen("some totally unrelated content here".to_string());
-    let result = write_input(&mut state, &backend, "cmd")
+    let result = state.write_input(&backend, "cmd")
         .await
         .expect("write input");
     assert!(!result.submitted, "should stay ambiguous");
@@ -753,7 +754,7 @@ async fn disambiguation_expected_session_id_still_takes_priority() {
     let backend = RecordingBackend::new(db_path.clone(), true, 2001)
         .with_target_session("sess-one")
         .with_screen("detailed response from session two about deployment".to_string());
-    let result = write_input(&mut state, &backend, "cmd")
+    let result = state.write_input(&backend, "cmd")
         .await
         .expect("write input");
     assert!(result.submitted, "should submit via expected_session_id");

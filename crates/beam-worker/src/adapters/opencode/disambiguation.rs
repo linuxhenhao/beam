@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use anyhow::Result;
 use tracing::info;
 
-use crate::adapter::OpenCodeState;
+use super::OpenCodeState;
 use crate::backend::SessionBackend;
 
 use super::transcript::read_transcript_tail;

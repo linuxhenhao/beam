@@ -4,150 +4,153 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Result;
+use async_trait::async_trait;
 use beam_core::{FinalOutputKind, InitConfig};
 use serde_json::Value;
 
-use crate::adapter::{CoCoState, PollResult, SpawnSpec, SubmitResult, drain_jsonl, file_size};
+use crate::adapter::{
+    Adapter, PollResult, SpawnSpec, SubmitResult, TranscriptCursor, confirm_submit_loop, file_size,
+};
 use crate::backend::SessionBackend;
 
 const HISTORY_LOOKBACK: u64 = 65536;
 
-pub fn create_state(init: &InitConfig) -> CoCoState {
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CoCoState {
+    history_path: PathBuf,
+    cli_session_id: Option<String>,
+    cursor: TranscriptCursor,
+}
+
+fn state_from_init(init: &InitConfig) -> CoCoState {
     let home = std::env::var("HOME").unwrap_or_default();
     let history_path = PathBuf::from(format!("{}/.cache/coco/history.jsonl", home));
     CoCoState {
         history_path,
         cli_session_id: init.cli_session_id.clone(),
-        transcript_offset: 0,
-        pending_tail: String::new(),
-        emitted_final_text: None,
+        cursor: TranscriptCursor::new(),
     }
 }
 
-pub fn build_spawn_spec(_state: &CoCoState, init: &InitConfig) -> SpawnSpec {
-    let mut args = Vec::new();
-    if init.resume {
-        args.push("--resume".to_string());
-        args.push(
-            init.resume_session_id
-                .clone()
-                .unwrap_or_else(|| init.session_id.clone()),
-        );
-    } else {
-        args.push("--session-id".to_string());
-        args.push(init.session_id.clone());
-    }
-    if !init.disable_cli_bypass {
-        args.push("--yolo".to_string());
-    }
-    if let Some(model) = &init.model {
-        if !model.is_empty() {
-            args.push("--config".to_string());
-            args.push(format!("model.name={}", model));
+pub fn create(init: &InitConfig) -> Box<dyn Adapter> {
+    Box::new(state_from_init(init))
+}
+
+#[async_trait]
+impl Adapter for CoCoState {
+    fn build_spawn_spec(&self, init: &InitConfig) -> SpawnSpec {
+        let mut args = Vec::new();
+        if init.resume {
+            args.push("--resume".to_string());
+            args.push(
+                init.resume_session_id
+                    .clone()
+                    .unwrap_or_else(|| init.session_id.clone()),
+            );
+        } else {
+            args.push("--session-id".to_string());
+            args.push(init.session_id.clone());
+        }
+        if !init.disable_cli_bypass {
+            args.push("--yolo".to_string());
+        }
+        if let Some(model) = &init.model {
+            if !model.is_empty() {
+                args.push("--config".to_string());
+                args.push(format!("model.name={}", model));
+            }
+        }
+        args.push("--disallowed-tool".to_string());
+        args.push("EnterPlanMode".to_string());
+        args.push("--disallowed-tool".to_string());
+        args.push("ExitPlanMode".to_string());
+        args.extend(init.cli_args.clone());
+        SpawnSpec {
+            bin: init.cli_bin.clone(),
+            args,
         }
     }
-    args.push("--disallowed-tool".to_string());
-    args.push("EnterPlanMode".to_string());
-    args.push("--disallowed-tool".to_string());
-    args.push("ExitPlanMode".to_string());
-    args.extend(init.cli_args.clone());
-    SpawnSpec {
-        bin: init.cli_bin.clone(),
-        args,
-    }
-}
 
-pub async fn write_input(
-    state: &mut CoCoState,
-    backend: &dyn SessionBackend,
-    content: &str,
-) -> Result<SubmitResult> {
-    let base_byte = file_size(&state.history_path);
+    async fn write_input(
+        &mut self,
+        backend: &dyn SessionBackend,
+        content: &str,
+    ) -> Result<SubmitResult> {
+        let base_byte = file_size(&self.history_path);
 
-    backend.paste_text(content).await?;
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    backend.send_enter().await?;
+        backend.paste_text(content).await?;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        backend.send_enter().await?;
 
-    for attempt in 0..4 {
-        tokio::time::sleep(Duration::from_millis(800)).await;
-        if let Some(session_id) = coco_history_match(&state.history_path, base_byte, content)? {
-            state.cli_session_id = Some(session_id);
+        let mut confirm = || -> Result<bool> {
+            match coco_history_match(&self.history_path, base_byte, content)? {
+                Some(session_id) => {
+                    self.cli_session_id = Some(session_id);
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
+        };
+        let mut confirmed = confirm_submit_loop(backend, &mut confirm).await?;
+        if !confirmed {
+            confirmed = confirm()?;
+        }
+        if confirmed {
             return Ok(SubmitResult {
                 submitted: true,
-                cli_session_id: state.cli_session_id.clone(),
+                cli_session_id: self.cli_session_id.clone(),
                 ..Default::default()
             });
         }
-        if attempt < 3 {
-            backend.send_enter().await?;
-        }
+        Ok(SubmitResult {
+            submitted: false,
+            cli_session_id: self.cli_session_id.clone(),
+            failure_reason: Some("CoCo history did not confirm submit".to_string()),
+        })
     }
-    if let Some(session_id) = coco_history_match(&state.history_path, base_byte, content)? {
-        state.cli_session_id = Some(session_id);
-        return Ok(SubmitResult {
-            submitted: true,
-            cli_session_id: state.cli_session_id.clone(),
+
+    fn poll(&mut self) -> Result<PollResult> {
+        let path = self.history_path.clone();
+        let lines = self.cursor.drain(&path)?;
+
+        let mut result = PollResult {
+            cli_session_id: self.cli_session_id.clone(),
             ..Default::default()
-        });
-    }
-    Ok(SubmitResult {
-        submitted: false,
-        cli_session_id: state.cli_session_id.clone(),
-        failure_reason: Some("CoCo history did not confirm submit".to_string()),
-    })
-}
-
-pub fn poll(state: &mut CoCoState) -> Result<PollResult> {
-    let path = state.history_path.clone();
-    let current_size = file_size(&path);
-    if current_size < state.transcript_offset {
-        state.transcript_offset = 0;
-        state.pending_tail.clear();
-        state.emitted_final_text = None;
-    }
-    let drain = drain_jsonl(&path, state.transcript_offset, &state.pending_tail)?;
-    state.transcript_offset = drain.new_offset;
-    state.pending_tail = drain.pending_tail;
-
-    let mut result = PollResult {
-        cli_session_id: state.cli_session_id.clone(),
-        ..Default::default()
-    };
-
-    for line in &drain.lines {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
-            continue;
         };
-        let Some(mode) = value.get("mode").and_then(Value::as_str) else {
-            continue;
-        };
-        match mode {
-            "assistant" => {
-                if value
-                    .get("message")
-                    .and_then(|v| v.get("message"))
-                    .and_then(|v| v.get("response_meta"))
-                    .and_then(|v| v.get("finish_reason"))
-                    .and_then(Value::as_str)
-                    != Some("stop")
-                {
-                    continue;
-                }
-                if let Some(text) = value.get("content").and_then(Value::as_str) {
-                    let text = text.to_string();
-                    if !text.is_empty() && state.emitted_final_text.as_deref() != Some(&text) {
-                        state.emitted_final_text = Some(text.clone());
-                        result.final_output = Some(text);
-                        result.final_output_kind = Some(FinalOutputKind::Bridge);
-                        result.prompt_ready = true;
+
+        for line in &lines {
+            let Ok(value) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            let Some(mode) = value.get("mode").and_then(Value::as_str) else {
+                continue;
+            };
+            match mode {
+                "assistant" => {
+                    if value
+                        .get("message")
+                        .and_then(|v| v.get("message"))
+                        .and_then(|v| v.get("response_meta"))
+                        .and_then(|v| v.get("finish_reason"))
+                        .and_then(Value::as_str)
+                        != Some("stop")
+                    {
+                        continue;
+                    }
+                    if let Some(text) = value.get("content").and_then(Value::as_str) {
+                        if let Some(emitted) = self.cursor.emit_if_new(text) {
+                            result.final_output = Some(emitted);
+                            result.final_output_kind = Some(FinalOutputKind::Bridge);
+                            result.prompt_ready = true;
+                        }
                     }
                 }
+                _ => {}
             }
-            _ => {}
         }
-    }
 
-    Ok(result)
+        Ok(result)
+    }
 }
 
 fn coco_history_match(
@@ -195,70 +198,17 @@ fn coco_history_match(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::home_test_lock;
-    use beam_core::{InitConfig, ScreenAnalyzerConfig};
+    use crate::adapter::test_support::{home_test_lock, set_home, temp_home, test_init};
     use std::fs::{self, create_dir_all};
-    use std::path::PathBuf;
-    use uuid::Uuid;
 
-    fn test_init() -> InitConfig {
+    fn coco_init() -> InitConfig {
         InitConfig {
             session_id: "session-coco".to_string(),
-            title: "title".to_string(),
-            chat_id: "chat".to_string(),
-            root_message_id: "root".to_string(),
-            working_dir: "/tmp".to_string(),
-            cli_id: "coco".to_string(),
             cli_bin: "/bin/coco".to_string(),
-            cli_args: vec![],
-
             prompt: "prompt".to_string(),
-            resume: false,
             cli_session_id: Some("cli-session".to_string()),
-            lark_app_id: "app".to_string(),
-            lark_app_secret: "secret".to_string(),
-            prompt_turn_id: None,
-            owner_open_id: None,
-            adopted_from: None,
-            adopt_restored_from_metadata: false,
-            screen_analyzer: ScreenAnalyzerConfig::default(),
-            initial_prompt: None,
-            model: None,
-            locale: None,
-            bot_name: None,
-            bot_open_id: None,
-            resume_session_id: None,
-            disable_cli_bypass: false,
+            ..test_init("coco")
         }
-    }
-
-    fn temp_home(prefix: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("{}-{}", prefix, Uuid::new_v4()))
-    }
-
-    struct HomeGuard {
-        old_home: Option<std::ffi::OsString>,
-    }
-
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            match &self.old_home {
-                Some(home) => unsafe {
-                    std::env::set_var("HOME", home);
-                },
-                None => unsafe {
-                    std::env::remove_var("HOME");
-                },
-            }
-        }
-    }
-
-    fn set_home(home: &PathBuf) -> HomeGuard {
-        let old_home = std::env::var_os("HOME");
-        unsafe {
-            std::env::set_var("HOME", home);
-        }
-        HomeGuard { old_home }
     }
 
     fn write_history(path: &Path, lines: &[&str]) {
@@ -275,8 +225,8 @@ mod tests {
             .unwrap_or_else(|poison| poison.into_inner());
         let home = temp_home("beam-coco-test");
         let _guard = set_home(&home);
-        let init = test_init();
-        let mut state = create_state(&init);
+        let init = coco_init();
+        let mut state = state_from_init(&init);
         write_history(
             &state.history_path,
             &[
@@ -285,12 +235,12 @@ mod tests {
             ],
         );
 
-        let first = poll(&mut state).unwrap();
+        let first = state.poll().unwrap();
         assert_eq!(first.final_output.as_deref(), Some("done"));
         assert_eq!(first.final_output_kind, Some(FinalOutputKind::Bridge));
         assert!(first.prompt_ready);
 
-        let second = poll(&mut state).unwrap();
+        let second = state.poll().unwrap();
         assert!(second.final_output.is_none());
         assert!(!second.prompt_ready);
     }
@@ -302,8 +252,8 @@ mod tests {
             .unwrap_or_else(|poison| poison.into_inner());
         let home = temp_home("beam-coco-truncate-test");
         let _guard = set_home(&home);
-        let init = test_init();
-        let mut state = create_state(&init);
+        let init = coco_init();
+        let mut state = state_from_init(&init);
         write_history(
             &state.history_path,
             &[
@@ -312,16 +262,14 @@ mod tests {
             ],
         );
 
-        let first = poll(&mut state).unwrap();
+        let first = state.poll().unwrap();
         assert_eq!(first.final_output.as_deref(), Some("first"));
 
         write_history(
             &state.history_path,
-            &[
-                r#"{"mode":"assistant","message":{"message":{"response_meta":{"finish_reason":"stop"}}},"content":"first"}"#,
-            ],
+            &[r#"{"mode":"assistant","message":{"message":{"response_meta":{"finish_reason":"stop"}}},"content":"first"}"#],
         );
-        let second = poll(&mut state).unwrap();
+        let second = state.poll().unwrap();
         assert_eq!(second.final_output.as_deref(), Some("first"));
     }
 }

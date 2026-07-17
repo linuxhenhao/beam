@@ -4,10 +4,13 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use beam_core::{FinalOutputKind, InitConfig};
 use serde_json::Value;
 
-use crate::adapter::{GeminiState, PollResult, SpawnSpec, SubmitResult, normalize_history_text};
+use crate::adapter::{
+    Adapter, PollResult, SpawnSpec, SubmitResult, confirm_submit_loop, normalize_history_text,
+};
 use crate::backend::SessionBackend;
 
 #[derive(Debug, Clone, Default)]
@@ -38,134 +41,143 @@ fn gemini_tmp_root() -> PathBuf {
     gemini_home_dir().join("tmp")
 }
 
-pub fn create_state(_init: &InitConfig) -> GeminiState {
+#[derive(Debug, Clone, Default)]
+pub(crate) struct GeminiState;
+
+fn state_from_init(_init: &InitConfig) -> GeminiState {
     reset_gemini_runtime();
     GeminiState
 }
 
-pub fn build_spawn_spec(_state: &GeminiState, init: &InitConfig) -> SpawnSpec {
-    let mut args = Vec::new();
-    if !init.disable_cli_bypass {
-        args.push("--yolo".to_string());
-    }
-    if let Some(model) = &init.model {
-        if !model.is_empty() {
-            args.push("--model".to_string());
-            args.push(model.clone());
-        }
-    }
-    if let Some(prompt) = &init.initial_prompt {
-        args.push("-i".to_string());
-        args.push(prompt.clone());
-    }
-    args.extend(init.cli_args.clone());
-    SpawnSpec {
-        bin: init.cli_bin.clone(),
-        args,
-    }
+pub fn create(init: &InitConfig) -> Box<dyn Adapter> {
+    Box::new(state_from_init(init))
 }
 
-pub async fn write_input(
-    _state: &mut GeminiState,
-    backend: &dyn SessionBackend,
-    content: &str,
-) -> Result<SubmitResult> {
-    let base_path = current_gemini_transcript_path().or_else(|| latest_gemini_transcript_path());
-    let base_size = base_path
-        .as_ref()
-        .map(|path| file_size(path.as_path()))
-        .unwrap_or_default();
+#[async_trait]
+impl Adapter for GeminiState {
+    fn build_spawn_spec(&self, init: &InitConfig) -> SpawnSpec {
+        let mut args = Vec::new();
+        if !init.disable_cli_bypass {
+            args.push("--yolo".to_string());
+        }
+        if let Some(model) = &init.model {
+            if !model.is_empty() {
+                args.push("--model".to_string());
+                args.push(model.clone());
+            }
+        }
+        if let Some(prompt) = &init.initial_prompt {
+            args.push("-i".to_string());
+            args.push(prompt.clone());
+        }
+        args.extend(init.cli_args.clone());
+        SpawnSpec {
+            bin: init.cli_bin.clone(),
+            args,
+        }
+    }
 
-    backend.send_text(content).await?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    backend.send_enter().await?;
+    async fn write_input(
+        &mut self,
+        backend: &dyn SessionBackend,
+        content: &str,
+    ) -> Result<SubmitResult> {
+        let base_path =
+            current_gemini_transcript_path().or_else(|| latest_gemini_transcript_path());
+        let base_size = base_path
+            .as_ref()
+            .map(|path| file_size(path.as_path()))
+            .unwrap_or_default();
 
-    for attempt in 0..4 {
-        tokio::time::sleep(Duration::from_millis(800)).await;
-        if let Some(path) =
-            current_gemini_transcript_path().or_else(|| latest_gemini_transcript_path())
-            && gemini_submit_confirmed(&path, base_size, content)?
-        {
-            update_runtime_for_path(&path);
+        backend.send_text(content).await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        backend.send_enter().await?;
+
+        let mut confirm = || -> Result<bool> {
+            let Some(path) =
+                current_gemini_transcript_path().or_else(|| latest_gemini_transcript_path())
+            else {
+                return Ok(false);
+            };
+            gemini_submit_confirmed(&path, base_size, content)
+        };
+        let mut confirmed = confirm_submit_loop(backend, &mut confirm).await?;
+        if !confirmed {
+            confirmed = confirm()?;
+        }
+
+        if confirmed {
+            if let Some(path) =
+                current_gemini_transcript_path().or_else(|| latest_gemini_transcript_path())
+            {
+                update_runtime_for_path(&path);
+            }
             return Ok(SubmitResult {
                 submitted: true,
                 cli_session_id: runtime_snapshot().cli_session_id,
                 ..Default::default()
             });
         }
-        if attempt < 3 {
-            backend.send_enter().await?;
+
+        Ok(SubmitResult {
+            submitted: false,
+            cli_session_id: runtime_snapshot().cli_session_id,
+            failure_reason: Some("Gemini transcript did not confirm submit".to_string()),
+        })
+    }
+
+    fn poll(&mut self) -> Result<PollResult> {
+        let Some(path) =
+            current_gemini_transcript_path().or_else(|| latest_gemini_transcript_path())
+        else {
+            return Ok(PollResult {
+                cli_session_id: runtime_snapshot().cli_session_id,
+                ..Default::default()
+            });
+        };
+
+        let size = file_size(&path);
+        let mut runtime = gemini_runtime().lock().expect("gemini runtime poisoned");
+        if size == runtime.transcript_offset {
+            return Ok(PollResult {
+                cli_session_id: runtime.cli_session_id.clone(),
+                ..Default::default()
+            });
         }
-    }
+        if size < runtime.transcript_offset {
+            runtime.transcript_offset = 0;
+            runtime.emitted_final_text = None;
+        }
 
-    if let Some(path) = current_gemini_transcript_path().or_else(|| latest_gemini_transcript_path())
-        && gemini_submit_confirmed(&path, base_size, content)?
-    {
-        update_runtime_for_path(&path);
-        return Ok(SubmitResult {
-            submitted: true,
-            cli_session_id: runtime_snapshot().cli_session_id,
-            ..Default::default()
-        });
-    }
+        let transcript = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read Gemini transcript {}", path.display()))?;
+        let snapshot = parse_gemini_transcript(&transcript)?;
+        runtime.transcript_offset = size;
+        runtime.transcript_path = Some(path.clone());
+        if snapshot.cli_session_id.is_some() {
+            runtime.cli_session_id = snapshot.cli_session_id.clone();
+        } else if runtime.cli_session_id.is_none() {
+            runtime.cli_session_id = session_id_from_path(&path);
+        }
 
-    Ok(SubmitResult {
-        submitted: false,
-        cli_session_id: runtime_snapshot().cli_session_id,
-        failure_reason: Some("Gemini transcript did not confirm submit".to_string()),
-    })
-}
-
-pub fn poll(_state: &mut GeminiState) -> Result<PollResult> {
-    let Some(path) = current_gemini_transcript_path().or_else(|| latest_gemini_transcript_path())
-    else {
-        return Ok(PollResult {
-            cli_session_id: runtime_snapshot().cli_session_id,
-            ..Default::default()
-        });
-    };
-
-    let size = file_size(&path);
-    let mut runtime = gemini_runtime().lock().expect("gemini runtime poisoned");
-    if size == runtime.transcript_offset {
-        return Ok(PollResult {
+        let mut result = PollResult {
             cli_session_id: runtime.cli_session_id.clone(),
             ..Default::default()
-        });
-    }
-    if size < runtime.transcript_offset {
-        runtime.transcript_offset = 0;
-        runtime.emitted_final_text = None;
-    }
+        };
 
-    let transcript = std::fs::read_to_string(&path)
-        .with_context(|| format!("failed to read Gemini transcript {}", path.display()))?;
-    let snapshot = parse_gemini_transcript(&transcript)?;
-    runtime.transcript_offset = size;
-    runtime.transcript_path = Some(path.clone());
-    if snapshot.cli_session_id.is_some() {
-        runtime.cli_session_id = snapshot.cli_session_id.clone();
-    } else if runtime.cli_session_id.is_none() {
-        runtime.cli_session_id = session_id_from_path(&path);
-    }
-
-    let mut result = PollResult {
-        cli_session_id: runtime.cli_session_id.clone(),
-        ..Default::default()
-    };
-
-    if let Some(final_text) = snapshot.final_output {
-        if !final_text.is_empty()
-            && runtime.emitted_final_text.as_deref() != Some(final_text.as_str())
-        {
-            runtime.emitted_final_text = Some(final_text.clone());
-            result.final_output = Some(final_text);
-            result.final_output_kind = Some(FinalOutputKind::Bridge);
-            result.prompt_ready = true;
+        if let Some(final_text) = snapshot.final_output {
+            if !final_text.is_empty()
+                && runtime.emitted_final_text.as_deref() != Some(final_text.as_str())
+            {
+                runtime.emitted_final_text = Some(final_text.clone());
+                result.final_output = Some(final_text);
+                result.final_output_kind = Some(FinalOutputKind::Bridge);
+                result.prompt_ready = true;
+            }
         }
-    }
 
-    Ok(result)
+        Ok(result)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -428,10 +440,10 @@ fn file_size(path: &Path) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::test_support::{home_test_lock, set_home, temp_home, test_init};
     use async_trait::async_trait;
     use std::fs;
     use std::sync::{Arc, Mutex};
-    use uuid::Uuid;
 
     #[derive(Clone, Default)]
     struct RecordingBackend {
@@ -555,10 +567,6 @@ mod tests {
         }
     }
 
-    fn temp_home() -> PathBuf {
-        std::env::temp_dir().join(format!("beam-gemini-{}", Uuid::new_v4()))
-    }
-
     fn session_path(home: &Path) -> PathBuf {
         home.join(".gemini")
             .join("tmp")
@@ -574,40 +582,11 @@ mod tests {
         fs::write(path, serde_json::to_vec_pretty(value).unwrap()).unwrap();
     }
 
-    fn test_init() -> InitConfig {
-        InitConfig {
-            session_id: "sid".to_string(),
-            title: "title".to_string(),
-            chat_id: "chat".to_string(),
-            root_message_id: "root".to_string(),
-            working_dir: ".".to_string(),
-            cli_id: "gemini".to_string(),
-            cli_bin: "gemini".to_string(),
-            cli_args: vec![],
-
-            prompt: String::new(),
-            resume: false,
-            cli_session_id: None,
-            lark_app_id: "app".to_string(),
-            lark_app_secret: "secret".to_string(),
-            prompt_turn_id: None,
-            owner_open_id: None,
-            adopted_from: None,
-            adopt_restored_from_metadata: false,
-            screen_analyzer: beam_core::ScreenAnalyzerConfig::default(),
-            initial_prompt: None,
-            model: None,
-            locale: None,
-            bot_name: None,
-            bot_open_id: None,
-            resume_session_id: None,
-            disable_cli_bypass: false,
-        }
-    }
-
     #[test]
     fn poll_reads_final_output_from_gemini_session() {
-        let home = temp_home();
+        let _lock = home_test_lock().lock().expect("home lock");
+        let home = temp_home("beam-gemini");
+        let _guard = set_home(&home);
         let transcript = session_path(&home);
         let value = serde_json::json!({
             "context": [
@@ -616,13 +595,9 @@ mod tests {
             ]
         });
         write_session(&transcript, &value);
-        let _home_guard = crate::adapter::home_test_lock().lock().expect("home lock");
-        unsafe {
-            std::env::set_var("HOME", &home);
-        }
-        let mut state = create_state(&test_init());
+        let mut state = state_from_init(&test_init("gemini"));
 
-        let result = poll(&mut state).expect("poll");
+        let result = state.poll().expect("poll");
         assert_eq!(result.final_output.as_deref(), Some("Gemini final reply"));
         assert_eq!(result.final_output_kind, Some(FinalOutputKind::Bridge));
         assert!(result.prompt_ready);
@@ -630,21 +605,20 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn write_input_confirms_submit_when_transcript_records_prompt() {
-        let home = temp_home();
+        let _lock = home_test_lock().lock().expect("home lock");
+        let home = temp_home("beam-gemini");
+        let _guard = set_home(&home);
         let transcript = session_path(&home);
         write_session(&transcript, &serde_json::json!({ "context": [] }));
-        let _home_guard = crate::adapter::home_test_lock().lock().expect("home lock");
-        unsafe {
-            std::env::set_var("HOME", &home);
-        }
-        let mut state = create_state(&test_init());
+        let mut state = state_from_init(&test_init("gemini"));
         let backend = RecordingBackend::new(
             transcript.clone(),
             true,
             Some("Gemini final reply".to_string()),
         );
 
-        let result = write_input(&mut state, &backend, "hello gemini")
+        let result = state
+            .write_input(&backend, "hello gemini")
             .await
             .expect("write input");
         assert!(result.submitted);

@@ -2,182 +2,182 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
+use async_trait::async_trait;
 use beam_core::{FinalOutputKind, InitConfig};
 use serde_json::Value;
 
 use crate::adapter::{
-    KimiState, PollResult, SpawnSpec, SubmitResult, drain_jsonl, file_size,
-    normalize_history_text, realpath_cwd,
+    Adapter, PollResult, SpawnSpec, SubmitResult, TranscriptCursor, confirm_submit_loop,
+    drain_jsonl, file_size, normalize_history_text, realpath_cwd,
 };
 use crate::backend::SessionBackend;
 
-pub fn create_state(init: &InitConfig) -> KimiState {
+#[derive(Debug, Clone, Default)]
+pub(crate) struct KimiState {
+    data_dir: PathBuf,
+    working_dir: String,
+    transcript_path: Option<PathBuf>,
+    cli_session_id: Option<String>,
+    cursor: TranscriptCursor,
+}
+
+fn state_from_init(init: &InitConfig) -> KimiState {
     let home = std::env::var("HOME").unwrap_or_default();
     KimiState {
         data_dir: PathBuf::from(home).join(".kimi-code"),
         working_dir: realpath_cwd(&init.working_dir),
         transcript_path: None,
         cli_session_id: init.cli_session_id.clone(),
-        transcript_offset: 0,
-        pending_tail: String::new(),
-        emitted_final_text: None,
+        cursor: TranscriptCursor::new(),
     }
 }
 
-pub fn build_spawn_spec(_state: &KimiState, init: &InitConfig) -> SpawnSpec {
-    let mut args = Vec::new();
-    if init.resume {
-        args.push("--session".to_string());
-        args.push(
-            init.cli_session_id
-                .clone()
-                .or_else(|| init.resume_session_id.clone())
-                .unwrap_or_else(|| init.session_id.clone()),
-        );
-    }
-    if !init.disable_cli_bypass {
-        args.push("--yolo".to_string());
-    }
-    if let Some(model) = &init.model {
-        if !model.is_empty() {
-            args.push("--model".to_string());
-            args.push(model.clone());
+pub fn create(init: &InitConfig) -> Box<dyn Adapter> {
+    Box::new(state_from_init(init))
+}
+
+#[async_trait]
+impl Adapter for KimiState {
+    fn build_spawn_spec(&self, init: &InitConfig) -> SpawnSpec {
+        let mut args = Vec::new();
+        if init.resume {
+            args.push("--session".to_string());
+            args.push(
+                init.cli_session_id
+                    .clone()
+                    .or_else(|| init.resume_session_id.clone())
+                    .unwrap_or_else(|| init.session_id.clone()),
+            );
+        }
+        if !init.disable_cli_bypass {
+            args.push("--yolo".to_string());
+        }
+        if let Some(model) = &init.model {
+            if !model.is_empty() {
+                args.push("--model".to_string());
+                args.push(model.clone());
+            }
+        }
+        args.extend(init.cli_args.clone());
+        SpawnSpec {
+            bin: init.cli_bin.clone(),
+            args,
         }
     }
-    args.extend(init.cli_args.clone());
-    SpawnSpec {
-        bin: init.cli_bin.clone(),
-        args,
-    }
-}
 
-pub async fn write_input(
-    state: &mut KimiState,
-    backend: &dyn SessionBackend,
-    content: &str,
-) -> Result<SubmitResult> {
-    let base_size = resolve_transcript_path(state)
-        .as_ref()
-        .map(|path| file_size(path.as_path()))
-        .unwrap_or(0);
+    async fn write_input(
+        &mut self,
+        backend: &dyn SessionBackend,
+        content: &str,
+    ) -> Result<SubmitResult> {
+        let base_size = resolve_transcript_path(self)
+            .as_ref()
+            .map(|path| file_size(path.as_path()))
+            .unwrap_or(0);
 
-    backend.send_text(content).await?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    backend.send_enter().await?;
+        backend.send_text(content).await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        backend.send_enter().await?;
 
-    for attempt in 0..4 {
-        tokio::time::sleep(Duration::from_millis(800)).await;
-        if let Some(path) = resolve_transcript_path(state)
-            && kimi_submit_confirmed(&path, base_size, content)?
-        {
-            update_state_for_path(state, &path);
+        let confirmed = confirm_submit_loop(backend, || {
+            let Some(path) = resolve_transcript_path(self) else {
+                return Ok(false);
+            };
+            kimi_submit_confirmed(&path, base_size, content)
+        })
+        .await?;
+
+        if confirmed {
+            if let Some(path) = resolve_transcript_path(self) {
+                update_state_for_path(self, &path);
+            }
             return Ok(SubmitResult {
                 submitted: true,
-                cli_session_id: state.cli_session_id.clone(),
+                cli_session_id: self.cli_session_id.clone(),
                 ..Default::default()
             });
         }
-        if attempt < 3 {
-            backend.send_enter().await?;
-        }
+        Ok(SubmitResult {
+            submitted: false,
+            cli_session_id: self.cli_session_id.clone(),
+            failure_reason: Some("Kimi transcript did not confirm submit".to_string()),
+        })
     }
 
-    Ok(SubmitResult {
-        submitted: false,
-        cli_session_id: state.cli_session_id.clone(),
-        failure_reason: Some("Kimi transcript did not confirm submit".to_string()),
-    })
-}
-
-pub fn poll(state: &mut KimiState) -> Result<PollResult> {
-    let Some(path) = resolve_transcript_path(state) else {
-        return Ok(PollResult {
-            cli_session_id: state.cli_session_id.clone(),
-            ..Default::default()
-        });
-    };
-
-    let current_size = file_size(&path);
-    if current_size < state.transcript_offset {
-        state.transcript_offset = 0;
-        state.pending_tail.clear();
-        state.emitted_final_text = None;
-    }
-    if current_size == state.transcript_offset {
-        return Ok(PollResult {
-            cli_session_id: state.cli_session_id.clone(),
-            ..Default::default()
-        });
-    }
-
-    let drain = drain_jsonl(&path, state.transcript_offset, &state.pending_tail)?;
-    state.transcript_offset = drain.new_offset;
-    state.pending_tail = drain.pending_tail;
-    update_state_for_path(state, &path);
-
-    let mut result = PollResult {
-        cli_session_id: state.cli_session_id.clone(),
-        ..Default::default()
-    };
-
-    let mut step_text = String::new();
-    let mut final_text: Option<String> = None;
-    for line in &drain.lines {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
-            continue;
+    fn poll(&mut self) -> Result<PollResult> {
+        let Some(path) = resolve_transcript_path(self) else {
+            return Ok(PollResult {
+                cli_session_id: self.cli_session_id.clone(),
+                ..Default::default()
+            });
         };
-        match value.get("type").and_then(Value::as_str) {
-            Some("turn.prompt") => {
-                // A new user turn starts; allow an identical reply to be emitted again.
-                state.emitted_final_text = None;
-            }
-            Some("context.append_loop_event") => {
-                let Some(event) = value.get("event") else {
-                    continue;
-                };
-                match event.get("type").and_then(Value::as_str) {
-                    Some("step.begin") => step_text.clear(),
-                    Some("content.part") => {
-                        if let Some(text) = event
-                            .get("part")
-                            .filter(|part| {
-                                part.get("type").and_then(Value::as_str) == Some("text")
-                            })
-                            .and_then(|part| part.get("text"))
-                            .and_then(Value::as_str)
-                        {
-                            step_text.push_str(text);
-                        }
-                    }
-                    Some("step.end") => {
-                        let finish_reason = event
-                            .get("finishReason")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default();
-                        if matches!(finish_reason, "end_turn" | "stop") {
-                            let text = step_text.trim().to_string();
-                            if !text.is_empty() {
-                                final_text = Some(text);
+
+        let lines = self.cursor.drain(&path)?;
+        update_state_for_path(self, &path);
+
+        let mut result = PollResult {
+            cli_session_id: self.cli_session_id.clone(),
+            ..Default::default()
+        };
+
+        let mut step_text = String::new();
+        let mut final_text: Option<String> = None;
+        for line in &lines {
+            let Ok(value) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            match value.get("type").and_then(Value::as_str) {
+                Some("turn.prompt") => {
+                    // A new user turn starts; allow an identical reply to be emitted again.
+                    self.cursor.reset_dedupe();
+                }
+                Some("context.append_loop_event") => {
+                    let Some(event) = value.get("event") else {
+                        continue;
+                    };
+                    match event.get("type").and_then(Value::as_str) {
+                        Some("step.begin") => step_text.clear(),
+                        Some("content.part") => {
+                            if let Some(text) = event
+                                .get("part")
+                                .filter(|part| {
+                                    part.get("type").and_then(Value::as_str) == Some("text")
+                                })
+                                .and_then(|part| part.get("text"))
+                                .and_then(Value::as_str)
+                            {
+                                step_text.push_str(text);
                             }
                         }
+                        Some("step.end") => {
+                            let finish_reason = event
+                                .get("finishReason")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default();
+                            if matches!(finish_reason, "end_turn" | "stop") {
+                                let text = step_text.trim().to_string();
+                                if !text.is_empty() {
+                                    final_text = Some(text);
+                                }
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
+                _ => {}
             }
-            _ => {}
         }
-    }
 
-    if let Some(text) = final_text
-        && state.emitted_final_text.as_deref() != Some(text.as_str())
-    {
-        state.emitted_final_text = Some(text.clone());
-        result.final_output = Some(text);
-        result.final_output_kind = Some(FinalOutputKind::Bridge);
-        result.prompt_ready = true;
-    }
+        if let Some(text) = final_text {
+            if let Some(emitted) = self.cursor.emit_if_new(&text) {
+                result.final_output = Some(emitted);
+                result.final_output_kind = Some(FinalOutputKind::Bridge);
+                result.prompt_ready = true;
+            }
+        }
 
-    Ok(result)
+        Ok(result)
+    }
 }
 
 fn update_state_for_path(state: &mut KimiState, path: &Path) {
@@ -330,70 +330,16 @@ fn kimi_submit_confirmed(path: &Path, from_byte: u64, expected_text: &str) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::home_test_lock;
+    use crate::adapter::test_support::{home_test_lock, set_home, temp_home, test_init};
     use async_trait::async_trait;
-    use beam_core::ScreenAnalyzerConfig;
     use std::fs::{self, create_dir_all};
     use std::sync::{Arc, Mutex};
     use uuid::Uuid;
 
-    fn temp_home(prefix: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("{}-{}", prefix, Uuid::new_v4()))
-    }
-
-    struct HomeGuard {
-        old_home: Option<std::ffi::OsString>,
-    }
-
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            match &self.old_home {
-                Some(home) => unsafe {
-                    std::env::set_var("HOME", home);
-                },
-                None => unsafe {
-                    std::env::remove_var("HOME");
-                },
-            }
-        }
-    }
-
-    fn set_home(home: &Path) -> HomeGuard {
-        let old_home = std::env::var_os("HOME");
-        unsafe {
-            std::env::set_var("HOME", home);
-        }
-        HomeGuard { old_home }
-    }
-
-    fn test_init(working_dir: &str) -> InitConfig {
+    fn init_for(working_dir: &str) -> InitConfig {
         InitConfig {
-            session_id: "session-beam".to_string(),
-            title: "title".to_string(),
-            chat_id: "chat".to_string(),
-            root_message_id: "root".to_string(),
             working_dir: working_dir.to_string(),
-            cli_id: "kimi".to_string(),
-            cli_bin: "kimi".to_string(),
-            cli_args: vec![],
-
-            prompt: String::new(),
-            resume: false,
-            cli_session_id: None,
-            lark_app_id: "app".to_string(),
-            lark_app_secret: "secret".to_string(),
-            prompt_turn_id: None,
-            owner_open_id: None,
-            adopted_from: None,
-            adopt_restored_from_metadata: false,
-            screen_analyzer: ScreenAnalyzerConfig::default(),
-            initial_prompt: None,
-            model: None,
-            locale: None,
-            bot_name: None,
-            bot_open_id: None,
-            resume_session_id: None,
-            disable_cli_bypass: false,
+            ..test_init("kimi")
         }
     }
 
@@ -595,8 +541,8 @@ mod tests {
 
     #[test]
     fn build_spawn_spec_defaults_to_yolo() {
-        let init = test_init("/tmp");
-        let spec = build_spawn_spec(&KimiState::default(), &init);
+        let init = init_for("/tmp");
+        let spec = KimiState::default().build_spawn_spec(&init);
         assert_eq!(spec.bin, "kimi");
         assert!(spec.args.iter().any(|arg| arg == "--yolo"));
         assert!(!spec.args.iter().any(|arg| arg == "--session"));
@@ -609,9 +555,9 @@ mod tests {
             cli_session_id: Some("session_abc".to_string()),
             model: Some("kimi-code/k3".to_string()),
             disable_cli_bypass: true,
-            ..test_init("/tmp")
+            ..init_for("/tmp")
         };
-        let spec = build_spawn_spec(&KimiState::default(), &init);
+        let spec = KimiState::default().build_spawn_spec(&init);
         assert!(!spec.args.iter().any(|arg| arg == "--yolo"));
         let session_pos = spec.args.iter().position(|arg| arg == "--session").unwrap();
         assert_eq!(spec.args[session_pos + 1], "session_abc");
@@ -638,15 +584,15 @@ mod tests {
                 step_end_line("end_turn"),
             ],
         );
-        let mut state = create_state(&test_init(working_dir));
+        let mut state = state_from_init(&init_for(working_dir));
 
-        let first = poll(&mut state).expect("poll");
+        let first = state.poll().expect("poll");
         assert_eq!(first.final_output.as_deref(), Some("Kimi final reply"));
         assert_eq!(first.final_output_kind, Some(FinalOutputKind::Bridge));
         assert!(first.prompt_ready);
         assert_eq!(first.cli_session_id.as_deref(), Some("session_aaa"));
 
-        let second = poll(&mut state).expect("poll again");
+        let second = state.poll().expect("poll again");
         assert!(second.final_output.is_none());
         assert!(!second.prompt_ready);
     }
@@ -669,9 +615,9 @@ mod tests {
                 step_end_line("tool_use"),
             ],
         );
-        let mut state = create_state(&test_init(working_dir));
+        let mut state = state_from_init(&init_for(working_dir));
 
-        let result = poll(&mut state).expect("poll");
+        let result = state.poll().expect("poll");
         assert!(result.final_output.is_none());
         assert!(!result.prompt_ready);
     }
@@ -695,8 +641,8 @@ mod tests {
                 step_end_line("end_turn"),
             ],
         );
-        let mut state = create_state(&test_init(working_dir));
-        let first = poll(&mut state).expect("poll");
+        let mut state = state_from_init(&init_for(working_dir));
+        let first = state.poll().expect("poll");
         assert_eq!(first.final_output.as_deref(), Some("first reply"));
 
         // Simulate transcript truncation (shorter than before): the same reply
@@ -710,7 +656,7 @@ mod tests {
                 step_end_line("end_turn"),
             ],
         );
-        let second = poll(&mut state).expect("poll after truncation");
+        let second = state.poll().expect("poll after truncation");
         assert_eq!(second.final_output.as_deref(), Some("first reply"));
     }
 
@@ -732,9 +678,9 @@ mod tests {
         let other_wire = wire_path(&home, "session_other");
         append_wire(&other_wire, &[text_part_line("foreign")]);
         write_session_index(&home, "session_other", "/tmp/beam-kimi-other");
-        let mut state = create_state(&test_init(working_dir));
+        let mut state = state_from_init(&init_for(working_dir));
 
-        let result = poll(&mut state).expect("poll");
+        let result = state.poll().expect("poll");
         assert_eq!(result.final_output.as_deref(), Some("old"));
         assert_eq!(result.cli_session_id.as_deref(), Some("session_old"));
     }
@@ -750,10 +696,11 @@ mod tests {
         write_session_index(&home, "session_ddd", working_dir);
         let wire = wire_path(&home, "session_ddd");
         append_wire(&wire, &[]);
-        let mut state = create_state(&test_init(working_dir));
+        let mut state = state_from_init(&init_for(working_dir));
         let backend = RecordingBackend::new(wire.clone(), true);
 
-        let result = write_input(&mut state, &backend, "hello kimi")
+        let result = state
+            .write_input(&backend, "hello kimi")
             .await
             .expect("write input");
         assert!(result.submitted);
@@ -773,10 +720,11 @@ mod tests {
         write_session_index(&home, "session_eee", working_dir);
         let wire = wire_path(&home, "session_eee");
         append_wire(&wire, &[]);
-        let mut state = create_state(&test_init(working_dir));
+        let mut state = state_from_init(&init_for(working_dir));
         let backend = RecordingBackend::new(wire.clone(), false);
 
-        let result = write_input(&mut state, &backend, "hello kimi")
+        let result = state
+            .write_input(&backend, "hello kimi")
             .await
             .expect("write input");
         assert!(!result.submitted);
@@ -874,10 +822,10 @@ mod tests {
         let init = InitConfig {
             working_dir: working_dir.display().to_string(),
             prompt: String::new(),
-            ..test_init(&working_dir.display().to_string())
+            ..init_for(&working_dir.display().to_string())
         };
-        let mut state = create_state(&init);
-        let spec = build_spawn_spec(&state, &init);
+        let mut state = state_from_init(&init);
+        let spec = state.build_spawn_spec(&init);
         assert!(spec.args.iter().any(|arg| arg == "--yolo"));
 
         let mut backend = crate::backend::ZellijBackend::new(zellij_session);
@@ -907,7 +855,8 @@ mod tests {
         }
         assert!(ready, "kimi TUI did not reach the welcome screen within 60s");
 
-        let submit = write_input(&mut state, &backend, "reply with exactly: BEAM_KIMI_OK")
+        let submit = state
+            .write_input(&backend, "reply with exactly: BEAM_KIMI_OK")
             .await
             .expect("write input to live kimi");
         assert!(
@@ -920,7 +869,7 @@ mod tests {
         let mut final_output = None;
         for _ in 0..90 {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            let result = poll(&mut state).expect("poll live kimi");
+            let result = state.poll().expect("poll live kimi");
             if result.final_output.is_some() {
                 final_output = result.final_output;
                 break;
