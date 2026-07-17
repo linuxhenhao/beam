@@ -1,6 +1,7 @@
 use super::load_bots;
 use crate::*;
 use anyhow::{Context, Result, bail};
+use beam_core::cli_specs::{CLI_SPECS, cli_spec};
 
 pub(crate) fn setup_backup_file(path: &Path) -> Result<Option<PathBuf>> {
     if !path.exists() {
@@ -46,26 +47,10 @@ pub(crate) async fn validate_setup_credentials(app_id: &str, app_secret: &str) -
     }
 }
 
-const CLI_CHOICES: &[(&str, &str, &[&str])] = &[
-    ("claude-code", "Claude", &["claude"]),
-    ("codex", "Codex", &["codex"]),
-    ("traex", "Traex", &["traex"]),
-    ("coco", "CoCo", &["coco"]),
-    ("gemini", "Gemini", &["gemini"]),
-    ("opencode", "OpenCode", &["opencode-cli", "opencode"]),
-    ("hermes", "Hermes", &["hermes"]),
-    ("antigravity", "Antigravity", &["agy"]),
-];
-
 pub(crate) fn default_cli_args_for_cli_id(cli_id: &str) -> Vec<String> {
-    match cli_id {
-        "codex" => vec![
-            "--dangerously-bypass-approvals-and-sandbox".to_string(),
-            "--no-alt-screen".to_string(),
-        ],
-        "traex" => vec!["-y".to_string()],
-        _ => Vec::new(),
-    }
+    cli_spec(cli_id)
+        .map(|spec| spec.default_cli_args.iter().map(ToString::to_string).collect())
+        .unwrap_or_default()
 }
 
 pub(crate) fn parse_cli_args_input(input: &str, defaults: &[String]) -> Vec<String> {
@@ -82,19 +67,15 @@ pub(crate) fn parse_cli_args_input(input: &str, defaults: &[String]) -> Vec<Stri
         .collect()
 }
 
-pub(crate) fn detect_installed_clis()
--> Vec<&'static (&'static str, &'static str, &'static [&'static str])> {
-    CLI_CHOICES
+pub(crate) fn detect_installed_clis() -> Vec<&'static beam_core::cli_specs::CliSpec> {
+    CLI_SPECS
         .iter()
-        .filter(|(_, _, bins)| bins.iter().any(|b| which_exists(b)))
+        .filter(|spec| spec.bin_candidates.iter().any(|b| which_exists(b)))
         .collect()
 }
 
 pub(crate) fn bin_candidates_for_cli_id(cli_id: &str) -> Option<&'static [&'static str]> {
-    CLI_CHOICES
-        .iter()
-        .find(|(id, _, _)| *id == cli_id)
-        .map(|(_, _, bins)| *bins)
+    cli_spec(cli_id).map(|spec| spec.bin_candidates)
 }
 
 pub(crate) fn probe_cli_bin(cli_id: &str) -> Option<String> {
@@ -136,7 +117,7 @@ pub(crate) fn prompt_cli_id() -> Result<String> {
         if value.is_empty() {
             return Ok("claude-code".to_string());
         }
-        let valid_ids: Vec<&str> = CLI_CHOICES.iter().map(|c| c.0).collect();
+        let valid_ids: Vec<&str> = CLI_SPECS.iter().map(|spec| spec.cli_id).collect();
         if valid_ids.contains(&value) {
             return Ok(value.to_string());
         }
@@ -149,23 +130,23 @@ pub(crate) fn prompt_cli_id() -> Result<String> {
     }
 
     println!("已检测到以下 CLI 工具:");
-    for (i, (_id, label, bins)) in installed.iter().enumerate() {
-        let bin_str = bins.join(" / ");
-        println!("  {}) {}  ({})", i + 1, label, bin_str);
+    for (i, spec) in installed.iter().enumerate() {
+        let bin_str = spec.bin_candidates.join(" / ");
+        println!("  {}) {}  ({})", i + 1, spec.label, bin_str);
     }
 
     let value = ask_line("CLI 适配器 [1]: ")?;
     let value = value.trim();
     if value.is_empty() {
-        return Ok(installed[0].0.to_string());
+        return Ok(installed[0].cli_id.to_string());
     }
     if let Ok(num) = value.parse::<usize>() {
         if num >= 1 && num <= installed.len() {
-            return Ok(installed[num - 1].0.to_string());
+            return Ok(installed[num - 1].cli_id.to_string());
         }
         println!("无效序号 \"{}\"，请输入 1-{}", num, installed.len());
     } else {
-        let valid_ids: Vec<&str> = CLI_CHOICES.iter().map(|c| c.0).collect();
+        let valid_ids: Vec<&str> = CLI_SPECS.iter().map(|spec| spec.cli_id).collect();
         if valid_ids.contains(&value) {
             return Ok(value.to_string());
         }
@@ -175,7 +156,7 @@ pub(crate) fn prompt_cli_id() -> Result<String> {
             valid_ids.join(", ")
         );
     }
-    Ok(installed[0].0.to_string())
+    Ok(installed[0].cli_id.to_string())
 }
 
 pub(crate) async fn prompt_setup_bot() -> Result<BotConfig> {

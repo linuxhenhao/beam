@@ -22,9 +22,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
+use async_trait::async_trait;
 use beam_core::{FinalOutputKind, InitConfig};
 
-use crate::adapter::{OpenCodeState, PollResult, ResolveOutcome, SpawnSpec, SubmitResult};
+use crate::adapter::{
+    Adapter, PollResult, ResolveOutcome, SpawnSpec, SubmitResult, TranscriptSourceCandidate,
+    confirm_submit_loop,
+};
 use crate::backend::SessionBackend;
 
 use self::disambiguation::disambiguate_by_screen;
@@ -42,9 +46,21 @@ pub(crate) use self::source_resolution::*;
 #[cfg(test)]
 pub(crate) use self::transcript::*;
 
-// ---- state creation ----
+#[derive(Debug, Clone, Default)]
+pub(crate) struct OpenCodeState {
+    pub data_dir: PathBuf,
+    pub expected_session_id: Option<String>,
+    pub working_dir: String,
+    pub cli_session_id: Option<String>,
+    pub transcript_offset: u64,
+    pub emitted_final_text: Option<String>,
+    /// PID of the adopted CLI process, if any.
+    /// When set and alive, directory-based candidate resolution
+    /// picks the most recent session instead of raising Ambiguous.
+    pub adopted_pid: Option<u32>,
+}
 
-pub fn create_state(init: &InitConfig) -> OpenCodeState {
+fn state_from_init(init: &InitConfig) -> OpenCodeState {
     let home = std::env::var("HOME").unwrap_or_default();
     let data_dir = PathBuf::from(format!("{}/.local/share/opencode", home));
     let expected_session_id = init.cli_session_id.clone();
@@ -63,122 +79,145 @@ pub fn create_state(init: &InitConfig) -> OpenCodeState {
     }
 }
 
-// ---- spawn spec ----
-
-pub fn build_spawn_spec(_state: &OpenCodeState, init: &InitConfig) -> SpawnSpec {
-    let mut args = Vec::new();
-    if let Some(model) = &init.model {
-        if !model.is_empty() {
-            args.push("--model".to_string());
-            args.push(model.clone());
-        }
-    }
-    if let Some(prompt) = &init.initial_prompt {
-        args.push("--prompt".to_string());
-        args.push(prompt.clone());
-    }
-    args.extend(init.cli_args.clone());
-    SpawnSpec {
-        bin: init.cli_bin.clone(),
-        args,
-    }
+pub fn create(init: &InitConfig) -> Box<dyn Adapter> {
+    Box::new(state_from_init(init))
 }
 
-// ---- write input ----
-
-pub async fn write_input(
-    state: &mut OpenCodeState,
-    backend: &dyn SessionBackend,
-    content: &str,
-) -> Result<SubmitResult> {
-    let source = match wait_for_source(state).await {
-        ResolveOutcome::Found(source) => source,
-        ResolveOutcome::Ambiguous { candidates, reason } => {
-            // Try screen vs transcript disambiguation before giving up.
-            match disambiguate_by_screen(state, backend, &candidates).await {
-                Ok(Some(source)) => source,
-                Ok(None) | Err(_) => {
-                    return Ok(SubmitResult {
-                        submitted: false,
-                        cli_session_id: state.cli_session_id.clone(),
-                        failure_reason: Some(reason),
-                    });
-                }
+#[async_trait]
+impl Adapter for OpenCodeState {
+    fn build_spawn_spec(&self, init: &InitConfig) -> SpawnSpec {
+        let mut args = Vec::new();
+        if let Some(model) = &init.model {
+            if !model.is_empty() {
+                args.push("--model".to_string());
+                args.push(model.clone());
             }
         }
-        ResolveOutcome::NotFound { reason } => {
-            return Ok(SubmitResult {
-                submitted: false,
-                cli_session_id: state.cli_session_id.clone(),
-                failure_reason: Some(reason),
-            });
+        if let Some(prompt) = &init.initial_prompt {
+            args.push("--prompt".to_string());
+            args.push(prompt.clone());
         }
-    };
-    let base_offset = current_opencode_session_offset(&source)?;
-    state.cli_session_id = Some(source.session_id.clone());
-    state.expected_session_id = Some(source.session_id.clone());
+        args.extend(init.cli_args.clone());
+        SpawnSpec {
+            bin: init.cli_bin.clone(),
+            args,
+        }
+    }
 
-    backend.send_text(content).await?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    backend.send_enter().await?;
-    for attempt in 0..4 {
-        tokio::time::sleep(Duration::from_millis(800)).await;
-        if opencode_submit_confirmed(&source, base_offset, content)? {
+    async fn write_input(
+        &mut self,
+        backend: &dyn SessionBackend,
+        content: &str,
+    ) -> Result<SubmitResult> {
+        let source = match wait_for_source(self).await {
+            ResolveOutcome::Found(source) => source,
+            ResolveOutcome::Ambiguous { candidates, reason } => {
+                // Try screen vs transcript disambiguation before giving up.
+                match disambiguate_by_screen(self, backend, &candidates).await {
+                    Ok(Some(source)) => source,
+                    Ok(None) | Err(_) => {
+                        return Ok(SubmitResult {
+                            submitted: false,
+                            cli_session_id: self.cli_session_id.clone(),
+                            failure_reason: Some(reason),
+                        });
+                    }
+                }
+            }
+            ResolveOutcome::NotFound { reason } => {
+                return Ok(SubmitResult {
+                    submitted: false,
+                    cli_session_id: self.cli_session_id.clone(),
+                    failure_reason: Some(reason),
+                });
+            }
+        };
+        let base_offset = current_opencode_session_offset(&source)?;
+        self.cli_session_id = Some(source.session_id.clone());
+        self.expected_session_id = Some(source.session_id.clone());
+
+        backend.send_text(content).await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        backend.send_enter().await?;
+        let confirmed =
+            confirm_submit_loop(backend, || opencode_submit_confirmed(&source, base_offset, content))
+                .await?;
+        if confirmed {
             return Ok(SubmitResult {
                 submitted: true,
-                cli_session_id: state.cli_session_id.clone(),
+                cli_session_id: self.cli_session_id.clone(),
                 ..Default::default()
             });
         }
-        if attempt < 3 {
-            backend.send_enter().await?;
-        }
-    }
-    Ok(SubmitResult {
-        submitted: false,
-        cli_session_id: state.cli_session_id.clone(),
-        failure_reason: Some("OpenCode transcript did not confirm submit".to_string()),
-    })
-}
-
-// ---- poll ----
-
-pub fn poll(state: &mut OpenCodeState) -> Result<PollResult> {
-    let source = match current_source(state) {
-        ResolveOutcome::Found(source) => source,
-        ResolveOutcome::Ambiguous { .. } | ResolveOutcome::NotFound { .. } => {
-            // Do not auto-bind cli_session_id on ambiguous / not-found.
-            return Ok(PollResult {
-                cli_session_id: state.cli_session_id.clone(),
-                ..Default::default()
-            });
-        }
-    };
-
-    let drain = drain_opencode_session(&source, state.transcript_offset)?;
-    state.transcript_offset = drain.new_offset;
-    if state.cli_session_id.is_none() {
-        state.cli_session_id = Some(source.session_id.clone());
+        Ok(SubmitResult {
+            submitted: false,
+            cli_session_id: self.cli_session_id.clone(),
+            failure_reason: Some("OpenCode transcript did not confirm submit".to_string()),
+        })
     }
 
-    let mut result = PollResult {
-        cli_session_id: state.cli_session_id.clone(),
-        ..Default::default()
-    };
+    fn poll(&mut self) -> Result<PollResult> {
+        let source = match current_source(self) {
+            ResolveOutcome::Found(source) => source,
+            ResolveOutcome::Ambiguous { .. } | ResolveOutcome::NotFound { .. } => {
+                // Do not auto-bind cli_session_id on ambiguous / not-found.
+                return Ok(PollResult {
+                    cli_session_id: self.cli_session_id.clone(),
+                    ..Default::default()
+                });
+            }
+        };
 
-    for event in drain.events {
-        if event.kind != "assistant_final" {
-            continue;
+        let drain = drain_opencode_session(&source, self.transcript_offset)?;
+        self.transcript_offset = drain.new_offset;
+        if self.cli_session_id.is_none() {
+            self.cli_session_id = Some(source.session_id.clone());
         }
-        if !event.text.is_empty() && state.emitted_final_text.as_deref() != Some(&event.text) {
-            state.emitted_final_text = Some(event.text.clone());
-            result.final_output = Some(event.text);
-            result.final_output_kind = Some(FinalOutputKind::Bridge);
-            result.prompt_ready = true;
+
+        let mut result = PollResult {
+            cli_session_id: self.cli_session_id.clone(),
+            ..Default::default()
+        };
+
+        for event in drain.events {
+            if event.kind != "assistant_final" {
+                continue;
+            }
+            if !event.text.is_empty() && self.emitted_final_text.as_deref() != Some(&event.text) {
+                self.emitted_final_text = Some(event.text.clone());
+                result.final_output = Some(event.text);
+                result.final_output_kind = Some(FinalOutputKind::Bridge);
+                result.prompt_ready = true;
+            }
         }
+
+        Ok(result)
     }
 
-    Ok(result)
+    async fn resolve_transcript_source(
+        &mut self,
+        backend: &dyn SessionBackend,
+    ) -> Option<Result<ResolveOutcome<TranscriptSourceCandidate>>> {
+        if self.cli_session_id.is_some() {
+            return None;
+        }
+        Some(
+            resolve_transcript_source(self, backend)
+                .await
+                .map(|resolution| {
+                    resolution.map(|source| TranscriptSourceCandidate {
+                        session_id: source.session_id,
+                        db_path: source.db_path,
+                    })
+                }),
+        )
+    }
+
+    fn set_transcript_source(&mut self, cli_session_id: &str) -> bool {
+        self.expected_session_id = Some(cli_session_id.to_string());
+        self.cli_session_id = Some(cli_session_id.to_string());
+        true
+    }
 }
 
 // ---- init-time transcript resolution ----

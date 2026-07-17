@@ -4,13 +4,19 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use async_trait::async_trait;
 use beam_core::InitConfig;
 use serde_json::Value;
 
-use crate::adapter::{HermesState, PollResult, SpawnSpec, SubmitResult, normalize_history_text};
+use crate::adapter::{
+    Adapter, PollResult, SpawnSpec, SubmitResult, confirm_submit_loop, normalize_history_text,
+};
 use crate::backend::SessionBackend;
 
 const CONTENT_JSON_PREFIX: &str = "\u{0}json:";
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HermesState;
 
 #[derive(Debug, Clone, Default)]
 struct HermesRuntimeState {
@@ -65,48 +71,57 @@ fn hermes_state_db_path() -> PathBuf {
     hermes_home_dir().join("state.db")
 }
 
-pub fn create_state(_init: &InitConfig) -> HermesState {
+fn state_from_init(_init: &InitConfig) -> HermesState {
     reset_hermes_runtime();
     HermesState
 }
 
-pub fn build_spawn_spec(_state: &HermesState, init: &InitConfig) -> SpawnSpec {
-    let mut args = Vec::new();
-    if init.resume {
-        args.push("--resume".to_string());
-        args.push(
-            init.resume_session_id
-                .clone()
-                .unwrap_or_else(|| init.session_id.clone()),
-        );
-    }
-    if !init.disable_cli_bypass {
-        args.push("--yolo".to_string());
-        args.push("--accept-hooks".to_string());
-    }
-    args.push("--pass-session-id".to_string());
-    args.extend(init.cli_args.clone());
-    SpawnSpec {
-        bin: init.cli_bin.clone(),
-        args,
-    }
+pub fn create(init: &InitConfig) -> Box<dyn Adapter> {
+    Box::new(state_from_init(init))
 }
 
-pub async fn write_input(
-    _state: &mut HermesState,
-    backend: &dyn SessionBackend,
-    content: &str,
-) -> Result<SubmitResult> {
-    let db_path = hermes_state_db_path();
-    let base_offset = current_hermes_state_offset(&db_path)?;
+#[async_trait]
+impl Adapter for HermesState {
+    fn build_spawn_spec(&self, init: &InitConfig) -> SpawnSpec {
+        let mut args = Vec::new();
+        if init.resume {
+            args.push("--resume".to_string());
+            args.push(
+                init.resume_session_id
+                    .clone()
+                    .unwrap_or_else(|| init.session_id.clone()),
+            );
+        }
+        if !init.disable_cli_bypass {
+            args.push("--yolo".to_string());
+            args.push("--accept-hooks".to_string());
+        }
+        args.push("--pass-session-id".to_string());
+        args.extend(init.cli_args.clone());
+        SpawnSpec {
+            bin: init.cli_bin.clone(),
+            args,
+        }
+    }
 
-    backend.send_text(content).await?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    backend.send_enter().await?;
+    async fn write_input(
+        &mut self,
+        backend: &dyn SessionBackend,
+        content: &str,
+    ) -> Result<SubmitResult> {
+        let db_path = hermes_state_db_path();
+        let base_offset = current_hermes_state_offset(&db_path)?;
 
-    for attempt in 0..4 {
-        tokio::time::sleep(Duration::from_millis(800)).await;
-        if hermes_submit_confirmed(&db_path, base_offset, content)? {
+        backend.send_text(content).await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        backend.send_enter().await?;
+
+        let confirmed = confirm_submit_loop(backend, || {
+            hermes_submit_confirmed(&db_path, base_offset, content)
+        })
+        .await?;
+
+        if confirmed {
             let cli_session_id = latest_hermes_session_id(&db_path)?;
             let mut runtime = hermes_runtime().lock().expect("hermes runtime poisoned");
             runtime.transcript_path = Some(db_path.clone());
@@ -118,64 +133,61 @@ pub async fn write_input(
                 ..Default::default()
             });
         }
-        if attempt < 3 {
-            backend.send_enter().await?;
+
+        let cli_session_id = latest_hermes_session_id(&db_path)?;
+        Ok(SubmitResult {
+            submitted: false,
+            cli_session_id,
+            failure_reason: Some("Hermes transcript did not confirm submit".to_string()),
+        })
+    }
+
+    fn poll(&mut self) -> Result<PollResult> {
+        let db_path = hermes_state_db_path();
+        let Some(current_offset) = current_hermes_state_offset_opt(&db_path)? else {
+            return Ok(PollResult {
+                cli_session_id: runtime_snapshot().cli_session_id,
+                ..Default::default()
+            });
+        };
+
+        let mut runtime = hermes_runtime().lock().expect("hermes runtime poisoned");
+        if current_offset < runtime.transcript_offset {
+            runtime.transcript_offset = 0;
+            runtime.emitted_final_text = None;
         }
-    }
+        if current_offset == runtime.transcript_offset {
+            return Ok(PollResult {
+                cli_session_id: runtime.cli_session_id.clone(),
+                ..Default::default()
+            });
+        }
 
-    let cli_session_id = latest_hermes_session_id(&db_path)?;
-    Ok(SubmitResult {
-        submitted: false,
-        cli_session_id,
-        failure_reason: Some("Hermes transcript did not confirm submit".to_string()),
-    })
-}
+        let snapshot = drain_hermes_state_db(&db_path, runtime.transcript_offset)?;
+        runtime.transcript_offset = current_offset;
+        runtime.transcript_path = Some(db_path.clone());
+        if snapshot.cli_session_id.is_some() {
+            runtime.cli_session_id = snapshot.cli_session_id.clone();
+        }
 
-pub fn poll(_state: &mut HermesState) -> Result<PollResult> {
-    let db_path = hermes_state_db_path();
-    let Some(current_offset) = current_hermes_state_offset_opt(&db_path)? else {
-        return Ok(PollResult {
-            cli_session_id: runtime_snapshot().cli_session_id,
-            ..Default::default()
-        });
-    };
-
-    let mut runtime = hermes_runtime().lock().expect("hermes runtime poisoned");
-    if current_offset < runtime.transcript_offset {
-        runtime.transcript_offset = 0;
-        runtime.emitted_final_text = None;
-    }
-    if current_offset == runtime.transcript_offset {
-        return Ok(PollResult {
+        let mut result = PollResult {
             cli_session_id: runtime.cli_session_id.clone(),
             ..Default::default()
-        });
-    }
+        };
 
-    let snapshot = drain_hermes_state_db(&db_path, runtime.transcript_offset)?;
-    runtime.transcript_offset = current_offset;
-    runtime.transcript_path = Some(db_path.clone());
-    if snapshot.cli_session_id.is_some() {
-        runtime.cli_session_id = snapshot.cli_session_id.clone();
-    }
-
-    let mut result = PollResult {
-        cli_session_id: runtime.cli_session_id.clone(),
-        ..Default::default()
-    };
-
-    if let Some(final_text) = snapshot.final_output {
-        if !final_text.is_empty()
-            && runtime.emitted_final_text.as_deref() != Some(final_text.as_str())
-        {
-            runtime.emitted_final_text = Some(final_text.clone());
-            result.final_output = Some(final_text);
-            result.final_output_kind = Some(beam_core::FinalOutputKind::Bridge);
-            result.prompt_ready = true;
+        if let Some(final_text) = snapshot.final_output {
+            if !final_text.is_empty()
+                && runtime.emitted_final_text.as_deref() != Some(final_text.as_str())
+            {
+                runtime.emitted_final_text = Some(final_text.clone());
+                result.final_output = Some(final_text);
+                result.final_output_kind = Some(beam_core::FinalOutputKind::Bridge);
+                result.prompt_ready = true;
+            }
         }
-    }
 
-    Ok(result)
+        Ok(result)
+    }
 }
 
 fn current_hermes_state_offset_opt(db_path: &Path) -> Result<Option<u64>> {
@@ -380,14 +392,10 @@ fn run_python_json<T: serde::de::DeserializeOwned>(script: &str) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::test_support::{home_test_lock, set_home, temp_home, test_init};
     use async_trait::async_trait;
     use std::fs;
     use std::sync::{Arc, Mutex};
-    use uuid::Uuid;
-
-    fn temp_home() -> PathBuf {
-        std::env::temp_dir().join(format!("beam-hermes-{}", Uuid::new_v4()))
-    }
 
     fn hermes_db_path(home: &Path) -> PathBuf {
         home.join(".hermes").join("state.db")
@@ -598,40 +606,20 @@ conn.commit()
         }
     }
 
-    fn test_init() -> InitConfig {
+    fn hermes_init() -> InitConfig {
         InitConfig {
             session_id: "sid".to_string(),
-            title: "title".to_string(),
-            chat_id: "chat".to_string(),
-            root_message_id: "root".to_string(),
             working_dir: ".".to_string(),
-            cli_id: "hermes".to_string(),
-            cli_bin: "hermes".to_string(),
             cli_args: vec!["--test-flag".to_string()],
-
-            prompt: String::new(),
-            resume: false,
             cli_session_id: Some("cli-session-1".to_string()),
-            lark_app_id: "app".to_string(),
-            lark_app_secret: "secret".to_string(),
-            prompt_turn_id: None,
-            owner_open_id: None,
-            adopted_from: None,
-            adopt_restored_from_metadata: false,
-            screen_analyzer: beam_core::ScreenAnalyzerConfig::default(),
             initial_prompt: Some("hello".to_string()),
-            model: None,
-            locale: None,
-            bot_name: None,
-            bot_open_id: None,
-            resume_session_id: None,
-            disable_cli_bypass: false,
+            ..test_init("hermes")
         }
     }
 
     #[test]
     fn poll_reads_final_output_from_state_db() {
-        let home = temp_home();
+        let home = temp_home("beam-hermes");
         let db_path = hermes_db_path(&home);
         write_db(
             &db_path,
@@ -646,13 +634,13 @@ conn.commit()
                 ),
             ],
         );
-        let _home_guard = crate::adapter::home_test_lock().lock().expect("home lock");
-        unsafe {
-            std::env::set_var("HOME", &home);
-        }
-        let mut state = create_state(&test_init());
+        let _lock = home_test_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _guard = set_home(&home);
+        let mut state = state_from_init(&hermes_init());
 
-        let result = poll(&mut state).expect("poll");
+        let result = state.poll().expect("poll");
         assert_eq!(result.final_output.as_deref(), Some("Hermes final reply"));
         assert_eq!(
             result.final_output_kind,
@@ -660,27 +648,28 @@ conn.commit()
         );
         assert!(result.prompt_ready);
 
-        let second = poll(&mut state).expect("poll again");
+        let second = state.poll().expect("poll again");
         assert_eq!(second.final_output, None);
         assert_eq!(second.final_output_kind, None);
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn write_input_confirms_submit_from_state_db() {
-        let home = temp_home();
+        let home = temp_home("beam-hermes");
         let db_path = hermes_db_path(&home);
         write_db(
             &db_path,
             &[("session-hermes", "assistant", "ready", Some("stop"), 1000)],
         );
-        let _home_guard = crate::adapter::home_test_lock().lock().expect("home lock");
-        unsafe {
-            std::env::set_var("HOME", &home);
-        }
-        let mut state = create_state(&test_init());
+        let _lock = home_test_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _guard = set_home(&home);
+        let mut state = state_from_init(&hermes_init());
         let backend = RecordingBackend::new(db_path.clone(), true, 2000);
 
-        let result = write_input(&mut state, &backend, "hello hermes")
+        let result = state
+            .write_input(&backend, "hello hermes")
             .await
             .expect("write input");
         assert!(result.submitted);
@@ -691,20 +680,21 @@ conn.commit()
 
     #[tokio::test(flavor = "current_thread")]
     async fn write_input_fails_when_state_db_does_not_confirm() {
-        let home = temp_home();
+        let home = temp_home("beam-hermes");
         let db_path = hermes_db_path(&home);
         write_db(
             &db_path,
             &[("session-hermes", "assistant", "ready", Some("stop"), 1000)],
         );
-        let _home_guard = crate::adapter::home_test_lock().lock().expect("home lock");
-        unsafe {
-            std::env::set_var("HOME", &home);
-        }
-        let mut state = create_state(&test_init());
+        let _lock = home_test_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _guard = set_home(&home);
+        let mut state = state_from_init(&hermes_init());
         let backend = RecordingBackend::new(db_path.clone(), false, 2000);
 
-        let result = write_input(&mut state, &backend, "hello hermes")
+        let result = state
+            .write_input(&backend, "hello hermes")
             .await
             .expect("write input");
         assert!(!result.submitted);

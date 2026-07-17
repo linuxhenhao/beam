@@ -7,16 +7,32 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Result;
+use async_trait::async_trait;
 use beam_core::{FinalOutputKind, InitConfig};
 use serde_json::Value;
 
 use crate::adapter::{
-    CodexState, PendingTurnKind, PollResult, ResolveOutcome, SpawnSpec, SubmitResult, drain_jsonl,
-    file_size, is_uuid_like, normalize_history_text,
+    Adapter, PendingTurnKind, PollResult, ResolveOutcome, SpawnSpec, SubmitResult,
+    TranscriptCursor, confirm_submit_loop, file_size, is_uuid_like, normalize_history_text,
 };
 use crate::backend::SessionBackend;
 
-pub fn create_state(init: &InitConfig) -> CodexState {
+#[derive(Debug, Clone)]
+pub(crate) struct CodexState {
+    home_dir: PathBuf,
+    history_path: PathBuf,
+    rollout_path: Option<PathBuf>,
+    cli_pid: Option<u32>,
+    cli_session_id: Option<String>,
+    cursor: TranscriptCursor,
+    adopt_mode: bool,
+    adopt_restored_from_metadata: bool,
+    adopt_preamble_emitted: bool,
+    pending_remote_user_inputs: VecDeque<String>,
+    active_turn: Option<PendingTurnKind>,
+}
+
+fn state_from_init(init: &InitConfig) -> CodexState {
     let codex_home = PathBuf::from(
         std::env::var("CODEX_HOME")
             .unwrap_or_else(|_| format!("{}/.codex", std::env::var("HOME").unwrap_or_default())),
@@ -24,10 +40,18 @@ pub fn create_state(init: &InitConfig) -> CodexState {
     create_state_with_paths(init, codex_home.join("history.jsonl"), codex_home)
 }
 
-pub fn create_traex_state(init: &InitConfig) -> CodexState {
+fn traex_state_from_init(init: &InitConfig) -> CodexState {
     let home = std::env::var("HOME").unwrap_or_default();
     let (history_path, home_dir) = traex_paths(Path::new(&home));
     create_state_with_paths(init, history_path, home_dir)
+}
+
+pub fn create(init: &InitConfig) -> Box<dyn Adapter> {
+    Box::new(state_from_init(init))
+}
+
+pub fn create_traex(init: &InitConfig) -> Box<dyn Adapter> {
+    Box::new(traex_state_from_init(init))
 }
 
 fn traex_paths(home: &Path) -> (PathBuf, PathBuf) {
@@ -46,9 +70,7 @@ fn create_state_with_paths(
         rollout_path: None,
         cli_pid: None,
         cli_session_id: init.cli_session_id.clone(),
-        transcript_offset: 0,
-        pending_tail: String::new(),
-        emitted_final_text: None,
+        cursor: TranscriptCursor::new(),
         adopt_mode: init.adopted_from.is_some(),
         adopt_restored_from_metadata: init.adopt_restored_from_metadata,
         adopt_preamble_emitted: false,
@@ -57,172 +79,178 @@ fn create_state_with_paths(
     }
 }
 
-pub fn build_spawn_spec(state: &CodexState, init: &InitConfig) -> SpawnSpec {
-    let mut args = Vec::new();
-    if init.resume {
-        if let Some(cli_session_id) = init.cli_session_id.clone().or_else(|| {
-            latest_codex_session_for_beam_session(&state.history_path, &init.session_id)
-        }) {
-            args.push("resume".to_string());
-            args.push(cli_session_id);
+#[async_trait]
+impl Adapter for CodexState {
+    fn build_spawn_spec(&self, init: &InitConfig) -> SpawnSpec {
+        let mut args = Vec::new();
+        if init.resume {
+            if let Some(cli_session_id) = init.cli_session_id.clone().or_else(|| {
+                latest_codex_session_for_beam_session(&self.history_path, &init.session_id)
+            }) {
+                args.push("resume".to_string());
+                args.push(cli_session_id);
+            }
+        }
+        args.push("-C".to_string());
+        args.push(init.working_dir.clone());
+        args.extend(init.cli_args.clone());
+        SpawnSpec {
+            bin: init.cli_bin.clone(),
+            args,
         }
     }
-    args.push("-C".to_string());
-    args.push(init.working_dir.clone());
-    args.extend(init.cli_args.clone());
-    SpawnSpec {
-        bin: init.cli_bin.clone(),
-        args,
-    }
-}
 
-pub async fn write_input(
-    state: &mut CodexState,
-    backend: &dyn SessionBackend,
-    content: &str,
-) -> Result<SubmitResult> {
-    if state.adopt_mode {
-        state
-            .pending_remote_user_inputs
-            .push_back(normalize_history_text(content));
-    }
-    for _ in 0..60 {
-        let screen = backend.capture_viewport().await.unwrap_or_default();
-        if screen.contains("OpenAI Codex") && screen.contains('›') {
-            break;
+    async fn write_input(
+        &mut self,
+        backend: &dyn SessionBackend,
+        content: &str,
+    ) -> Result<SubmitResult> {
+        if self.adopt_mode {
+            self.pending_remote_user_inputs
+                .push_back(normalize_history_text(content));
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    let history_boundary = capture_history_boundary(&state.history_path)?;
-    backend.paste_text(content).await?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    backend.send_enter().await?;
-    for _ in 0..4 {
-        if let Some(cli_session_id) =
-            codex_history_match(&state.history_path, &history_boundary, content)?
-        {
-            state.cli_session_id = Some(cli_session_id.clone());
+        for _ in 0..60 {
+            let screen = backend.capture_viewport().await.unwrap_or_default();
+            if screen.contains("OpenAI Codex") && screen.contains('›') {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        let history_boundary = capture_history_boundary(&self.history_path)?;
+        backend.paste_text(content).await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        backend.send_enter().await?;
+        let mut confirmed_session_id: Option<String> = None;
+        confirm_submit_loop(backend, || {
+            let found = codex_history_match(&self.history_path, &history_boundary, content)?;
+            if let Some(cli_session_id) = found {
+                confirmed_session_id = Some(cli_session_id);
+                return Ok(true);
+            }
+            Ok(false)
+        })
+        .await?;
+        if let Some(cli_session_id) = confirmed_session_id {
+            self.cli_session_id = Some(cli_session_id.clone());
             return Ok(SubmitResult {
                 submitted: true,
                 cli_session_id: Some(cli_session_id),
                 ..Default::default()
             });
         }
-        tokio::time::sleep(Duration::from_millis(800)).await;
-        backend.send_enter().await?;
+        Ok(SubmitResult {
+            submitted: false,
+            cli_session_id: self.cli_session_id.clone(),
+            failure_reason: Some("Codex history did not confirm submit".to_string()),
+        })
     }
-    Ok(SubmitResult {
-        submitted: false,
-        cli_session_id: state.cli_session_id.clone(),
-        failure_reason: Some("Codex history did not confirm submit".to_string()),
-    })
-}
 
-pub fn poll(state: &mut CodexState) -> Result<PollResult> {
-    if state.rollout_path.is_none() {
-        if let Some(cli_session_id) = state.cli_session_id.clone() {
-            state.rollout_path = find_codex_rollout_by_session_id(&state.home_dir, &cli_session_id);
-        }
-        if state.rollout_path.is_none() {
-            if let Some(pid) = state.cli_pid {
-                if let ResolveOutcome::Found((path, cli_session_id)) =
-                    find_codex_rollout_by_pid(pid, &state.home_dir)
-                {
-                    state.rollout_path = Some(path);
-                    state.cli_session_id = Some(cli_session_id);
-                }
+    fn poll(&mut self) -> Result<PollResult> {
+        if self.rollout_path.is_none() {
+            if let Some(cli_session_id) = self.cli_session_id.clone() {
+                self.rollout_path =
+                    find_codex_rollout_by_session_id(&self.home_dir, &cli_session_id);
             }
-        }
-    }
-
-    let mut result = PollResult {
-        cli_session_id: state.cli_session_id.clone(),
-        final_output: None,
-        final_output_kind: None,
-        final_output_user_text: None,
-        adopt_preamble: None,
-        prompt_ready: false,
-    };
-    let Some(path) = state.rollout_path.clone() else {
-        return Ok(result);
-    };
-    if state.adopt_mode && !state.adopt_preamble_emitted {
-        if !state.adopt_restored_from_metadata {
-            result.adopt_preamble = baseline_codex_adopt_preamble(&path)?;
-        }
-        state.transcript_offset = file_size(&path);
-        state.pending_tail.clear();
-        state.adopt_preamble_emitted = true;
-        return Ok(result);
-    }
-    let drain = drain_jsonl(&path, state.transcript_offset, &state.pending_tail)?;
-    state.transcript_offset = drain.new_offset;
-    state.pending_tail = drain.pending_tail;
-    for line in &drain.lines {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if value.get("type").and_then(Value::as_str) != Some("response_item") {
-            continue;
-        }
-        let payload = value.get("payload").unwrap_or(&Value::Null);
-        if payload.get("type").and_then(Value::as_str) != Some("message") {
-            continue;
-        }
-        if let Some(role) = payload.get("role").and_then(Value::as_str) {
-            match role {
-                "user" if state.adopt_mode => {
-                    let text = extract_codex_message_text(payload.get("content"));
-                    if !text.trim().is_empty() {
-                        let normalized = normalize_history_text(&text);
-                        let kind = if state
-                            .pending_remote_user_inputs
-                            .front()
-                            .map(|expected| *expected == normalized)
-                            .unwrap_or(false)
-                        {
-                            let _ = state.pending_remote_user_inputs.pop_front();
-                            PendingTurnKind::Remote
-                        } else {
-                            PendingTurnKind::Local { user_text: text }
-                        };
-                        state.active_turn = Some(kind);
-                    }
-                }
-                "assistant"
-                    if payload.get("phase").and_then(Value::as_str) == Some("final_answer") =>
-                {
-                    let text = extract_codex_text(payload.get("content"), "output_text");
-                    if !text.is_empty()
-                        && state.emitted_final_text.as_deref() != Some(text.as_str())
+            if self.rollout_path.is_none() {
+                if let Some(pid) = self.cli_pid {
+                    if let ResolveOutcome::Found((path, cli_session_id)) =
+                        find_codex_rollout_by_pid(pid, &self.home_dir)
                     {
-                        let kind = state.active_turn.take().or_else(|| {
-                            if state.adopt_mode {
-                                Some(PendingTurnKind::LocalHeadless)
-                            } else {
-                                None
-                            }
-                        });
-                        state.emitted_final_text = Some(text.clone());
-                        result.final_output = Some(text);
-                        match kind {
-                            Some(PendingTurnKind::Local { user_text }) => {
-                                result.final_output_kind = Some(FinalOutputKind::LocalTurn);
-                                result.final_output_user_text = Some(user_text);
-                            }
-                            Some(PendingTurnKind::LocalHeadless) => {
-                                result.final_output_kind = Some(FinalOutputKind::LocalTurnHeadless);
-                            }
-                            _ => {}
-                        }
-                        result.prompt_ready = true;
+                        self.rollout_path = Some(path);
+                        self.cli_session_id = Some(cli_session_id);
                     }
                 }
-                _ => {}
             }
         }
+
+        let mut result = PollResult {
+            cli_session_id: self.cli_session_id.clone(),
+            final_output: None,
+            final_output_kind: None,
+            final_output_user_text: None,
+            adopt_preamble: None,
+            prompt_ready: false,
+        };
+        let Some(path) = self.rollout_path.clone() else {
+            return Ok(result);
+        };
+        if self.adopt_mode && !self.adopt_preamble_emitted {
+            if !self.adopt_restored_from_metadata {
+                result.adopt_preamble = baseline_codex_adopt_preamble(&path)?;
+            }
+            self.cursor.skip_to(file_size(&path));
+            self.adopt_preamble_emitted = true;
+            return Ok(result);
+        }
+        let lines = self.cursor.drain(&path)?;
+        for line in &lines {
+            let Ok(value) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if value.get("type").and_then(Value::as_str) != Some("response_item") {
+                continue;
+            }
+            let payload = value.get("payload").unwrap_or(&Value::Null);
+            if payload.get("type").and_then(Value::as_str) != Some("message") {
+                continue;
+            }
+            if let Some(role) = payload.get("role").and_then(Value::as_str) {
+                match role {
+                    "user" if self.adopt_mode => {
+                        let text = extract_codex_message_text(payload.get("content"));
+                        if !text.trim().is_empty() {
+                            let normalized = normalize_history_text(&text);
+                            let kind = if self
+                                .pending_remote_user_inputs
+                                .front()
+                                .map(|expected| *expected == normalized)
+                                .unwrap_or(false)
+                            {
+                                let _ = self.pending_remote_user_inputs.pop_front();
+                                PendingTurnKind::Remote
+                            } else {
+                                PendingTurnKind::Local { user_text: text }
+                            };
+                            self.active_turn = Some(kind);
+                        }
+                    }
+                    "assistant"
+                        if payload.get("phase").and_then(Value::as_str) == Some("final_answer") =>
+                    {
+                        let text = extract_codex_text(payload.get("content"), "output_text");
+                        if let Some(text) = self.cursor.emit_if_new(&text) {
+                            let kind = self.active_turn.take().or_else(|| {
+                                if self.adopt_mode {
+                                    Some(PendingTurnKind::LocalHeadless)
+                                } else {
+                                    None
+                                }
+                            });
+                            result.final_output = Some(text);
+                            match kind {
+                                Some(PendingTurnKind::Local { user_text }) => {
+                                    result.final_output_kind = Some(FinalOutputKind::LocalTurn);
+                                    result.final_output_user_text = Some(user_text);
+                                }
+                                Some(PendingTurnKind::LocalHeadless) => {
+                                    result.final_output_kind =
+                                        Some(FinalOutputKind::LocalTurnHeadless);
+                                }
+                                _ => {}
+                            }
+                            result.prompt_ready = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(result)
     }
-    Ok(result)
+
+    fn on_spawned(&mut self, child_pid: Option<u32>) {
+        self.cli_pid = child_pid;
+    }
 }
 
 fn latest_codex_session_for_beam_session(

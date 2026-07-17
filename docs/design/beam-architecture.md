@@ -152,11 +152,13 @@ WorkerToDaemon          # Worker → Daemon
 ### CLI 适配器
 
 ```
-Adapter trait
-├── create_state → 创建 CLI 特定状态
+Adapter trait（crates/beam-worker/src/adapter.rs）
 ├── build_spawn_spec → 构建启动参数
 ├── write_input → 写入用户输入
 ├── poll → 轮询输出（bridge/transcript 检查）
+├── 可选钩子：on_spawned / resolve_transcript_source / set_transcript_source
+├── 注册：adapters/mod.rs 的 REGISTRY（cli_id → 工厂函数）；
+│        跨 crate 元数据（setup/adopt/resume/TERM）见 beam-core cli_specs::CLI_SPECS
 └── 适配器：
     ├── opencode    → SQLite transcript bridge
     ├── claude      → JSONL bridge
@@ -165,6 +167,7 @@ Adapter trait
     ├── gemini      → structured bridge
     ├── hermes      → structured bridge
     ├── antigravity → structured bridge
+    ├── kimi        → structured bridge (wire.jsonl)
     └── generic     → passthrough
 ```
 

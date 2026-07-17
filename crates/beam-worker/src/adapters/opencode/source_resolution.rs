@@ -9,7 +9,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::adapter::{OpenCodeState, ResolveOutcome};
+use super::OpenCodeState;
+use crate::adapter::ResolveOutcome;
 
 use super::transcript::{
     find_all_opencode_sessions_by_directory, find_opencode_session_by_id,

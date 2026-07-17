@@ -1,5 +1,6 @@
 pub mod api;
 pub mod ask;
+pub mod cli_specs;
 pub mod config;
 pub mod i18n;
 pub mod ipc;
@@ -39,6 +40,7 @@ pub use api::{
     SessionInputRequest, SessionLocateInfo, SessionSummary, TerminalInfo,
 };
 pub use ask::{AskOption, AskQuestion, AskRequest, AskResult, legacy_selected};
+pub use cli_specs::{CLI_SPECS, CliSpec, cli_spec};
 pub use config::{
     BotConfig, Config, DaemonConfig, LarkConfig, MessageQuotaConfig, OncallChatBinding, QuotaEntry,
     ScreenAnalyzerConfig, WebConfig,

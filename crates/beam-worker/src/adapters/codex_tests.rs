@@ -125,16 +125,14 @@ fn emits_final_output_from_rollout() {
         rollout_path: Some(path.clone()),
         cli_pid: None,
         cli_session_id: Some("sid".to_string()),
-        transcript_offset: 0,
-        pending_tail: String::new(),
-        emitted_final_text: None,
+        cursor: TranscriptCursor::new(),
         adopt_mode: false,
         adopt_restored_from_metadata: false,
         adopt_preamble_emitted: false,
         pending_remote_user_inputs: VecDeque::new(),
         active_turn: None,
     };
-    let result = poll(&mut state).unwrap();
+    let result = state.poll().unwrap();
     assert_eq!(result.final_output.as_deref(), Some("done"));
     assert!(result.prompt_ready);
     let _ = std::fs::remove_file(path);
@@ -157,22 +155,20 @@ fn adopt_emits_preamble_once_and_absorbs_history() {
         rollout_path: Some(path.clone()),
         cli_pid: None,
         cli_session_id: Some("sid".to_string()),
-        transcript_offset: 0,
-        pending_tail: String::new(),
-        emitted_final_text: None,
+        cursor: TranscriptCursor::new(),
         adopt_mode: true,
         adopt_restored_from_metadata: false,
         adopt_preamble_emitted: false,
         pending_remote_user_inputs: VecDeque::new(),
         active_turn: None,
     };
-    let first = poll(&mut state).unwrap();
+    let first = state.poll().unwrap();
     assert_eq!(
         first.adopt_preamble,
         Some(("ask".to_string(), "answer".to_string()))
     );
     assert!(first.final_output.is_none());
-    let second = poll(&mut state).unwrap();
+    let second = state.poll().unwrap();
     assert!(second.adopt_preamble.is_none());
     assert!(second.final_output.is_none());
     let _ = std::fs::remove_file(path);
@@ -195,16 +191,14 @@ fn adopt_emits_local_turn_when_user_text_is_not_from_daemon() {
         rollout_path: Some(path.clone()),
         cli_pid: None,
         cli_session_id: Some("sid".to_string()),
-        transcript_offset: 0,
-        pending_tail: String::new(),
-        emitted_final_text: None,
+        cursor: TranscriptCursor::new(),
         adopt_mode: true,
         adopt_restored_from_metadata: false,
         adopt_preamble_emitted: true,
         pending_remote_user_inputs: VecDeque::new(),
         active_turn: None,
     };
-    let result = poll(&mut state).unwrap();
+    let result = state.poll().unwrap();
     assert_eq!(result.final_output.as_deref(), Some("local answer"));
     assert_eq!(result.final_output_kind, Some(FinalOutputKind::LocalTurn));
     assert_eq!(result.final_output_user_text.as_deref(), Some("local ask"));
@@ -228,9 +222,7 @@ fn adopt_keeps_remote_turn_as_bridge_output() {
         rollout_path: Some(path.clone()),
         cli_pid: None,
         cli_session_id: Some("sid".to_string()),
-        transcript_offset: 0,
-        pending_tail: String::new(),
-        emitted_final_text: None,
+        cursor: TranscriptCursor::new(),
         adopt_mode: true,
         adopt_restored_from_metadata: false,
         adopt_preamble_emitted: true,
@@ -239,7 +231,7 @@ fn adopt_keeps_remote_turn_as_bridge_output() {
         )]),
         active_turn: None,
     };
-    let result = poll(&mut state).unwrap();
+    let result = state.poll().unwrap();
     assert_eq!(result.final_output.as_deref(), Some("remote answer"));
     assert_eq!(result.final_output_kind, None);
     assert_eq!(result.final_output_user_text, None);
@@ -263,19 +255,17 @@ fn adopt_restored_absorbs_history_without_preamble() {
         rollout_path: Some(path.clone()),
         cli_pid: None,
         cli_session_id: Some("sid".to_string()),
-        transcript_offset: 0,
-        pending_tail: String::new(),
-        emitted_final_text: None,
+        cursor: TranscriptCursor::new(),
         adopt_mode: true,
         adopt_restored_from_metadata: true,
         adopt_preamble_emitted: false,
         pending_remote_user_inputs: VecDeque::new(),
         active_turn: None,
     };
-    let first = poll(&mut state).unwrap();
+    let first = state.poll().unwrap();
     assert!(first.adopt_preamble.is_none());
     assert!(first.final_output.is_none());
-    let second = poll(&mut state).unwrap();
+    let second = state.poll().unwrap();
     assert!(second.adopt_preamble.is_none());
     assert!(second.final_output.is_none());
     let _ = std::fs::remove_file(path);
@@ -290,9 +280,7 @@ fn bridge_queue_final_answer_detection_across_turns() {
         rollout_path: Some(path.clone()),
         cli_pid: None,
         cli_session_id: Some("sid".to_string()),
-        transcript_offset: 0,
-        pending_tail: String::new(),
-        emitted_final_text: None,
+        cursor: TranscriptCursor::new(),
         adopt_mode: false,
         adopt_restored_from_metadata: false,
         adopt_preamble_emitted: false,
@@ -300,7 +288,7 @@ fn bridge_queue_final_answer_detection_across_turns() {
         active_turn: None,
     };
 
-    let empty = poll(&mut state).unwrap();
+    let empty = state.poll().unwrap();
     assert!(empty.final_output.is_none());
 
     std::fs::write(
@@ -312,7 +300,7 @@ fn bridge_queue_final_answer_detection_across_turns() {
         )
         .unwrap();
 
-    let partial = poll(&mut state).unwrap();
+    let partial = state.poll().unwrap();
     assert!(partial.final_output.is_none());
 
     std::fs::write(
@@ -325,11 +313,11 @@ fn bridge_queue_final_answer_detection_across_turns() {
         )
         .unwrap();
 
-    let done = poll(&mut state).unwrap();
+    let done = state.poll().unwrap();
     assert_eq!(done.final_output.as_deref(), Some("turn1 result"));
     assert!(done.prompt_ready);
 
-    state.emitted_final_text = Some("turn1 result".to_string());
+    let _ = state.cursor.emit_if_new("turn1 result");
 
     std::fs::write(
             &path,
@@ -343,7 +331,7 @@ fn bridge_queue_final_answer_detection_across_turns() {
         )
         .unwrap();
 
-    let second_turn = poll(&mut state).unwrap();
+    let second_turn = state.poll().unwrap();
     assert_eq!(second_turn.final_output.as_deref(), Some("turn2 result"));
     assert!(second_turn.prompt_ready);
 
@@ -437,16 +425,14 @@ fn poll_with_rollout_resolved_by_pid_emits_preamble_without_cwd_fallback() {
         cli_pid: Some(12345),
         // cli_session_id resolved from pid — NOT from cwd/latest fallback
         cli_session_id: Some("pid-resolved-sid".to_string()),
-        transcript_offset: 0,
-        pending_tail: String::new(),
-        emitted_final_text: None,
+        cursor: TranscriptCursor::new(),
         adopt_mode: true,
         adopt_restored_from_metadata: false,
         adopt_preamble_emitted: false,
         pending_remote_user_inputs: VecDeque::new(),
         active_turn: None,
     };
-    let result = poll(&mut state).unwrap();
+    let result = state.poll().unwrap();
     assert_eq!(
         result.adopt_preamble,
         Some(("adopted ask".to_string(), "adopted answer".to_string())),

@@ -23,7 +23,7 @@ pub(crate) use unicode_width::UnicodeWidthChar;
 pub(crate) use uuid::Uuid;
 
 pub(crate) use crate::adapter::CliAdapter;
-pub(crate) use crate::adapter::{AdapterKind, ResolveOutcome};
+pub(crate) use crate::adapter::ResolveOutcome;
 pub(crate) use crate::backend::{SessionBackend, SpawnOpts, ZellijBackend, ZellijObserveBackend};
 
 mod analyzer;

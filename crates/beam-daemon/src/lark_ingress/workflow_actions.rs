@@ -213,10 +213,9 @@ pub(crate) async fn start_workflow_attempt_resume(
         return Err((StatusCode::CONFLICT, "bot_not_registered".to_string()));
     };
     if bot.cli_id.trim().is_empty()
-        || !matches!(
-            bot.cli_id.as_str(),
-            "coco" | "claude-code" | "codex" | "traex" | "hermes" | "antigravity"
-        )
+        || !beam_core::cli_specs::cli_spec(&bot.cli_id)
+            .map(|spec| spec.supports_resume)
+            .unwrap_or(false)
     {
         return Err((StatusCode::CONFLICT, "resume_unsupported_cli".to_string()));
     }

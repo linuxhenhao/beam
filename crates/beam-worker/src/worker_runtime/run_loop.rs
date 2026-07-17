@@ -1,7 +1,8 @@
 use super::*;
 
-/// Returns `Some(("TERM", "xterm-256color"))` when `cli_id` is `"codex"` or
-/// `"traex"` and the inherited `TERM` is missing, empty, or `"dumb"`.
+/// Returns `Some(("TERM", "xterm-256color"))` when the CLI's spec sets
+/// `inject_term_xterm` (codex/traex) and the inherited `TERM` is missing,
+/// empty, or `"dumb"`.
 ///
 /// For any other CLI, or when `TERM` is already set to a non-empty value other
 /// than `"dumb"`, returns `None` — the environment is never overwritten.
@@ -12,9 +13,11 @@ pub(crate) fn maybe_inject_term(
     cli_id: &str,
     current_term: Option<&str>,
 ) -> Option<(String, String)> {
-    match cli_id {
-        "codex" | "traex" => {}
-        _ => return None,
+    let inject = beam_core::cli_specs::cli_spec(cli_id)
+        .map(|spec| spec.inject_term_xterm)
+        .unwrap_or(false);
+    if !inject {
+        return None;
     }
     match current_term {
         None | Some("") | Some("dumb") => Some(("TERM".to_string(), "xterm-256color".to_string())),
@@ -471,75 +474,73 @@ pub async fn run(init: InitConfig) -> Result<()> {
         }
     }
 
-    // Init-time transcript source resolution for OpenCode (resolve cli_session_id before message loop).
+    // Init-time transcript source resolution for adapters with resolvable
+    // sources (opencode): resolve cli_session_id before the message loop.
     {
-        let adapter_guard = adapter.lock().await;
-        if let AdapterKind::OpenCode(ref opencode_state) = adapter_guard.kind {
-            if opencode_state.cli_session_id.is_none() {
-                let backend_guard = backend.lock().await;
-                let resolution = crate::adapters::opencode::resolve_transcript_source(
-                    opencode_state,
-                    backend_guard.as_ref(),
-                )
-                .await
-                .unwrap_or_else(|err| {
-                    warn!(session = %init.session_id, adapter = "opencode", "resolve_transcript_source error: {:?}", err);
-                    ResolveOutcome::NotFound {
-                        reason: format!("OpenCode transcript source resolution failed: {}", err),
-                    }
-                });
-                drop(backend_guard);
-                match resolution {
-                    ResolveOutcome::Found(source) => {
-                        send_message(
-                            &stdout,
-                            &WorkerToDaemon::CliSessionId {
-                                cli_session_id: source.session_id.clone(),
-                            },
-                        )
+        let resolution = {
+            let mut adapter_guard = adapter.lock().await;
+            let backend_guard = backend.lock().await;
+            let resolution = adapter_guard
+                .resolve_transcript_source(backend_guard.as_ref())
+                .await;
+            drop(backend_guard);
+            drop(adapter_guard);
+            resolution
+        };
+        if let Some(resolution) = resolution {
+            let outcome = resolution.unwrap_or_else(|err| {
+                warn!(session = %init.session_id, adapter = %init.cli_id, "resolve_transcript_source error: {:?}", err);
+                ResolveOutcome::NotFound {
+                    reason: format!("transcript source resolution failed: {}", err),
+                }
+            });
+            match outcome {
+                ResolveOutcome::Found(source) => {
+                    send_message(
+                        &stdout,
+                        &WorkerToDaemon::CliSessionId {
+                            cli_session_id: source.session_id.clone(),
+                        },
+                    )
+                    .await?;
+                    // Also set in adapter state for subsequent poll/write_input.
+                    adapter
+                        .lock()
+                        .await
+                        .set_transcript_source(&source.session_id);
+                    info!(
+                        session = %init.session_id, adapter = %init.cli_id,
+                        transcript_session = %source.session_id,
+                        "transcript source resolved automatically"
+                    );
+                }
+                ResolveOutcome::Ambiguous { candidates, .. } => {
+                    info!(
+                        session = %init.session_id, adapter = %init.cli_id,
+                        candidate_count = candidates.len(),
+                        "transcript source ambiguous, requesting user choice"
+                    );
+                    let turn_id = Uuid::new_v4().to_string();
+                    let choices: Vec<TranscriptChoice> = candidates
+                        .iter()
+                        .map(|c| TranscriptChoice {
+                            session_id: c.session_id.clone(),
+                            label: format!("{} ({})", c.session_id, c.db_path.display()),
+                        })
+                        .collect();
+                    send_message(
+                        &stdout,
+                        &WorkerToDaemon::TranscriptChoices {
+                            candidates: choices,
+                            turn_id: turn_id.clone(),
+                        },
+                    )
+                    .await?;
+                }
+                ResolveOutcome::NotFound { reason } => {
+                    info!(session = %init.session_id, adapter = %init.cli_id, "transcript source not found: {}", reason);
+                    send_message(&stdout, &WorkerToDaemon::UserNotify { message: reason })
                         .await?;
-                        // Also set in adapter state for subsequent poll/write_input.
-                        drop(adapter_guard);
-                        let mut adapter_mut = adapter.lock().await;
-                        if let AdapterKind::OpenCode(ref mut state) = adapter_mut.kind {
-                            state.expected_session_id = Some(source.session_id.clone());
-                            state.cli_session_id = Some(source.session_id.clone());
-                        }
-                        info!(
-                            session = %init.session_id, adapter = "opencode",
-                            transcript_session = %source.session_id,
-                            "transcript source resolved automatically"
-                        );
-                    }
-                    ResolveOutcome::Ambiguous { candidates, .. } => {
-                        info!(
-                            session = %init.session_id, adapter = "opencode",
-                            candidate_count = candidates.len(),
-                            "transcript source ambiguous, requesting user choice"
-                        );
-                        let turn_id = Uuid::new_v4().to_string();
-                        let choices: Vec<TranscriptChoice> = candidates
-                            .iter()
-                            .map(|c| TranscriptChoice {
-                                session_id: c.session_id.clone(),
-                                label: format!("{} ({})", c.session_id, c.db_path.display()),
-                            })
-                            .collect();
-                        send_message(
-                            &stdout,
-                            &WorkerToDaemon::TranscriptChoices {
-                                candidates: choices,
-                                turn_id: turn_id.clone(),
-                            },
-                        )
-                        .await?;
-                        drop(adapter_guard);
-                    }
-                    ResolveOutcome::NotFound { reason } => {
-                        info!(session = %init.session_id, adapter = "opencode", "transcript source not found: {}", reason);
-                        send_message(&stdout, &WorkerToDaemon::UserNotify { message: reason })
-                            .await?;
-                    }
                 }
             }
         }
@@ -717,12 +718,11 @@ pub async fn run(init: InitConfig) -> Result<()> {
                 handle_tui_text_input(&backend, &adapter, &analyzer_runtime, &keys, &text).await?;
             }
             DaemonToWorker::SetTranscriptSource { cli_session_id } => {
-                if let AdapterKind::OpenCode(ref mut state) = adapter.lock().await.kind {
-                    state.expected_session_id = Some(cli_session_id.clone());
-                    state.cli_session_id = Some(cli_session_id.clone());
+                let applied = adapter.lock().await.set_transcript_source(&cli_session_id);
+                if applied {
+                    info!(session = %init.session_id, adapter = %init.cli_id, transcript_session = %cli_session_id, "transcript source set by user");
+                    send_message(&stdout, &WorkerToDaemon::CliSessionId { cli_session_id }).await?;
                 }
-                info!(session = %init.session_id, adapter = "opencode", transcript_session = %cli_session_id, "transcript source set by user");
-                send_message(&stdout, &WorkerToDaemon::CliSessionId { cli_session_id }).await?;
             }
             DaemonToWorker::Init(_) => {}
         }

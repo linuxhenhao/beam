@@ -352,23 +352,14 @@ pub(crate) fn discover_zellij_adopt_candidates() -> Vec<ZellijAdoptCandidate> {
 
 pub(crate) fn cli_id_from_zellij_command(command: &str) -> String {
     let command = command.rsplit('/').next().unwrap_or(command).to_lowercase();
-    if command.contains("claude") {
-        return "claude-code".to_string();
-    }
-    if command.contains("traex") {
-        return "traex".to_string();
-    }
-    if command.contains("codex") {
-        return "codex".to_string();
-    }
-    if command.contains("opencode") {
-        return "opencode".to_string();
-    }
-    if command.contains("gemini") {
-        return "gemini".to_string();
-    }
-    if command.contains("hermes") {
-        return "hermes".to_string();
+    for spec in beam_core::cli_specs::CLI_SPECS {
+        if spec
+            .adopt_command_patterns
+            .iter()
+            .any(|pattern| command.contains(pattern))
+        {
+            return spec.cli_id.to_string();
+        }
     }
     command
 }
@@ -531,6 +522,7 @@ mod tests {
         assert_eq!(cli_id_from_zellij_command("/usr/bin/codex"), "codex");
         assert_eq!(cli_id_from_zellij_command("/usr/bin/traex"), "traex");
         assert_eq!(cli_id_from_zellij_command("claude"), "claude-code");
+        assert_eq!(cli_id_from_zellij_command("/home/u/.kimi-code/bin/kimi"), "kimi");
         assert_eq!(cli_id_from_zellij_command("custom-tool"), "custom-tool");
     }
 

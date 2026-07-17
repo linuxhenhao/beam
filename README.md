@@ -39,7 +39,7 @@ flowchart LR
     D --> S[会话路由与状态]
     S --> W[beam-worker<br/>每个会话一个进程]
     W --> B[tmux / zellij / pty 后端]
-    B --> C[本地 AI coding CLI<br/>claude codex opencode gemini ...]
+    B --> C[本地 AI coding CLI<br/>claude codex opencode gemini kimi ...]
     W --> K[流式卡片更新]
     W --> P[Web 终端]
     C --> O[transcript 与终端输出]
@@ -126,7 +126,7 @@ beam autostart enable
 
 **前置要求：**
 - Rust toolchain
-- AI 编程 CLI 已安装（`opencode`、`claude`、`codex`、`gemini` 等在 PATH 中）
+- AI 编程 CLI 已安装（`opencode`、`claude`、`codex`、`gemini`、`kimi` 等在 PATH 中）
 - 如果你需要持久会话，安装 `tmux` 或 `zellij`
 
 ## 常用命令
