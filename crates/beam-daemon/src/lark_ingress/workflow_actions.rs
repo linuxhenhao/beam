@@ -215,7 +215,7 @@ pub(crate) async fn start_workflow_attempt_resume(
     if bot.cli_id.trim().is_empty()
         || !matches!(
             bot.cli_id.as_str(),
-            "coco" | "claude-code" | "codex" | "traex" | "hermes" | "antigravity"
+            "coco" | "claude-code" | "codex" | "traex" | "hermes" | "antigravity" | "kimi"
         )
     {
         return Err((StatusCode::CONFLICT, "resume_unsupported_cli".to_string()));

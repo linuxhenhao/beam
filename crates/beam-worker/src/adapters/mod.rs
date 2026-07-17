@@ -4,6 +4,7 @@ pub mod coco;
 pub mod codex;
 pub mod gemini;
 pub mod hermes;
+pub mod kimi;
 pub mod opencode;
 
 use anyhow::{Result, bail};
@@ -39,6 +40,9 @@ pub fn create_adapter(init: &InitConfig) -> Result<CliAdapter> {
         "antigravity" => CliAdapter {
             kind: AdapterKind::Antigravity(antigravity::create_state(init)),
         },
+        "kimi" => CliAdapter {
+            kind: AdapterKind::Kimi(kimi::create_state(init)),
+        },
         _ => bail!("unsupported cli adapter: {}", init.cli_id),
     };
     Ok(adapter)
@@ -53,6 +57,7 @@ pub fn build_spawn_spec(adapter: &CliAdapter, init: &InitConfig) -> SpawnSpec {
         AdapterKind::CoCo(state) => coco::build_spawn_spec(state, init),
         AdapterKind::Hermes(state) => hermes::build_spawn_spec(state, init),
         AdapterKind::Antigravity(state) => antigravity::build_spawn_spec(state, init),
+        AdapterKind::Kimi(state) => kimi::build_spawn_spec(state, init),
     }
 }
 
@@ -69,6 +74,7 @@ pub async fn write_input(
         AdapterKind::CoCo(state) => coco::write_input(state, backend, content).await,
         AdapterKind::Hermes(state) => hermes::write_input(state, backend, content).await,
         AdapterKind::Antigravity(state) => antigravity::write_input(state, backend, content).await,
+        AdapterKind::Kimi(state) => kimi::write_input(state, backend, content).await,
     }
 }
 
@@ -81,6 +87,7 @@ pub fn poll(adapter: &mut CliAdapter) -> Result<crate::adapter::PollResult> {
         AdapterKind::CoCo(state) => coco::poll(state),
         AdapterKind::Hermes(state) => hermes::poll(state),
         AdapterKind::Antigravity(state) => antigravity::poll(state),
+        AdapterKind::Kimi(state) => kimi::poll(state),
     }
 }
 
@@ -92,7 +99,8 @@ pub fn on_spawned(adapter: &mut CliAdapter, child_pid: Option<u32>) {
         | AdapterKind::Gemini(_)
         | AdapterKind::CoCo(_)
         | AdapterKind::Hermes(_)
-        | AdapterKind::Antigravity(_) => {}
+        | AdapterKind::Antigravity(_)
+        | AdapterKind::Kimi(_) => {}
     }
 }
 

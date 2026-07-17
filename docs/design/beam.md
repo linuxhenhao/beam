@@ -271,6 +271,7 @@ pub trait CliAdapter: Send + Sync {
 - `opencode`
 - `hermes`
 - `antigravity`
+- `kimi`
 - `generic`
 
 其余 adapter 的真实对标状态与测试覆盖，统一以 `docs/design/beam-parity-plan.md` 为准。

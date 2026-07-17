@@ -55,6 +55,7 @@ const CLI_CHOICES: &[(&str, &str, &[&str])] = &[
     ("opencode", "OpenCode", &["opencode-cli", "opencode"]),
     ("hermes", "Hermes", &["hermes"]),
     ("antigravity", "Antigravity", &["agy"]),
+    ("kimi", "Kimi", &["kimi"]),
 ];
 
 pub(crate) fn default_cli_args_for_cli_id(cli_id: &str) -> Vec<String> {

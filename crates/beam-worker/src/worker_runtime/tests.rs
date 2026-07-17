@@ -59,6 +59,7 @@ fn maybe_inject_term_non_target_cli_never_injects() {
     assert_eq!(maybe_inject_term("coco", None), None);
     assert_eq!(maybe_inject_term("hermes", None), None);
     assert_eq!(maybe_inject_term("antigravity", None), None);
+    assert_eq!(maybe_inject_term("kimi", None), None);
     assert_eq!(maybe_inject_term("generic", Some("dumb")), None);
 }
 

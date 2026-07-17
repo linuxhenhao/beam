@@ -9,6 +9,7 @@
   - Cross-deployment federation: read `docs/federation-design.md`; English mirror: `docs/federation-design.en.md`.
   - Ask hook flow: read `docs/design/2026-05-25-beam-ask-hooks-design.md` and `docs/plans/2026-05-25-beam-ask-hooks.md`; English design mirror: `docs/design/2026-05-25-beam-ask-hooks-design.en.md`.
   - Zellij backend or adopt work: read `docs/zellij-backend-poc.md`; English mirror: `docs/zellij-backend-poc.en.md`.
+  - Adding a new CLI adapter: read `docs/design/add-cli-adapter.md`; English mirror: `docs/design/add-cli-adapter.en.md`.
   - Web terminal / terminal proxy auth bridge: read `docs/design/terminal-proxy.md`; English mirror: `docs/design/terminal-proxy.en.md`.
 - Do not treat design docs as automatically authoritative. Verify critical behavior against the Rust code, and if you rely on a doc that has drifted from code, update the doc in the same change.
 - System design docs must be maintained in Chinese and English together. This applies to `docs/design/*.md`, `docs/platform-design.md`, `docs/federation-design.md`, and `docs/zellij-backend-poc.md`. When adding or changing one of these docs, update its paired `*.en.md` or Chinese source in the same change; if no pair exists yet, create it.

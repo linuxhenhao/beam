@@ -64,6 +64,7 @@ pub enum AdapterKind {
     CoCo(CoCoState),
     Hermes(HermesState),
     Antigravity(AntigravityState),
+    Kimi(KimiState),
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +140,17 @@ pub struct HermesState;
 #[derive(Debug, Clone, Default)]
 pub struct AntigravityState {
     pub history_path: PathBuf,
+    pub cli_session_id: Option<String>,
+    pub transcript_offset: u64,
+    pub pending_tail: String,
+    pub emitted_final_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct KimiState {
+    pub data_dir: PathBuf,
+    pub working_dir: String,
+    pub transcript_path: Option<PathBuf>,
     pub cli_session_id: Option<String>,
     pub transcript_offset: u64,
     pub pending_tail: String,

@@ -165,6 +165,7 @@ Adapter trait
     ├── gemini      → structured bridge
     ├── hermes      → structured bridge
     ├── antigravity → structured bridge
+    ├── kimi        → structured bridge (wire.jsonl)
     └── generic     → passthrough
 ```
 
