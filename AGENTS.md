@@ -17,6 +17,7 @@
 - After daemon/runtime changes, rebuild with `cargo build -p beam-cli` then restart with `beam restart`.
 - `beam restart` resolves from `PATH`; on this machine it may hit `~/.cargo/bin/beam` instead of `target/debug/beam`. For workspace verification, prefer `target/debug/beam restart` after rebuilding.
 - Lifecycle commands: `beam start` (background daemon), `beam stop`, `beam restart`, `beam logs`, `beam status`.
+- Logging: daemon and all workers share one log file, `~/.beam/logs/daemon.log` (`$BEAM_HOME/logs/daemon.log` when `BEAM_HOME` is set). The daemon redirects its own stderr to that file and spawns workers with inherited stderr (worker stdout is reserved for JSON IPC). Default level is `INFO`; `RUST_LOG` is only read at process start, so change it via restart, e.g. `RUST_LOG='beam_daemon=debug,beam_worker=debug' target/debug/beam restart`.
 - Run tests: `cargo test --workspace --no-fail-fast`; narrower: `cargo test -p <crate> <filter>`.
 - Rust source-file line limit: run `scripts/check-rust-line-count.sh` directly for an immediate check. The same script is run by CI and by `cargo test --workspace` through the `beam-core` integration test.
 - Test maintenance:
