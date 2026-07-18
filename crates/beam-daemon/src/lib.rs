@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
+mod api_token;
 mod ask;
 mod card_i18n;
 mod connector_runtime;
@@ -64,6 +65,7 @@ pub(crate) use workflow_catalog::*;
 // Re-export workflow execution items for backward compatibility (used by route handlers and tests)
 pub(crate) use workflow_execution::*;
 // Re-export workflow resume items for backward compatibility (used by route handlers and tests)
+pub(crate) use api_token::*;
 pub(crate) use connector_runtime::*;
 pub(crate) use external_host_watcher::*;
 pub(crate) use final_output::*;
@@ -226,6 +228,10 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         recent_lark_events.len()
     );
 
+    // Load or rotate the local api token (daily rotation, 1h grace for the
+    // previous token) before any route can require it.
+    let api_token_state = load_or_create_api_token(&paths).await?;
+
     let state = AppState {
         paths: paths.clone(),
         started_at,
@@ -246,11 +252,13 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         grant_pending: Arc::new(Mutex::new(grant_pending_map)),
         pending_creates: Arc::new(Mutex::new(pending_creates_map)),
         dashboard_token: Arc::new(Mutex::new(None)),
+        api_token: Arc::new(RwLock::new(api_token_state)),
         external_host: std::sync::Arc::new(tokio::sync::RwLock::new(external_host)),
     };
 
     refresh_external_host(&state, true).await?;
     spawn_external_host_watcher(state.clone());
+    spawn_api_token_rotator(state.clone());
 
     spawn_lark_ws_clients(&state);
 

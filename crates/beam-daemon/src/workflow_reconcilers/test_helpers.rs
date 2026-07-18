@@ -49,6 +49,7 @@ pub(super) fn make_state(paths: &BeamPaths) -> AppState {
         grant_pending: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         pending_creates: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         dashboard_token: Arc::new(tokio::sync::Mutex::new(None)),
+        api_token: std::sync::Arc::new(tokio::sync::RwLock::new(crate::ApiTokenState::for_test())),
         external_host: std::sync::Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
     }
 }

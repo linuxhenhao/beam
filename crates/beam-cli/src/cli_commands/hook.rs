@@ -11,9 +11,106 @@ pub(crate) fn find_runtime(paths: &BeamPaths) -> Result<DaemonRuntimeState> {
     Ok(serde_json::from_slice(&raw)?)
 }
 
-pub(crate) async fn api_client(paths: &BeamPaths) -> Result<(Client, String)> {
+pub(crate) struct ApiClient {
+    http: Client,
+    base: String,
+    key: Option<String>,
+}
+
+impl ApiClient {
+    pub(crate) fn base(&self) -> &str {
+        &self.base
+    }
+
+    pub(crate) fn get(&self, url: String) -> SignedBuilder {
+        SignedBuilder::new(self.http.clone(), self.http.get(url), self.key.clone())
+    }
+
+    pub(crate) fn post(&self, url: String) -> SignedBuilder {
+        SignedBuilder::new(self.http.clone(), self.http.post(url), self.key.clone())
+    }
+}
+
+/// RequestBuilder wrapper whose `send` HMAC-signs the built request with the
+/// local api token (when available). The signature covers method, path+query,
+/// and the body hash, so the token itself never appears on the wire.
+pub(crate) struct SignedBuilder {
+    http: Client,
+    inner: reqwest::RequestBuilder,
+    key: Option<String>,
+}
+
+impl SignedBuilder {
+    fn new(http: Client, inner: reqwest::RequestBuilder, key: Option<String>) -> Self {
+        Self { http, inner, key }
+    }
+
+    pub(crate) fn json<T: serde::Serialize + ?Sized>(self, value: &T) -> Self {
+        Self::new(self.http, self.inner.json(value), self.key)
+    }
+
+    pub(crate) fn query<T: serde::Serialize + ?Sized>(self, value: &T) -> Self {
+        Self::new(self.http, self.inner.query(value), self.key)
+    }
+
+    pub(crate) fn header(self, key: &str, value: String) -> Self {
+        Self::new(self.http, self.inner.header(key, value), self.key)
+    }
+
+    pub(crate) async fn send(self) -> Result<reqwest::Response> {
+        let mut request = self.inner.build()?;
+        if let Some(key) = self.key.as_deref() {
+            sign_built_request(&mut request, key)?;
+        }
+        Ok(self.http.execute(request).await?)
+    }
+}
+
+fn sign_built_request(request: &mut reqwest::Request, key: &str) -> Result<()> {
+    use beam_core::api_token::{
+        SIG_HEADER, SIG_NONCE_HEADER, SIG_TIMESTAMP_HEADER, generate_sig_nonce, now_unix_secs,
+        sign_request,
+    };
+    let body_bytes: &[u8] = match request.body() {
+        None => &[],
+        Some(body) => match body.as_bytes() {
+            Some(bytes) => bytes,
+            // Streaming/multipart bodies cannot be hashed; send unsigned.
+            None => return Ok(()),
+        },
+    };
+    let method = request.method().as_str().to_string();
+    let url = request.url().clone();
+    let path_query = match url.query() {
+        Some(query) => format!("{}?{}", url.path(), query),
+        None => url.path().to_string(),
+    };
+    let ts = now_unix_secs();
+    let nonce = generate_sig_nonce();
+    let sig = sign_request(key, ts, &nonce, &method, &path_query, body_bytes);
+    let headers = request.headers_mut();
+    headers.insert(
+        SIG_TIMESTAMP_HEADER,
+        reqwest::header::HeaderValue::from_str(&ts.to_string())?,
+    );
+    headers.insert(
+        SIG_NONCE_HEADER,
+        reqwest::header::HeaderValue::from_str(&nonce)?,
+    );
+    headers.insert(SIG_HEADER, reqwest::header::HeaderValue::from_str(&sig)?);
+    Ok(())
+}
+
+pub(crate) async fn api_client(paths: &BeamPaths) -> Result<ApiClient> {
     let runtime = find_runtime(paths)?;
-    Ok((Client::new(), format!("http://{}", runtime.api_addr)))
+    // Load the local api token (written and rotated daily by the daemon) to
+    // HMAC-sign requests; the token itself is never sent.
+    let key = beam_core::api_token::read_api_token(paths);
+    Ok(ApiClient {
+        http: Client::new(),
+        base: format!("http://{}", runtime.api_addr),
+        key,
+    })
 }
 
 pub(crate) fn resolve_session_owner_approver(
@@ -34,8 +131,8 @@ pub(crate) async fn post_ask(
     paths: &BeamPaths,
     body: &serde_json::Value,
 ) -> Result<serde_json::Value> {
-    let (client, base) = api_client(paths).await?;
-    let auth = client.get(format!("{}/api/auth", base)).send().await?;
+    let api = api_client(paths).await?;
+    let auth = api.get(format!("{}/api/auth", api.base())).send().await?;
     let auth_json: serde_json::Value = auth.json().await?;
     let dashboard_token = auth_json
         .get("token")
@@ -80,8 +177,8 @@ pub(crate) async fn post_ask(
             }
         }
     }
-    let resp = client
-        .post(format!("{}/api/asks", base))
+    let resp = api
+        .post(format!("{}/api/asks", api.base()))
         .header("x-dashboard-token", dashboard_token.unwrap_or_default())
         .json(&body)
         .send()

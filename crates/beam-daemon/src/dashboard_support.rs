@@ -253,7 +253,10 @@ pub(crate) async fn require_dashboard_access(
             "dashboard token required".to_string(),
         ));
     };
-    if dashboard_token_is_valid(state, &token).await {
+    // Accept the rotating local api token as well: local clients (beam CLI)
+    // cannot complete the dashboard login flow but can read the token file.
+    if dashboard_token_is_valid(state, &token).await || state.api_token.read().await.is_valid(&token)
+    {
         Ok(())
     } else {
         Err((
@@ -274,7 +277,70 @@ pub(crate) async fn dashboard_gate(
     if path == "/api/asks" || path.ends_with("/final-output") {
         return Ok(next.run(request).await);
     }
+    if headers.contains_key(beam_core::api_token::SIG_HEADER) {
+        return verify_signed_request(state, &headers, request, next).await;
+    }
     let token = query.get("token").map(|s| s.as_str());
     require_dashboard_access(&state, &headers, token).await?;
+    Ok(next.run(request).await)
+}
+
+/// Upper bound for request bodies buffered during signature verification.
+const SIG_BODY_LIMIT: usize = 64 * 1024 * 1024;
+
+/// Verify an HMAC-signed local request (x-beam-ts/-nonce/-sig headers). The
+/// body is buffered so its hash can be covered by the signature, then
+/// re-attached before the request continues down the stack.
+async fn verify_signed_request(
+    state: AppState,
+    headers: &HeaderMap,
+    request: axum::extract::Request,
+    next: middleware::Next,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    use beam_core::api_token::{SIG_HEADER, SIG_NONCE_HEADER, SIG_TIMESTAMP_HEADER};
+
+    let unauthorized = || {
+        (
+            StatusCode::UNAUTHORIZED,
+            "invalid request signature".to_string(),
+        )
+    };
+    let header_str = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let ts: u64 = header_str(SIG_TIMESTAMP_HEADER)
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(unauthorized)?;
+    let nonce = header_str(SIG_NONCE_HEADER).ok_or_else(unauthorized)?;
+    let sig = header_str(SIG_HEADER).ok_or_else(unauthorized)?;
+
+    let (parts, body) = request.into_parts();
+    let path_query = parts
+        .uri
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| parts.uri.path().to_string());
+    let bytes = axum::body::to_bytes(body, SIG_BODY_LIMIT).await.map_err(|_| {
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request body too large".to_string(),
+        )
+    })?;
+    let verified = state.api_token.write().await.verify_signature(
+        ts,
+        &nonce,
+        parts.method.as_str(),
+        &path_query,
+        &bytes,
+        &sig,
+    );
+    if !verified {
+        return Err(unauthorized());
+    }
+    let request = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes));
     Ok(next.run(request).await)
 }

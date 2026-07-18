@@ -64,6 +64,7 @@ pub(crate) struct AppState {
     pub(crate) grant_pending: Arc<Mutex<HashMap<String, grant::GrantPendingEntry>>>,
     pub(crate) pending_creates: Arc<Mutex<HashMap<String, dir_select::PendingCreateSession>>>,
     pub(crate) dashboard_token: Arc<Mutex<Option<DashboardAuthToken>>>,
+    pub(crate) api_token: Arc<RwLock<ApiTokenState>>,
     pub(crate) external_host: Arc<RwLock<String>>,
 }
 
