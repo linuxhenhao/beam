@@ -120,6 +120,14 @@ pub(crate) async fn spawn_worker(
         .arg("__worker")
         .arg("--init-path")
         .arg(&init_path)
+        // The daemon itself may have been started from inside a session (e.g.
+        // `beam restart` issued by a session CLI) and thus carry that session's
+        // env. Session-scoped vars must never leak into other sessions'
+        // workers (they would misroute `beam send` / ask-hook resolution).
+        .env_remove("BEAM_SESSION_ID")
+        .env_remove("BEAM_CHAT_ID")
+        .env_remove("BEAM_LARK_APP_ID")
+        .env_remove("BEAM_ROOT_MESSAGE_ID")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())

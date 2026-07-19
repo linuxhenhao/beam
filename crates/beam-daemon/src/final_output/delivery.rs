@@ -550,6 +550,12 @@ pub(crate) async fn handle_final_output_request(
             .with_context(|| format!("session not found: {}", session_id))?;
         (session, sessions.clone())
     };
+    if session.status == SessionStatus::Closed {
+        // Refuse to deliver into a closed session's (possibly stale) topic.
+        // This also surfaces a loud error to callers that resolved the wrong
+        // session id (e.g. an inherited foreign BEAM_SESSION_ID).
+        anyhow::bail!("session is closed: {}", session_id);
+    }
     if session.lark_app_id == "local" {
         return Ok(()); // no-op for local sessions
     }
@@ -758,6 +764,12 @@ pub(crate) async fn deliver_final_output_once(
         (session_snapshot, pending_card_id)
     };
 
+    if session.status == SessionStatus::Closed {
+        // Never deliver into a closed session's (possibly stale) topic. The
+        // retry scheduler already aborts on closed sessions; this guard covers
+        // the direct call sites (legacy final-output requests, auto-resume).
+        anyhow::bail!("session is closed: {}", session_id);
+    }
     if session.lark_app_id == "local" {
         commit_delivered_final_output(state, session_id, content, turn_id).await?;
         return Ok(());
