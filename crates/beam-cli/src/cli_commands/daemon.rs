@@ -1,4 +1,4 @@
-use super::{daemon_log_path, find_runtime};
+use super::{ApiClient, daemon_log_path, find_runtime};
 use crate::*;
 use anyhow::{Context, Result, bail};
 
@@ -163,8 +163,8 @@ pub(crate) fn print_sessions(items: &[SessionSummary]) {
     println!("共 {} 个活跃会话", active.len());
 }
 
-pub(crate) async fn fetch_sessions(client: &Client, base: &str) -> Result<Vec<SessionSummary>> {
-    let resp = client.get(format!("{}/sessions", base)).send().await?;
+pub(crate) async fn fetch_sessions(api: &ApiClient) -> Result<Vec<SessionSummary>> {
+    let resp = api.get(format!("{}/sessions", api.base())).send().await?;
     if !resp.status().is_success() {
         bail!("{}", resp.text().await.unwrap_or_default());
     }
@@ -221,8 +221,8 @@ pub(crate) fn attach_session(session: &SessionSummary) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn cmd_attach(client: &Client, base: &str, session_id: &str) -> Result<()> {
-    let items = fetch_sessions(client, base).await?;
+pub(crate) async fn cmd_attach(api: &ApiClient, session_id: &str) -> Result<()> {
+    let items = fetch_sessions(api).await?;
     let session = resolve_session_prefix(&items, session_id)?;
     attach_session(&session)
 }

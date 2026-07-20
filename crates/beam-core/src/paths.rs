@@ -70,6 +70,10 @@ impl BeamPaths {
         self.root.join("webhook-master.key")
     }
 
+    pub fn api_token_file(&self) -> PathBuf {
+        self.root.join("api-token")
+    }
+
     pub fn webhook_secrets_json(&self) -> PathBuf {
         self.root.join("webhook-secrets.json")
     }

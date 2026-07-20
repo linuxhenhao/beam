@@ -227,6 +227,7 @@ async fn dashboard_auth_helpers_support_header_and_cookie_tokens() {
         grant_pending: Arc::new(Mutex::new(HashMap::new())),
         pending_creates: Arc::new(Mutex::new(HashMap::new())),
         dashboard_token: Arc::new(Mutex::new(None)),
+        api_token: std::sync::Arc::new(tokio::sync::RwLock::new(crate::ApiTokenState::for_test())),
         external_host: std::sync::Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
     };
 
@@ -297,6 +298,7 @@ async fn beam_schedule_host_executor_creates_task_and_returns_task_id() {
         grant_pending: Arc::new(Mutex::new(HashMap::new())),
         pending_creates: Arc::new(Mutex::new(HashMap::new())),
         dashboard_token: Arc::new(Mutex::new(None)),
+        api_token: std::sync::Arc::new(tokio::sync::RwLock::new(crate::ApiTokenState::for_test())),
         external_host: std::sync::Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
     };
     let node = beam_core::HostExecutorNode {

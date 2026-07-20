@@ -25,6 +25,22 @@ pub(crate) fn maybe_inject_term(
     }
 }
 
+/// Whether to generate the env-injecting wrapper script for the CLI spawn.
+///
+/// The wrapper pins `BEAM_SESSION_ID` / `BEAM_HOME` / `BEAM_BIN` for the CLI
+/// process. Without it the CLI inherits whatever ambient env the daemon (and
+/// in turn the worker and zellij server) was started with — which may carry a
+/// *different* session's `BEAM_SESSION_ID` (e.g. when the daemon was started
+/// from inside another session via `beam restart`), misrouting `beam send`
+/// deliveries to that session's (possibly closed) topic.
+///
+/// Adopted sessions attach to an already-running external CLI, so there is no
+/// spawn to wrap. Every other session — including resumed ones — must get the
+/// wrapper.
+pub(crate) fn should_prepare_wrapper(init: &InitConfig) -> bool {
+    init.adopted_from.is_none()
+}
+
 pub(crate) async fn prepare_wrapper(
     init: &InitConfig,
     paths: &BeamPaths,
@@ -75,10 +91,10 @@ pub async fn run(init: InitConfig) -> Result<()> {
     let session_name = format!("beam-{}", &init.session_id[..8.min(init.session_id.len())]);
     let paths = BeamPaths::discover()?;
     let adapter = Arc::new(Mutex::new(CliAdapter::from_init(&init)?));
-    let wrapper = if init.resume || init.adopted_from.is_some() {
-        None
-    } else {
+    let wrapper = if should_prepare_wrapper(&init) {
         Some(prepare_wrapper(&init, &paths).await?)
+    } else {
+        None
     };
     let (mut backend_impl, attach_context): (Box<dyn SessionBackend>, &'static str) =
         if let Some(adopted) = init.adopted_from.as_ref() {
@@ -739,4 +755,39 @@ pub async fn run(init: InitConfig) -> Result<()> {
     }
     info!("worker exiting");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapter::test_support::test_init;
+
+    /// Regression: resumed sessions must still get the env-injecting wrapper.
+    /// Otherwise the CLI inherits the daemon's ambient `BEAM_SESSION_ID`
+    /// (which may belong to a different, possibly closed session) and
+    /// `beam send` deliveries are misrouted to that session's topic.
+    #[test]
+    fn should_prepare_wrapper_covers_new_and_resumed_sessions() {
+        let mut init = test_init("kimi");
+        assert!(should_prepare_wrapper(&init));
+        init.resume = true;
+        assert!(should_prepare_wrapper(&init));
+    }
+
+    #[test]
+    fn should_prepare_wrapper_skips_adopted_sessions() {
+        let mut init = test_init("kimi");
+        init.adopted_from = Some(beam_core::AdoptedFrom {
+            tmux_target: None,
+            zellij_session: Some("ext".to_string()),
+            zellij_pane_id: Some("terminal_0".to_string()),
+            original_cli_pid: 1234,
+            session_id: None,
+            cli_id: Some("kimi".to_string()),
+            cwd: "/tmp".to_string(),
+            pane_cols: None,
+            pane_rows: None,
+        });
+        assert!(!should_prepare_wrapper(&init));
+    }
 }

@@ -549,6 +549,7 @@ mod tests {
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
             pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
+            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(crate::ApiTokenState::for_test())),
             external_host: std::sync::Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
         };
         match wait_for_attempt_resume_ready(&state, &key, &entry.sidecar_path).await {
@@ -616,6 +617,7 @@ mod tests {
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
             pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
+            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(crate::ApiTokenState::for_test())),
             external_host: std::sync::Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
         };
         let state_for_update = state.clone();
@@ -740,6 +742,7 @@ mod tests {
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
             pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
+            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(crate::ApiTokenState::for_test())),
             external_host: std::sync::Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
         };
         match wait_for_attempt_resume_ready(&state, &key, &entry.sidecar_path).await {
@@ -804,6 +807,7 @@ mod tests {
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
             pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
+            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(crate::ApiTokenState::for_test())),
             external_host: std::sync::Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
         };
         match wait_for_attempt_resume_ready(&state, &key, &entry.sidecar_path).await {
@@ -871,6 +875,7 @@ mod tests {
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
             pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
+            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(crate::ApiTokenState::for_test())),
             external_host: std::sync::Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
         };
 

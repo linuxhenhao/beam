@@ -18,7 +18,7 @@ pub(crate) use daemon::{
     wait_for_health,
 };
 pub(crate) use hook::{
-    api_client, cmd_hook, discover_session_id, find_runtime, read_send_content,
+    ApiClient, api_client, cmd_hook, discover_session_id, find_runtime, read_send_content,
     resolve_cli_session_id,
 };
 pub(crate) use migration::cmd_migrate;
@@ -66,14 +66,16 @@ pub(crate) async fn run(command: Command) -> Result<()> {
                     println!("daemon pid={} started_at={}", health.pid, health.started_at);
                 }
                 Command::Stop => {
-                    let (client, base) = api_client(&paths).await?;
-                    client.post(format!("{}/shutdown", base)).send().await?;
+                    let api = api_client(&paths).await?;
+                    let base = api.base();
+                    api.post(format!("{}/shutdown", base)).send().await?;
                     println!("shutdown requested");
                 }
                 Command::Restart => {
                     if paths.runtime_state_json().exists() {
-                        let (client, base) = api_client(&paths).await?;
-                        let _ = client.post(format!("{}/shutdown", base)).send().await?;
+                        let api = api_client(&paths).await?;
+                        let base = api.base();
+                        let _ = api.post(format!("{}/shutdown", base)).send().await?;
                         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                     }
                     let exe = current_exe()?;
@@ -91,13 +93,13 @@ pub(crate) async fn run(command: Command) -> Result<()> {
                     println!("daemon pid={} started_at={}", health.pid, health.started_at);
                 }
                 Command::List { plain: _plain } => {
-                    let (client, base) = api_client(&paths).await?;
-                    let items = fetch_sessions(&client, &base).await?;
+                    let api = api_client(&paths).await?;
+                    let items = fetch_sessions(&api).await?;
                     print_sessions(&items);
                 }
                 Command::Attach { session_id } => {
-                    let (client, base) = api_client(&paths).await?;
-                    cmd_attach(&client, &base, &session_id).await?;
+                    let api = api_client(&paths).await?;
+                    cmd_attach(&api, &session_id).await?;
                 }
                 Command::Setup => {
                     cmd_setup(&paths).await?;
@@ -133,8 +135,9 @@ pub(crate) async fn run(command: Command) -> Result<()> {
                 Command::Report { content } => {
                     let body = read_send_content(content)?;
                     let session_id = discover_session_id(&paths)?;
-                    let (client, base) = api_client(&paths).await?;
-                    let resp = client
+                    let api = api_client(&paths).await?;
+                    let base = api.base();
+                    let resp = api
                         .post(format!("{}/sessions/{}/report", base, session_id))
                         .json(&serde_json::json!({ "content": body }))
                         .send()
@@ -148,8 +151,9 @@ pub(crate) async fn run(command: Command) -> Result<()> {
                 Command::Ask { content } => {
                     let body = read_send_content(content)?;
                     let session_id = discover_session_id(&paths)?;
-                    let (client, base) = api_client(&paths).await?;
-                    let resp = client
+                    let api = api_client(&paths).await?;
+                    let base = api.base();
+                    let resp = api
                         .post(format!("{}/sessions/{}/input", base, session_id))
                         .json(&SessionInputRequest {
                             content: body,
@@ -173,8 +177,9 @@ pub(crate) async fn run(command: Command) -> Result<()> {
                 Command::Send(args) => {
                     let req = build_send_request(args)?;
                     let session_id = discover_session_id(&paths)?;
-                    let (client, base) = api_client(&paths).await?;
-                    let resp = client
+                    let api = api_client(&paths).await?;
+                    let base = api.base();
+                    let resp = api
                         .post(format!("{}/sessions/{}/final-output", base, session_id))
                         .json(&req)
                         .send()
@@ -186,8 +191,9 @@ pub(crate) async fn run(command: Command) -> Result<()> {
                 }
                 Command::History(args) => {
                     let session_id = resolve_cli_session_id(&paths, args.session_id)?;
-                    let (client, base) = api_client(&paths).await?;
-                    let resp = client
+                    let api = api_client(&paths).await?;
+                    let base = api.base();
+                    let resp = api
                         .get(format!("{}/sessions/{}/history", base, session_id))
                         .query(&[
                             ("limit", args.limit.to_string()),
@@ -203,8 +209,9 @@ pub(crate) async fn run(command: Command) -> Result<()> {
                 }
                 Command::Quoted(args) => {
                     let session_id = resolve_cli_session_id(&paths, args.session_id)?;
-                    let (client, base) = api_client(&paths).await?;
-                    let resp = client
+                    let api = api_client(&paths).await?;
+                    let base = api.base();
+                    let resp = api
                         .get(format!(
                             "{}/sessions/{}/quoted/{}",
                             base, session_id, args.message_id
@@ -219,10 +226,11 @@ pub(crate) async fn run(command: Command) -> Result<()> {
                 }
                 Command::Bots { args } => cmd_bots(args, &paths)?,
                 Command::Session { command } => {
-                    let (client, base) = api_client(&paths).await?;
+                    let api = api_client(&paths).await?;
+                    let base = api.base();
                     match command {
                         SessionCommand::Create(args) => {
-                            let resp = client
+                            let resp = api
                                 .post(format!("{}/sessions", base))
                                 .json(&CreateSessionRequest {
                                     title: args.title,
@@ -241,14 +249,14 @@ pub(crate) async fn run(command: Command) -> Result<()> {
                             println!("{}", serde_json::to_string_pretty(&session)?);
                         }
                         SessionCommand::List => {
-                            let items = fetch_sessions(&client, &base).await?;
+                            let items = fetch_sessions(&api).await?;
                             print_sessions(&items);
                         }
                         SessionCommand::Attach { session_id } => {
-                            cmd_attach(&client, &base, &session_id).await?;
+                            cmd_attach(&api, &session_id).await?;
                         }
                         SessionCommand::Input(args) => {
-                            let resp = client
+                            let resp = api
                                 .post(format!("{}/sessions/{}/input", base, args.session_id))
                                 .json(&SessionInputRequest {
                                     content: args.content,
@@ -262,7 +270,7 @@ pub(crate) async fn run(command: Command) -> Result<()> {
                             println!("input accepted");
                         }
                         SessionCommand::Refresh { session_id } => {
-                            let resp = client
+                            let resp = api
                                 .post(format!("{}/sessions/{}/refresh", base, session_id))
                                 .send()
                                 .await?;
@@ -272,7 +280,7 @@ pub(crate) async fn run(command: Command) -> Result<()> {
                             println!("refresh requested");
                         }
                         SessionCommand::Restart { session_id, prompt } => {
-                            let resp = client
+                            let resp = api
                                 .post(format!("{}/sessions/{}/restart", base, session_id))
                                 .json(&RestartSessionRequest { prompt })
                                 .send()
@@ -283,7 +291,7 @@ pub(crate) async fn run(command: Command) -> Result<()> {
                             println!("restart requested");
                         }
                         SessionCommand::Resume { session_id, prompt } => {
-                            let resp = client
+                            let resp = api
                                 .post(format!("{}/sessions/{}/resume", base, session_id))
                                 .json(&ResumeSessionRequest { prompt })
                                 .send()
@@ -301,7 +309,7 @@ pub(crate) async fn run(command: Command) -> Result<()> {
                                 Some((session, pane)) => (session.to_string(), pane.to_string()),
                                 None => (args.target.clone(), "terminal_0".to_string()),
                             };
-                            let resp = client
+                            let resp = api
                                 .post(format!("{}/adopt/zellij", base))
                                 .json(&serde_json::json!({
                                     "zellij_session": zellij_session,
@@ -320,7 +328,7 @@ pub(crate) async fn run(command: Command) -> Result<()> {
                             println!("{}", serde_json::to_string_pretty(&session)?);
                         }
                         SessionCommand::Discover => {
-                            let resp = client.get(format!("{}/adopt/zellij", base)).send().await?;
+                            let resp = api.get(format!("{}/adopt/zellij", base)).send().await?;
                             if !resp.status().is_success() {
                                 bail!("{}", resp.text().await.unwrap_or_default());
                             }
@@ -346,7 +354,7 @@ pub(crate) async fn run(command: Command) -> Result<()> {
                             }
                         }
                         SessionCommand::Close { session_id } => {
-                            let resp = client
+                            let resp = api
                                 .post(format!("{}/sessions/{}/close", base, session_id))
                                 .send()
                                 .await?;
@@ -356,7 +364,7 @@ pub(crate) async fn run(command: Command) -> Result<()> {
                             println!("session closed");
                         }
                         SessionCommand::Info { session_id } => {
-                            let resp = client
+                            let resp = api
                                 .get(format!("{}/sessions/{}", base, session_id))
                                 .send()
                                 .await?;
@@ -375,8 +383,9 @@ pub(crate) async fn run(command: Command) -> Result<()> {
                             &args.sender,
                             &args.text,
                         )?;
-                        let (client, base) = api_client(&paths).await?;
-                        let resp = client
+                        let api = api_client(&paths).await?;
+                        let base = api.base();
+                        let resp = api
                             .post(format!("{}/debug/simulate/lark-message", base))
                             .json(&serde_json::json!({
                                 "session_id": args.session.trim(),
