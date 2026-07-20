@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.7.1...beam-daemon-v0.7.2) - 2026-07-20
+
+### Added
+
+- *(daemon)* 本地 API token 每日轮换与 HMAC 请求签名
+
+### Fixed
+
+- *(worker)* resume 路径补齐 env wrapper，杜绝 BEAM_SESSION_ID 跨会话污染
+
+### Other
+
+- Merge pull request #45 from linuxhenhao/fix/session-env-isolation
+
 ## [0.7.1](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.7.0...beam-daemon-v0.7.1) - 2026-07-17
 
 ### Added
