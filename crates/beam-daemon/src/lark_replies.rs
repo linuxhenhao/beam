@@ -31,19 +31,26 @@ pub(crate) fn build_adopt_zellij_result_reply(result: Result<&SessionSummary, &s
     }
 }
 
-pub(crate) fn build_zellij_adopt_list_reply(items: &[ZellijAdoptCandidate]) -> String {
-    if items.is_empty() {
-        return "no zellij sessions available for adoption".to_string();
-    }
-    let mut out = String::from("Available zellij sessions:\n");
+pub(crate) fn build_zellij_adopt_post_content(items: &[ZellijAdoptCandidate]) -> String {
+    let mut paragraphs: Vec<Vec<serde_json::Value>> = vec![vec![serde_json::json!({
+        "tag": "text",
+        "text": "Available zellij sessions (copy a command block and send it to adopt):"
+    })]];
     for item in items {
-        out.push_str(&format!(
-            "  {}:{}  {}  {}\n",
-            item.zellij_session, item.zellij_pane_id, item.title, item.cwd
-        ));
+        paragraphs.push(vec![serde_json::json!({
+            "tag": "text",
+            "text": format!("{}  {}", item.title, item.cwd),
+        })]);
+        paragraphs.push(vec![serde_json::json!({
+            "tag": "code_block",
+            "language": "PlainText",
+            "text": format!("/adopt {}:{}", item.zellij_session, item.zellij_pane_id),
+        })]);
     }
-    out.push_str("\n/adopt <session>:<pane_id>");
-    out
+    serde_json::json!({
+        "zh_cn": { "title": "", "content": paragraphs },
+    })
+    .to_string()
 }
 
 pub(crate) fn build_closed_session_reply(session: &Session) -> String {
@@ -154,6 +161,45 @@ pub(crate) fn build_card_not_ready_reply() -> &'static str {
 mod tests {
     use super::*;
     use crate::tests::test_helpers::*;
+
+    #[test]
+    fn adopt_list_post_content_wraps_commands_in_code_blocks() {
+        let items = vec![
+            ZellijAdoptCandidate {
+                zellij_session: "mysession".to_string(),
+                zellij_pane_id: "terminal_0".to_string(),
+                title: "claude".to_string(),
+                cwd: "/home/user/proj".to_string(),
+                cli_id: "claude-code".to_string(),
+                cli_pid: Some(123),
+                pane_cols: None,
+                pane_rows: None,
+            },
+            ZellijAdoptCandidate {
+                zellij_session: "dev".to_string(),
+                zellij_pane_id: "terminal_3".to_string(),
+                title: "codex".to_string(),
+                cwd: "/home/user/other".to_string(),
+                cli_id: "codex".to_string(),
+                cli_pid: None,
+                pane_cols: None,
+                pane_rows: None,
+            },
+        ];
+        let content = build_zellij_adopt_post_content(&items);
+        let value: serde_json::Value = serde_json::from_str(&content).expect("valid post json");
+        let paragraphs = value
+            .pointer("/zh_cn/content")
+            .and_then(serde_json::Value::as_array)
+            .expect("post content array");
+        assert_eq!(paragraphs.len(), 1 + items.len() * 2);
+        assert_eq!(paragraphs[1][0]["tag"], "text");
+        assert_eq!(paragraphs[1][0]["text"], "claude  /home/user/proj");
+        assert_eq!(paragraphs[2][0]["tag"], "code_block");
+        assert_eq!(paragraphs[2][0]["language"], "PlainText");
+        assert_eq!(paragraphs[2][0]["text"], "/adopt mysession:terminal_0");
+        assert_eq!(paragraphs[4][0]["text"], "/adopt dev:terminal_3");
+    }
 
     #[test]
     fn lark_reply_message_includes_reply_in_thread_when_true() {

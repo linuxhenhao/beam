@@ -131,7 +131,9 @@ pub(crate) fn classify_lark_text_action(text: &str, has_existing_session: bool) 
         return LarkTextAction::Card;
     }
     if let Some(rest) = text.strip_prefix("/adopt ") {
-        let rest = rest.trim();
+        // Tolerate multi-line copies from the /adopt list reply: only the
+        // first line carries the "<session>:<pane_id>" target.
+        let rest = rest.lines().next().unwrap_or("").trim();
         if rest.is_empty() || rest == "list" {
             return LarkTextAction::AdoptList;
         }
@@ -526,6 +528,13 @@ mod tests {
         assert_eq!(
             classify_lark_text_action("/adopt mysession", false),
             LarkTextAction::AdoptZellij("mysession".to_string())
+        );
+        assert_eq!(
+            classify_lark_text_action(
+                "/adopt mysession:terminal_0\n  claude  /home/user/proj",
+                false
+            ),
+            LarkTextAction::AdoptZellij("mysession:terminal_0".to_string())
         );
         assert_eq!(
             classify_lark_text_action("/adopt", false),

@@ -619,8 +619,8 @@ pub(crate) async fn dispatch_event_outcome(
                 )
                 .await;
             } else {
-                let body = build_zellij_adopt_list_reply(&items);
-                let _ = lark_reply_message(state, bot, message_id, &body).await;
+                let post = build_zellij_adopt_post_content(&items);
+                let _ = lark_reply_post_message(state, bot, message_id, &post).await;
             }
             Ok(Json(serde_json::json!({ "ok": true })))
         }
