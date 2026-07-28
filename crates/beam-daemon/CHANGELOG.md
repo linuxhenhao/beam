@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.4](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.7.3...beam-daemon-v0.7.4) - 2026-07-28
+
+### Fixed
+
+- *(daemon)* beam send 标记当前 turn，修复飞书重复回复卡片
+
 ## [0.7.3](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.7.2...beam-daemon-v0.7.3) - 2026-07-28
 
 ### Added
