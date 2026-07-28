@@ -451,7 +451,7 @@ pub(crate) fn should_fallback_to_plain_on_withdrawn(err: &anyhow::Error) -> bool
 // state commit helper
 // ---------------------------------------------------------------------------
 
-async fn commit_delivered_final_output(
+pub(crate) async fn commit_delivered_final_output(
     state: &AppState,
     session_id: &str,
     content: &str,
@@ -475,12 +475,25 @@ async fn commit_delivered_final_output(
 // handle_final_output_request — structured send entry point
 // ---------------------------------------------------------------------------
 
+/// Snapshot the session's current turn id for an explicit send. On success the
+/// send marks that turn as answered, so the worker's final output for the same
+/// turn is skipped by turn-id dedupe regardless of content differences.
+pub(crate) async fn current_turn_id_for_explicit_send(state: &AppState, session_id: &str) -> Option<String> {
+    let sessions = state.sessions.lock().await;
+    sessions
+        .get(session_id)
+        .and_then(|session| session.current_turn_id.clone())
+}
+
 /// Core structured send handler for the daemon final-output endpoint.
 pub(crate) async fn handle_final_output_request(
     state: &AppState,
     session_id: &str,
     req: FinalOutputRequest,
 ) -> Result<()> {
+    // Captured up front (not after delivery) so a new turn starting mid-send
+    // cannot be marked as answered by a send that belongs to the prior turn.
+    let answered_turn_id = current_turn_id_for_explicit_send(state, session_id).await;
     // ---- reject unsupported voice early ----
     if req.voice {
         anyhow::bail!(
@@ -707,8 +720,11 @@ pub(crate) async fn handle_final_output_request(
         super::attention::set_session_attention(state, session_id, kind, &req.content).await?;
     }
 
-    // Update session state
-    commit_delivered_final_output(state, session_id, &req.content, None).await?;
+    // Update session state. Passing the answered turn id marks this turn as
+    // answered explicitly, so the worker's final output for the same turn is
+    // skipped by turn-id dedupe even when its content differs from this send.
+    commit_delivered_final_output(state, session_id, &req.content, answered_turn_id.as_deref())
+        .await?;
 
     // Record explicit-send timestamp so worker final-output dedupe can skip
     {

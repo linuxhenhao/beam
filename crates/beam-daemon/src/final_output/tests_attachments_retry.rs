@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use beam_core::SessionStatus;
 
 use super::*;
@@ -242,4 +244,103 @@ fn build_final_output_card_no_images_produces_no_img_elements() {
         .filter(|el| el["tag"].as_str() == Some("img"))
         .count();
     assert_eq!(img_count, 0, "no img elements when no images");
+}
+
+// ---- explicit-send turn marking tests ----
+
+#[tokio::test]
+async fn explicit_send_marks_current_turn_as_answered() {
+    let paths = temp_paths("explicit-send-turn");
+    maybe_remove_dir(&paths.root().to_path_buf());
+    std::fs::create_dir_all(paths.root()).expect("mkdir root");
+    let state = make_state(paths.clone(), HashMap::new());
+
+    let mut session = make_session("sess-explicit-turn");
+    session.status = SessionStatus::Active;
+    session.closed_at = None;
+    session.current_turn_id = Some("turn-explicit-1".to_string());
+    state
+        .sessions
+        .lock()
+        .await
+        .insert(session.session_id.clone(), session);
+
+    // What handle_final_output_request records after a successful beam send.
+    let answered_turn_id = current_turn_id_for_explicit_send(&state, "sess-explicit-turn").await;
+    assert_eq!(answered_turn_id.as_deref(), Some("turn-explicit-1"));
+    commit_delivered_final_output(
+        &state,
+        "sess-explicit-turn",
+        "explicit reply",
+        answered_turn_id.as_deref(),
+    )
+    .await
+    .expect("commit delivered final output");
+
+    let stored = {
+        let sessions = state.sessions.lock().await;
+        sessions.get("sess-explicit-turn").cloned().expect("session")
+    };
+    assert_eq!(
+        stored.last_final_output_turn_id.as_deref(),
+        Some("turn-explicit-1")
+    );
+    assert_eq!(stored.last_final_output.as_deref(), Some("explicit reply"));
+
+    let now = chrono::Utc::now();
+    // Same-turn worker final output is skipped even when its content differs.
+    assert!(should_skip_worker_final_output(
+        &stored,
+        "turn-explicit-1",
+        "different terminal text",
+        now
+    ));
+    // Output from a later turn still goes through.
+    assert!(!should_skip_worker_final_output(
+        &stored,
+        "turn-explicit-2",
+        "different terminal text",
+        now
+    ));
+
+    // Unknown session → no turn to mark.
+    assert_eq!(
+        current_turn_id_for_explicit_send(&state, "sess-missing").await,
+        None
+    );
+
+    maybe_remove_dir(&paths.root().to_path_buf());
+}
+
+#[tokio::test]
+async fn explicit_send_without_active_turn_marks_nothing() {
+    let paths = temp_paths("explicit-send-no-turn");
+    maybe_remove_dir(&paths.root().to_path_buf());
+    std::fs::create_dir_all(paths.root()).expect("mkdir root");
+    let state = make_state(paths.clone(), HashMap::new());
+
+    let mut session = make_session("sess-no-turn");
+    session.status = SessionStatus::Active;
+    session.closed_at = None;
+    session.current_turn_id = None;
+    state
+        .sessions
+        .lock()
+        .await
+        .insert(session.session_id.clone(), session);
+
+    let answered_turn_id = current_turn_id_for_explicit_send(&state, "sess-no-turn").await;
+    assert_eq!(answered_turn_id, None);
+    commit_delivered_final_output(&state, "sess-no-turn", "explicit reply", None)
+        .await
+        .expect("commit delivered final output");
+
+    let stored = {
+        let sessions = state.sessions.lock().await;
+        sessions.get("sess-no-turn").cloned().expect("session")
+    };
+    assert_eq!(stored.last_final_output_turn_id, None);
+    assert_eq!(stored.last_final_output.as_deref(), Some("explicit reply"));
+
+    maybe_remove_dir(&paths.root().to_path_buf());
 }
