@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.7.4...beam-worker-v0.8.0) - 2026-08-07
+
+### Fixed
+
+- *(worker)* 适配 &self backend 风格，修正合并后的编译问题
+- *(worker)* 等待 TUI 就绪后再发送首条输入，避免被启动中的 CLI 丢弃
+
+### Other
+
+- Merge branch 'debug-kimi-tui-init-order' into fix/worker-self-heal
+
 ## [0.7.2](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.7.1...beam-worker-v0.7.2) - 2026-07-20
 
 ### Fixed
