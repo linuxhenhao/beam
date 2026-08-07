@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.7.4...beam-daemon-v0.8.0) - 2026-08-07
+
+### Fixed
+
+- *(daemon)* worker 假死自愈、zellij 调用超时与可观测性补齐
+
 ## [0.7.4](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.7.3...beam-daemon-v0.7.4) - 2026-07-28
 
 ### Fixed
