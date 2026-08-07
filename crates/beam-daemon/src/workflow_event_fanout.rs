@@ -487,6 +487,7 @@ mod tests {
             started_at: chrono::Utc::now(),
             sessions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             workers: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            worker_health: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             attempt_resumes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             shutdown: Arc::new(tokio::sync::Mutex::new(Some(_shutdown_tx))),
             options: crate::RunOptions {

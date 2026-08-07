@@ -186,6 +186,14 @@ pub enum WorkerToDaemon {
     UserNotify {
         message: String,
     },
+    /// Periodic liveness signal from the worker (independent of the message
+    /// loop). `processing_since_ms` is `Some(start_ms)` while the message
+    /// loop is busy handling a daemon message, so the daemon can distinguish
+    /// "worker dead" (no heartbeat) from "worker stuck on a message".
+    Heartbeat {
+        #[serde(default)]
+        processing_since_ms: Option<u64>,
+    },
     TranscriptChoices {
         candidates: Vec<TranscriptChoice>,
         turn_id: String,

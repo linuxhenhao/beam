@@ -247,6 +247,7 @@ fn make_summary(id: &str, status: SessionStatus, hours_ago: i64) -> SessionSumma
         last_final_output: None,
         adopted_from: None,
         agent_attention: None,
+        worker_unresponsive: false,
     }
 }
 

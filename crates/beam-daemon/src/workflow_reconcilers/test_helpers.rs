@@ -30,6 +30,7 @@ pub(super) fn make_state(paths: &BeamPaths) -> AppState {
         started_at: chrono::Utc::now(),
         sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         workers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        worker_health: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         attempt_resumes: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         shutdown: Arc::new(tokio::sync::Mutex::new(Some(_shutdown_tx))),
         options: crate::RunOptions {

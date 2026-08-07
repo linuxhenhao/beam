@@ -237,6 +237,7 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         started_at,
         sessions: Arc::new(Mutex::new(sessions)),
         workers: Arc::new(Mutex::new(HashMap::new())),
+        worker_health: Arc::new(Mutex::new(HashMap::new())),
         attempt_resumes: Arc::new(Mutex::new(HashMap::new())),
         shutdown: Arc::new(Mutex::new(Some(shutdown_tx))),
         options,
@@ -908,10 +909,12 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         }
     });
 
+    // Worker health watchdog: flag sessions whose worker stopped heartbeating.
+    worker_lifecycle::spawn_worker_health_watchdog(state.clone());
+
     // Schedule loop: periodically check schedules and trigger due tasks.
     let schedule_paths = paths.clone();
-    let schedule_state = state.clone();
-    tokio::spawn(async move {
+    let schedule_state = state.clone();    tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             let tasks = match beam_core::list_tasks(&schedule_paths) {

@@ -1,5 +1,12 @@
 use super::*;
 
+/// Upper bound for a worker to report `Ready` after being spawned. When the
+/// terminal backend hangs during startup (e.g. a zellij server crash that
+/// leaves `zellij attach --create-background` retrying forever), the worker
+/// would otherwise never send `Ready` and the session would silently stay
+/// active without any card or error.
+pub(crate) const WORKER_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 pub(crate) async fn execute_schedule_task(
     state: &AppState,
     task_id: &str,
@@ -148,6 +155,13 @@ pub(crate) async fn spawn_worker(
             let mut sessions = state.sessions.lock().await;
             if let Some(entry) = sessions.get_mut(&session.session_id) {
                 entry.worker_pid = worker_pid;
+                // First turn of a prompt-driven session must mirror the
+                // worker's turn id, otherwise an explicit send cannot mark
+                // that turn as answered and the worker's final output is
+                // delivered a second time.
+                if let Some(turn_id) = init.prompt_turn_id.clone() {
+                    entry.current_turn_id = Some(turn_id);
+                }
             }
             sessions.clone()
         };
@@ -164,6 +178,7 @@ pub(crate) async fn spawn_worker(
 
     let session_id = session.session_id.clone();
     let session_id_for_task = session_id.clone();
+    let watchdog_state = state.clone();
     let _ = tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
@@ -636,6 +651,47 @@ pub(crate) async fn spawn_worker(
                 Ok(WorkerToDaemon::Error { message }) => {
                     warn!("worker {} error: {}", session_id_for_task, message);
                 }
+                Ok(WorkerToDaemon::Heartbeat {
+                    processing_since_ms,
+                }) => {
+                    let was_unresponsive = {
+                        let mut health = state.worker_health.lock().await;
+                        let entry =
+                            health
+                                .entry(session_id_for_task.clone())
+                                .or_insert(WorkerHealthEntry {
+                                    last_heartbeat: Instant::now(),
+                                    processing_since_ms: None,
+                                    unresponsive: false,
+                                });
+                        let was_unresponsive = entry.unresponsive;
+                        entry.last_heartbeat = Instant::now();
+                        entry.processing_since_ms = processing_since_ms;
+                        entry.unresponsive = false;
+                        was_unresponsive
+                    };
+                    if was_unresponsive {
+                        info!(
+                            "worker for session {} is responsive again",
+                            session_id_for_task
+                        );
+                        // Restore the card label to the current screen status.
+                        let status = {
+                            let sessions = state.sessions.lock().await;
+                            sessions
+                                .get(&session_id_for_task)
+                                .and_then(|s| s.last_screen_status)
+                        };
+                        if let Some(status) = status {
+                            let _ = patch_lark_streaming_card(
+                                &state,
+                                &session_id_for_task,
+                                screen_status_card_label(status),
+                            )
+                            .await;
+                        }
+                    }
+                }
                 Err(err) => {
                     warn!(
                         "failed to parse worker message for {}: {}",
@@ -644,10 +700,181 @@ pub(crate) async fn spawn_worker(
                 }
             }
         }
+
+        // Worker stdout hit EOF: the worker process exited (graceful CliExit,
+        // daemon-requested close/restart, or an unexpected kill/crash).
+        handle_worker_eof(&state, &session_id_for_task, worker_pid).await;
     });
+
+    // Watchdog: if the worker never reports Ready (e.g. the terminal backend
+    // hangs or dies during startup), surface the failure to the user instead
+    // of leaving the session silently active.
+    {
+        let state = watchdog_state;
+        let watchdog_session_id = session_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(WORKER_READY_TIMEOUT).await;
+            let session = {
+                let sessions = state.sessions.lock().await;
+                sessions.get(&watchdog_session_id).cloned()
+            };
+            let Some(session) = session else {
+                return;
+            };
+            // The Ready handler sets terminal_url; a non-active session is
+            // already handled elsewhere (e.g. CliExit).
+            if session.terminal_url.is_some() || session.status != SessionStatus::Active {
+                return;
+            }
+            warn!(
+                "worker for session {} did not report Ready within {:?}",
+                watchdog_session_id, WORKER_READY_TIMEOUT
+            );
+            notify_worker_ready_timeout(&state, &session).await;
+        });
+    }
 
     info!("spawned worker for session {}", session_id);
     Ok(())
+}
+
+/// Notify the user (via Lark) that a session's worker failed to become ready
+/// within [`WORKER_READY_TIMEOUT`]. No-op for local (non-Lark) sessions.
+async fn notify_worker_ready_timeout(state: &AppState, session: &Session) {
+    if session.lark_app_id == "local" {
+        return;
+    }
+    let Some(bot) = state.bots.get(&session.lark_app_id) else {
+        return;
+    };
+    let message = if crate::prompt::is_zh_locale(session.locale.as_deref()) {
+        format!(
+            "⚠️ session「{}」启动超时：worker 未在 {} 秒内向 daemon 报告就绪，终端后端可能启动失败（如 zellij 异常）。请尝试重新创建 session。",
+            session.title,
+            WORKER_READY_TIMEOUT.as_secs()
+        )
+    } else {
+        format!(
+            "⚠️ Session \"{}\" startup timed out: the worker did not report ready within {}s. The terminal backend may have failed to start (e.g. zellij crash). Please try creating the session again.",
+            session.title,
+            WORKER_READY_TIMEOUT.as_secs()
+        )
+    };
+    let result = match session.scope {
+        SessionScope::Thread if !session.root_message_id.is_empty() => {
+            lark_reply_message_with_opts(state, bot, &session.root_message_id, &message, true)
+                .await
+        }
+        _ => lark_send_chat_message(state, bot, &session.chat_id, &message).await,
+    };
+    if let Err(err) = result {
+        warn!(
+            "failed to notify worker-ready timeout for session {}: {}",
+            session.session_id, err
+        );
+    }
+}
+
+/// Periodic watchdog: flag sessions whose worker stopped heartbeating (hung,
+/// or dead but not yet reaped) so the state is visible on the session card
+/// and via `beam status`. Only workers that have sent at least one heartbeat
+/// are judged; older workers simply stay "unknown".
+pub(crate) fn spawn_worker_health_watchdog(state: AppState) {
+    tokio::spawn(async move {
+        const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(45);
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let stale_sessions: Vec<(String, Option<u64>)> = {
+                let workers = state.workers.lock().await;
+                let sessions = state.sessions.lock().await;
+                let mut health = state.worker_health.lock().await;
+                let now = Instant::now();
+                let mut stale = Vec::new();
+                for (session_id, entry) in health.iter_mut() {
+                    let worker_present = workers.contains_key(session_id);
+                    let session_active = sessions
+                        .get(session_id)
+                        .map(|s| s.status == SessionStatus::Active)
+                        .unwrap_or(false);
+                    if !worker_present || !session_active || entry.unresponsive {
+                        continue;
+                    }
+                    if now.duration_since(entry.last_heartbeat) > STALE_AFTER {
+                        entry.unresponsive = true;
+                        stale.push((session_id.clone(), entry.processing_since_ms));
+                    }
+                }
+                stale
+            };
+            for (session_id, processing_since_ms) in stale_sessions {
+                match processing_since_ms {
+                    Some(start_ms) => {
+                        let stuck_ms = (Utc::now().timestamp_millis().max(0) as u64)
+                            .saturating_sub(start_ms);
+                        warn!(
+                            "worker for session {} is unresponsive: no heartbeat for >{}s; message loop stuck processing for {}ms",
+                            session_id,
+                            STALE_AFTER.as_secs(),
+                            stuck_ms
+                        );
+                    }
+                    None => {
+                        warn!(
+                            "worker for session {} is unresponsive: no heartbeat for >{}s",
+                            session_id,
+                            STALE_AFTER.as_secs()
+                        );
+                    }
+                }
+                let _ = patch_lark_streaming_card(&state, &session_id, "worker 无响应").await;
+            }
+        }
+    });
+}
+
+/// Called when a worker's stdout reaches EOF (the process exited). If the
+/// workers table still holds *this* worker's handle, remove it so the next
+/// `ensure_worker_for_session` respawns (resumes) the worker instead of
+/// no-oping on a stale entry. Intentional teardowns (session already Closed
+/// via CliExit, or the handle already removed by close/restart) are no-ops.
+async fn handle_worker_eof(state: &AppState, session_id: &str, worker_pid: Option<u32>) {
+    let removed = {
+        let mut workers = state.workers.lock().await;
+        let is_current = workers.get(session_id).and_then(|h| h.child.id()) == worker_pid;
+        if is_current {
+            workers.remove(session_id)
+        } else {
+            None
+        }
+    };
+    let Some(mut handle) = removed else {
+        return;
+    };
+    let _ = handle.child.wait().await;
+    state.worker_health.lock().await.remove(session_id);
+    let session_status = {
+        let sessions = state.sessions.lock().await;
+        sessions.get(session_id).map(|s| s.status)
+    };
+    if session_status != Some(SessionStatus::Active) {
+        return;
+    }
+    // Unexpected death (e.g. the worker was killed): record it and let the
+    // next message revive the session via ensure_worker_for_session.
+    // build_init_from_session uses resume:true, so the new worker reattaches
+    // to the still-live zellij session and CLI context is preserved.
+    warn!(
+        "worker for session {} exited unexpectedly; removed from workers table (next message will respawn it)",
+        session_id
+    );
+    let snapshot = {
+        let mut sessions = state.sessions.lock().await;
+        if let Some(entry) = sessions.get_mut(session_id) {
+            entry.worker_pid = None;
+        }
+        sessions.clone()
+    };
+    let _ = persist_sessions(&state.paths, &snapshot).await;
 }
 
 pub(crate) fn build_init_from_session(
@@ -696,31 +923,37 @@ pub(crate) async fn send_worker_message(
     session_id: &str,
     msg: &DaemonToWorker,
 ) -> Result<()> {
-    let workers_guard = workers.lock().await;
-    let handle = workers_guard
-        .get(session_id)
-        .with_context(|| format!("worker not running for session {}", session_id))?;
-    let mut stdin = handle.stdin.lock().await;
-    if let Err(e) = stdin
-        .write_all(serde_json::to_string(msg)?.as_bytes())
-        .await
-    {
-        if e.kind() == std::io::ErrorKind::BrokenPipe {
-            return Ok(());
+    let line = serde_json::to_string(msg)?;
+    let write_result = {
+        let workers_guard = workers.lock().await;
+        let handle = workers_guard
+            .get(session_id)
+            .with_context(|| format!("worker not running for session {}", session_id))?;
+        let mut stdin = handle.stdin.lock().await;
+        let write = async {
+            stdin.write_all(line.as_bytes()).await?;
+            stdin.write_all(b"\n").await?;
+            stdin.flush().await?;
+            Ok::<(), std::io::Error>(())
+        };
+        write.await
+    };
+    match write_result {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {
+            // The worker process is gone but its handle lingered: drop the
+            // stale entry so the next ensure_worker_for_session respawns
+            // (resumes) the worker instead of no-oping, and surface the
+            // failure to the caller instead of silently "succeeding".
+            let removed = workers.lock().await.remove(session_id);
+            if let Some(mut handle) = removed {
+                let _ = handle.child.wait().await;
+            }
+            Err(anyhow::anyhow!(
+                "worker stdin broken pipe for session {}; stale worker removed, a retry will respawn it",
+                session_id
+            ))
         }
-        return Err(e.into());
+        Err(err) => Err(err.into()),
     }
-    if let Err(e) = stdin.write_all(b"\n").await {
-        if e.kind() == std::io::ErrorKind::BrokenPipe {
-            return Ok(());
-        }
-        return Err(e.into());
-    }
-    if let Err(e) = stdin.flush().await {
-        if e.kind() == std::io::ErrorKind::BrokenPipe {
-            return Ok(());
-        }
-        return Err(e.into());
-    }
-    Ok(())
 }

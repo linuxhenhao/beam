@@ -149,6 +149,7 @@ pub(crate) fn print_sessions(items: &[SessionSummary]) {
         let uptime_ms = now_ms - item.created_at.timestamp_millis();
         let uptime = format_duration(uptime_ms.max(0));
         let status = match item.status {
+            SessionStatus::Active if item.worker_unresponsive => "无响应",
             SessionStatus::Active => "active",
             SessionStatus::Closed => "closed",
         };

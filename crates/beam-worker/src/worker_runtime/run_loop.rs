@@ -96,7 +96,7 @@ pub async fn run(init: InitConfig) -> Result<()> {
     } else {
         None
     };
-    let (mut backend_impl, attach_context): (Box<dyn SessionBackend>, &'static str) =
+    let (backend_impl, attach_context): (Box<dyn SessionBackend>, &'static str) =
         if let Some(adopted) = init.adopted_from.as_ref() {
             if let Some(pane_id) = adopted.zellij_pane_id.clone() {
                 let session = adopted.zellij_session.clone().unwrap_or_else(|| {
@@ -140,15 +140,33 @@ pub async fn run(init: InitConfig) -> Result<()> {
         .spawn(&args.0, &args.1, spawn_opts)
         .await
         .with_context(|| format!("failed to {} session {}", attach_context, init.session_id))?;
-    let backend: Arc<Mutex<Box<dyn SessionBackend>>> = Arc::new(Mutex::new(backend_impl));
+    // Shared handle: the backend synchronizes internally per operation, so
+    // no outer Mutex is needed and a long write_input() never blocks screen
+    // capture, terminal keys, or the screenshot coordinator.
+    let backend: Arc<dyn SessionBackend> = Arc::from(backend_impl);
     let mut cli_pid_marker = None;
-    let child_pid = backend.lock().await.child_pid().await?;
+    let child_pid = backend.child_pid().await?;
     adapter.lock().await.on_spawned(child_pid);
     if let Some(pid) = child_pid {
         tokio::fs::create_dir_all(paths.cli_pid_markers_dir()).await?;
         let marker = paths.cli_pid_markers_dir().join(pid.to_string());
         tokio::fs::write(&marker, init.session_id.as_bytes()).await?;
         cli_pid_marker = Some(marker);
+    }
+    // TUI CLIs drop keystrokes typed before their input UI is up. Wait for
+    // the CLI's ready marker (kimi's welcome screen, or a generic "welcome"
+    // for TUIs without a known one) before signaling Ready, so the initial
+    // prompt and the first stdin message land on a live input field. Adopted
+    // sessions attach to an already-running CLI; there is nothing to wait for.
+    if init.adopted_from.is_none()
+        && let Some(marker) = crate::adapters::tui_ready_marker(&init.cli_id)
+    {
+        let ready = wait_for_tui_ready(backend.as_ref(), marker).await;
+        if ready {
+            info!(session = %init.session_id, adapter = %init.cli_id, marker, "CLI TUI ready marker observed");
+        } else {
+            warn!(session = %init.session_id, adapter = %init.cli_id, marker, "CLI TUI ready marker not observed within {}s; typing input anyway", TUI_READY_TIMEOUT.as_secs());
+        }
     }
     let latest_screen = Arc::new(RwLock::new(String::new()));
     let latest_raw_screen = Arc::new(RwLock::new(String::new()));
@@ -186,9 +204,8 @@ pub async fn run(init: InitConfig) -> Result<()> {
         let mut last_emitted_usage_limit: Option<CliUsageLimitState> = None;
         loop {
             let (screen, alive) = {
-                let guard = sample_backend.lock().await;
-                let screen = guard.capture_viewport().await.unwrap_or_default();
-                let alive = guard.is_alive().await.unwrap_or(false);
+                let screen = sample_backend.capture_viewport().await.unwrap_or_default();
+                let alive = sample_backend.is_alive().await.unwrap_or(false);
                 (screen, alive)
             };
 
@@ -443,13 +460,13 @@ pub async fn run(init: InitConfig) -> Result<()> {
     }
     // Subscribe task: forward backend pane-update notifications to the screenshot coordinator.
     // Also caches the full viewport ANSI chunk so the coordinator can capture
-    // without waiting for the backend Mutex held by write_input().
+    // without waiting on a slow backend call inside write_input().
     {
         let sub_backend = backend.clone();
         let sub_trigger_tx = trigger_tx.clone();
         let sub_latest_raw_screen = latest_raw_screen.clone();
         worker_joins.spawn(async move {
-            let mut rx = sub_backend.lock().await.subscribe();
+            let mut rx = sub_backend.subscribe();
             loop {
                 match rx.recv().await {
                     Ok(chunk) => {
@@ -479,11 +496,10 @@ pub async fn run(init: InitConfig) -> Result<()> {
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         *last_uploaded_hash.lock().await = None;
-        let guard = backend.lock().await;
         let submit = adapter
             .lock()
             .await
-            .write_input(guard.as_ref(), &init.prompt)
+            .write_input(backend.as_ref(), &init.prompt)
             .await?;
         if let Some(cli_session_id) = submit.cli_session_id {
             send_message(&stdout, &WorkerToDaemon::CliSessionId { cli_session_id }).await?;
@@ -495,11 +511,9 @@ pub async fn run(init: InitConfig) -> Result<()> {
     {
         let resolution = {
             let mut adapter_guard = adapter.lock().await;
-            let backend_guard = backend.lock().await;
             let resolution = adapter_guard
-                .resolve_transcript_source(backend_guard.as_ref())
+                .resolve_transcript_source(backend.as_ref())
                 .await;
-            drop(backend_guard);
             drop(adapter_guard);
             resolution
         };
@@ -562,18 +576,99 @@ pub async fn run(init: InitConfig) -> Result<()> {
         }
     }
 
-    let stdin = BufReader::new(tokio::io::stdin());
-    let mut lines = stdin.lines();
-    loop {
-        let line = match lines.next_line().await {
-            Ok(Some(line)) => line,
-            Ok(None) => break,
-            Err(_) => break,
-        };
-        if line.trim().is_empty() {
-            continue;
+    // Shared "currently processing" stamp: Some((description, start_ms))
+    // while the message loop is busy handling one daemon message. Drives
+    // both the processing watchdog (WARN past the threshold) and the
+    // heartbeat IPC, so the daemon can tell "worker dead" apart from
+    // "worker stuck on a message".
+    let processing_since: Arc<StdMutex<Option<(String, u64)>>> =
+        Arc::new(StdMutex::new(None));
+
+    // stdin reader runs on a dedicated OS thread: while the message loop is
+    // busy handling one message, subsequent daemon messages keep being
+    // drained from the pipe into this channel instead of piling up in the
+    // kernel pipe buffer.
+    let (daemon_msg_tx, mut daemon_msg_rx) = mpsc::channel::<DaemonToWorker>(32);
+    std::thread::spawn(move || {
+        use std::io::BufRead as _;
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(_) => break,
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<DaemonToWorker>(&line) {
+                Ok(msg) => {
+                    if daemon_msg_tx.blocking_send(msg).is_err() {
+                        break;
+                    }
+                }
+                Err(err) => warn!("failed to parse daemon message: {}", err),
+            }
         }
-        let msg: DaemonToWorker = serde_json::from_str(&line)?;
+    });
+
+    // Processing watchdog: WARN when one daemon message is being handled
+    // longer than the threshold (e.g. a wedged write_input), so the stuck
+    // message is directly locatable in the log.
+    const MESSAGE_PROCESSING_WARN_THRESHOLD: Duration = Duration::from_secs(120);
+    {
+        let watchdog_processing = processing_since.clone();
+        let watchdog_session_id = init.session_id.clone();
+        worker_joins.spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(15)).await;
+                let stuck = {
+                    let guard = watchdog_processing.lock().unwrap();
+                    guard.as_ref().and_then(|(desc, start_ms)| {
+                        let elapsed = now_ms().saturating_sub(*start_ms);
+                        (elapsed > MESSAGE_PROCESSING_WARN_THRESHOLD.as_millis() as u64)
+                            .then(|| (desc.clone(), elapsed))
+                    })
+                };
+                if let Some((desc, elapsed_ms)) = stuck {
+                    warn!(
+                        session = %watchdog_session_id,
+                        message = %desc,
+                        elapsed_ms,
+                        "daemon message processing exceeded {}s threshold",
+                        MESSAGE_PROCESSING_WARN_THRESHOLD.as_secs()
+                    );
+                }
+            }
+        });
+    }
+
+    // Heartbeat: independent of the message loop; lets the daemon
+    // distinguish a dead worker (no heartbeat) from a stuck one (heartbeat
+    // keeps coming with processing_since_ms set).
+    {
+        let hb_stdout = stdout.clone();
+        let hb_processing = processing_since.clone();
+        worker_joins.spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                let since = hb_processing.lock().unwrap().as_ref().map(|(_, start)| *start);
+                if send_message(
+                    &hb_stdout,
+                    &WorkerToDaemon::Heartbeat {
+                        processing_since_ms: since,
+                    },
+                )
+                .await
+                .is_err()
+                {
+                    break;
+                }
+            }
+        });
+    }
+
+    while let Some(msg) = daemon_msg_rx.recv().await {
+        *processing_since.lock().unwrap() = Some((daemon_message_desc(&msg), now_ms()));
         match msg {
             DaemonToWorker::Message { content, turn_id } => {
                 info!(session = %init.session_id, %turn_id, "Message received, sending TurnStarted to coordinator");
@@ -596,11 +691,10 @@ pub async fn run(init: InitConfig) -> Result<()> {
                 {
                     warn!("coordinator channel closed, TurnStarted not sent");
                 }
-                let guard = backend.lock().await;
                 let submit = adapter
                     .lock()
                     .await
-                    .write_input(guard.as_ref(), &content)
+                    .write_input(backend.as_ref(), &content)
                     .await?;
                 if let Some(cli_session_id) = submit.cli_session_id {
                     send_message(&stdout, &WorkerToDaemon::CliSessionId { cli_session_id }).await?;
@@ -633,22 +727,18 @@ pub async fn run(init: InitConfig) -> Result<()> {
                 {
                     warn!("coordinator channel closed, TurnStarted not sent");
                 }
-                let guard = backend.lock().await;
-                guard.raw_input(&content).await?;
+                backend.raw_input(&content).await?;
             }
             DaemonToWorker::Close => {
-                let mut guard = backend.lock().await;
-                guard.destroy_session().await?;
+                backend.destroy_session().await?;
                 break;
             }
             DaemonToWorker::Restart => {
-                let mut guard = backend.lock().await;
-                guard.destroy_session().await?;
+                backend.destroy_session().await?;
                 break;
             }
             DaemonToWorker::RefreshScreen => {
-                let guard = backend.lock().await;
-                let screen = guard.capture_viewport().await?;
+                let screen = backend.capture_viewport().await?;
                 *latest_raw_screen.write().await = screen.clone();
                 let mode = *display_mode.read().await;
                 let rendered = render_screen_for_display_mode(&screen, mode);
@@ -720,12 +810,10 @@ pub async fn run(init: InitConfig) -> Result<()> {
             }
             DaemonToWorker::TermAction { key } => {
                 let keys = term_action_keys(key);
-                let guard = backend.lock().await;
-                guard.send_special_keys(&keys).await?;
+                backend.send_special_keys(&keys).await?;
             }
             DaemonToWorker::SpecialKeys { keys } => {
-                let guard = backend.lock().await;
-                guard.send_special_keys(&keys).await?;
+                backend.send_special_keys(&keys).await?;
             }
             DaemonToWorker::TuiKeys { keys, is_final } => {
                 handle_tui_keys(&backend, &analyzer_runtime, &keys, is_final).await?;
@@ -742,19 +830,36 @@ pub async fn run(init: InitConfig) -> Result<()> {
             }
             DaemonToWorker::Init(_) => {}
         }
+        *processing_since.lock().unwrap() = None;
     }
 
     worker_joins.abort_all();
     while worker_joins.join_next().await.is_some() {}
-    {
-        let mut guard = backend.lock().await;
-        let _ = guard.kill().await;
-    }
+    let _ = backend.kill().await;
     if let Some(marker) = cli_pid_marker {
         let _ = tokio::fs::remove_file(marker).await;
     }
     info!("worker exiting");
     Ok(())
+}
+
+/// Short human-readable label for a daemon message, used by the processing
+/// watchdog and heartbeat stamp (avoids dumping full message contents).
+fn daemon_message_desc(msg: &DaemonToWorker) -> String {
+    match msg {
+        DaemonToWorker::Message { turn_id, .. } => format!("Message(turn_id={})", turn_id),
+        DaemonToWorker::RawInput { turn_id, .. } => format!("RawInput(turn_id={})", turn_id),
+        DaemonToWorker::Close => "Close".to_string(),
+        DaemonToWorker::Restart => "Restart".to_string(),
+        DaemonToWorker::SetDisplayMode { .. } => "SetDisplayMode".to_string(),
+        DaemonToWorker::TermAction { .. } => "TermAction".to_string(),
+        DaemonToWorker::SpecialKeys { .. } => "SpecialKeys".to_string(),
+        DaemonToWorker::TuiKeys { .. } => "TuiKeys".to_string(),
+        DaemonToWorker::TuiTextInput { .. } => "TuiTextInput".to_string(),
+        DaemonToWorker::RefreshScreen => "RefreshScreen".to_string(),
+        DaemonToWorker::SetTranscriptSource { .. } => "SetTranscriptSource".to_string(),
+        DaemonToWorker::Init(_) => "Init".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -772,6 +877,23 @@ mod tests {
         assert!(should_prepare_wrapper(&init));
         init.resume = true;
         assert!(should_prepare_wrapper(&init));
+    }
+
+    #[test]
+    fn daemon_message_desc_labels_variants_without_content() {
+        let msg = DaemonToWorker::Message {
+            content: "secret prompt".to_string(),
+            turn_id: "t-1".to_string(),
+        };
+        let desc = daemon_message_desc(&msg);
+        assert!(desc.contains("Message"));
+        assert!(desc.contains("t-1"));
+        assert!(!desc.contains("secret prompt"));
+        assert_eq!(daemon_message_desc(&DaemonToWorker::Close), "Close");
+        assert_eq!(
+            daemon_message_desc(&DaemonToWorker::RefreshScreen),
+            "RefreshScreen"
+        );
     }
 
     #[test]

@@ -258,6 +258,45 @@ pub(crate) async fn confirm_submit_loop_with_interval(
     Ok(false)
 }
 
+/// How often the TUI-ready gate polls the CLI viewport.
+pub(crate) const TUI_READY_POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// Upper bound for the TUI-ready gate. Matches the kimi live-test window.
+pub(crate) const TUI_READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Wait until the CLI TUI shows `marker` (case-insensitive) in its viewport.
+///
+/// TUI CLIs drop keystrokes sent before their input UI is initialized, so the
+/// first input of a freshly spawned session must be gated on the CLI's ready
+/// marker (see `CliSpec::tui_ready_marker`). Returns `true` when the marker
+/// was seen; `false` on timeout — callers proceed anyway, degrading to the
+/// un-gated behavior.
+pub(crate) async fn wait_for_tui_ready(
+    backend: &dyn SessionBackend,
+    marker: &str,
+) -> bool {
+    wait_for_tui_ready_with_timeout(backend, marker, TUI_READY_TIMEOUT).await
+}
+
+/// [`wait_for_tui_ready`] with a tunable timeout (tests).
+pub(crate) async fn wait_for_tui_ready_with_timeout(
+    backend: &dyn SessionBackend,
+    marker: &str,
+    timeout: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let marker_lc = marker.to_ascii_lowercase();
+    loop {
+        let screen = backend.capture_viewport().await.unwrap_or_default();
+        if screen.to_ascii_lowercase().contains(&marker_lc) {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(TUI_READY_POLL_INTERVAL).await;
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct JsonlDrain {
     pub lines: Vec<String>,
@@ -478,7 +517,7 @@ mod tests {
 
         #[async_trait]
         impl SessionBackend for EnterCounter {
-            async fn spawn(&mut self, _bin: &str, _args: &[String], _opts: SpawnOpts) -> Result<()> {
+            async fn spawn(&self, _bin: &str, _args: &[String], _opts: SpawnOpts) -> Result<()> {
                 unimplemented!()
             }
             async fn send_text(&self, _text: &str) -> Result<()> {
@@ -512,10 +551,10 @@ mod tests {
             async fn child_pid(&self) -> Result<Option<u32>> {
                 unimplemented!()
             }
-            async fn kill(&mut self) -> Result<()> {
+            async fn kill(&self) -> Result<()> {
                 unimplemented!()
             }
-            async fn destroy_session(&mut self) -> Result<()> {
+            async fn destroy_session(&self) -> Result<()> {
                 unimplemented!()
             }
             async fn cursor_position(&self) -> Result<Option<(u16, u16)>> {
@@ -561,6 +600,115 @@ mod tests {
             assert!(!ok);
             // 4 attempts, Enter resent after the first 3
             assert_eq!(backend.enters.load(Ordering::SeqCst), 3);
+        }
+    }
+
+    mod tui_ready_gate {
+        use super::super::{wait_for_tui_ready_with_timeout};
+        use crate::backend::{SessionBackend, SpawnOpts};
+        use anyhow::Result;
+        use async_trait::async_trait;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+        use tokio::sync::broadcast;
+
+        struct ScreenBackend {
+            screens: Vec<String>,
+            calls: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl SessionBackend for ScreenBackend {
+            async fn spawn(&self, _bin: &str, _args: &[String], _opts: SpawnOpts) -> Result<()> {
+                unimplemented!()
+            }
+            async fn send_text(&self, _text: &str) -> Result<()> {
+                unimplemented!()
+            }
+            async fn send_enter(&self) -> Result<()> {
+                unimplemented!()
+            }
+            async fn send_special_keys(&self, _keys: &[String]) -> Result<()> {
+                unimplemented!()
+            }
+            async fn paste_text(&self, _text: &str) -> Result<()> {
+                unimplemented!()
+            }
+            async fn write_raw(&self, _text: &str) -> Result<()> {
+                unimplemented!()
+            }
+            async fn raw_input(&self, _text: &str) -> Result<()> {
+                unimplemented!()
+            }
+            async fn capture_viewport(&self) -> Result<String> {
+                let i = self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(self.screens.get(i).cloned().unwrap_or_default())
+            }
+            async fn capture_current_screen(&self) -> Result<String> {
+                self.capture_viewport().await
+            }
+            async fn is_alive(&self) -> Result<bool> {
+                unimplemented!()
+            }
+            async fn child_pid(&self) -> Result<Option<u32>> {
+                unimplemented!()
+            }
+            async fn kill(&self) -> Result<()> {
+                unimplemented!()
+            }
+            async fn destroy_session(&self) -> Result<()> {
+                unimplemented!()
+            }
+            async fn cursor_position(&self) -> Result<Option<(u16, u16)>> {
+                unimplemented!()
+            }
+            fn subscribe(&self) -> broadcast::Receiver<String> {
+                unimplemented!()
+            }
+        }
+
+        #[tokio::test]
+        async fn returns_true_once_marker_appears() {
+            let backend = ScreenBackend {
+                screens: vec![
+                    "starting...".to_string(),
+                    "Welcome to Kimi Code".to_string(),
+                ],
+                calls: AtomicUsize::new(0),
+            };
+            let ok = wait_for_tui_ready_with_timeout(
+                &backend,
+                "welcome to kimi code",
+                Duration::from_secs(5),
+            )
+            .await;
+            assert!(ok);
+        }
+
+        #[tokio::test]
+        async fn marker_match_is_case_insensitive() {
+            let backend = ScreenBackend {
+                screens: vec!["WELCOME TO KIMI CODE".to_string()],
+                calls: AtomicUsize::new(0),
+            };
+            let ok = wait_for_tui_ready_with_timeout(
+                &backend,
+                "Welcome to Kimi Code",
+                Duration::from_secs(5),
+            )
+            .await;
+            assert!(ok);
+        }
+
+        #[tokio::test]
+        async fn returns_false_when_marker_never_appears() {
+            let backend = ScreenBackend {
+                screens: vec!["still booting".to_string()],
+                calls: AtomicUsize::new(0),
+            };
+            let ok =
+                wait_for_tui_ready_with_timeout(&backend, "welcome", Duration::ZERO).await;
+            assert!(!ok);
         }
     }
 }

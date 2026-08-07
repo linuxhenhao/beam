@@ -209,6 +209,10 @@ pub struct SessionSummary {
     pub adopted_from: Option<AdoptedFrom>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_attention: Option<AgentAttention>,
+    /// Daemon-side liveness verdict from the worker heartbeat watchdog:
+    /// true when the worker stopped heartbeating while the session is active.
+    #[serde(default)]
+    pub worker_unresponsive: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -289,6 +293,7 @@ impl From<&Session> for SessionSummary {
             last_final_output: value.last_final_output.clone(),
             adopted_from: value.adopted_from.clone(),
             agent_attention: value.agent_attention.clone(),
+            worker_unresponsive: false,
         }
     }
 }
