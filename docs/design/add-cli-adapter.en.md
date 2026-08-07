@@ -32,6 +32,7 @@ You must answer three questions:
 - Model: `init.model` → kimi `--model <model>`, gemini `--model <model>`.
 - Resume: when `init.resume` is set, use `init.cli_session_id` (falling back to `resume_session_id` / `session_id`); kimi maps to `--session <id>`.
 - Initial prompt: only CLIs that support "interactive mode with an initial prompt passed via argv" may set `passes_initial_prompt_via_args: true` in `CLI_SPECS` (gemini `-i`, opencode). kimi's `-p` is a one-shot non-interactive mode and does **not** qualify — its initial prompt is typed into the TUI by the worker via `write_input`.
+- TUI-ready gate: TUI CLIs drop keystrokes typed before their input UI is initialized. After spawn and before signaling `Ready`, the worker polls the viewport until the case-insensitive substring in `CLI_SPECS.tui_ready_marker` appears, then lets the first input (initial prompt / first stdin message) through. Use the exact welcome text when known (kimi `"Welcome to Kimi Code"`), the generic `"Welcome"` otherwise; `None` disables the wait (codex/traex gate themselves inside `write_input`, gemini/opencode pass the initial prompt via argv). Adopted sessions attach to an already-running CLI, so the wait is skipped.
 
 ## 2. Change checklist (3 code touch points)
 
@@ -46,6 +47,7 @@ CliSpec {
     adopt_command_patterns: &["mynewcli"],// zellij adopt substring match; empty = never auto-recognized
     supports_resume: true,                // only when the adapter implements init.resume
     passes_initial_prompt_via_args: false,// see §1.2
+    tui_ready_marker: Some("Welcome"),    // TUI ready marker (case-insensitive); None = no wait
     inject_term_xterm: false,             // only when the CLI requires xterm-256color
 },
 ```
@@ -104,6 +106,7 @@ pub mod mynewcli;
 
 - Name it `live_*` or place it under `tests/live_*.rs`, mark `#[ignore]`, and document requirements (real CLI installed and authenticated, `zellij`) plus the run command.
 - Keeping it inside the adapter file's `#[cfg(test)]` module gives access to the crate-private `ZellijBackend`: `ZellijBackend::new(name)` → `spawn` the real CLI → wait for the TUI to be ready (kimi: viewport contains "Welcome to Kimi Code") → `write_input` a prompt → poll `poll` for `final_output`.
+  - The "wait for TUI ready" marker in live tests is the same `CLI_SPECS.tui_ready_marker`: the runtime waits for it automatically before the first input (see §1.2); the live test keeps the explicit wait to prove the marker actually matches the real CLI.
 - Always clean up: `zellij delete-session -f`, the temporary working directory, and the session data the CLI created for it (for kimi also drop the matching lines from `session_index.jsonl`).
 
 ### 3.3 Full verification
