@@ -136,6 +136,16 @@ pub(crate) async fn list_sessions(
             .map(SessionSummary::from)
             .collect::<Vec<_>>()
     };
+    // Merge the heartbeat watchdog verdict (lives outside Session).
+    {
+        let health = state.worker_health.lock().await;
+        for item in items.iter_mut() {
+            item.worker_unresponsive = health
+                .get(&item.session_id)
+                .map(|entry| entry.unresponsive)
+                .unwrap_or(false);
+        }
+    }
     items.sort_by(|a, b| a.created_at.cmp(&b.created_at));
     Json(items)
 }

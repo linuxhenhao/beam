@@ -182,7 +182,7 @@ impl RecordingBackend {
 #[async_trait]
 impl SessionBackend for RecordingBackend {
     async fn spawn(
-        &mut self,
+        &self,
         _bin: &str,
         _args: &[String],
         _opts: crate::backend::SpawnOpts,
@@ -254,11 +254,11 @@ impl SessionBackend for RecordingBackend {
         Ok(None)
     }
 
-    async fn kill(&mut self) -> anyhow::Result<()> {
+    async fn kill(&self) -> anyhow::Result<()> {
         Ok(())
     }
 
-    async fn destroy_session(&mut self) -> anyhow::Result<()> {
+    async fn destroy_session(&self) -> anyhow::Result<()> {
         Ok(())
     }
 

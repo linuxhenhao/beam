@@ -53,7 +53,7 @@ pub(crate) fn shell_quote(input: &str) -> String {
 }
 
 pub(crate) async fn handle_tui_keys(
-    backend: &Arc<Mutex<Box<dyn SessionBackend>>>,
+    backend: &Arc<dyn SessionBackend>,
     analyzer_runtime: &Arc<RwLock<AnalyzerRuntime>>,
     keys: &[String],
     is_final: bool,
@@ -61,12 +61,10 @@ pub(crate) async fn handle_tui_keys(
     if keys.is_empty() {
         return Ok(());
     }
-    let guard = backend.lock().await;
     for key in keys {
-        guard.send_special_keys(std::slice::from_ref(key)).await?;
+        backend.send_special_keys(std::slice::from_ref(key)).await?;
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    drop(guard);
     if is_final {
         analyzer_runtime.write().await.prompt_active = false;
     }
@@ -74,7 +72,7 @@ pub(crate) async fn handle_tui_keys(
 }
 
 pub(crate) async fn handle_tui_text_input(
-    backend: &Arc<Mutex<Box<dyn SessionBackend>>>,
+    backend: &Arc<dyn SessionBackend>,
     adapter: &Arc<Mutex<CliAdapter>>,
     analyzer_runtime: &Arc<RwLock<AnalyzerRuntime>>,
     keys: &[String],
@@ -86,19 +84,17 @@ pub(crate) async fn handle_tui_text_input(
         keys
     };
     if !nav_keys.is_empty() {
-        let guard = backend.lock().await;
         for key in nav_keys {
-            guard.send_special_keys(std::slice::from_ref(key)).await?;
+            backend.send_special_keys(std::slice::from_ref(key)).await?;
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
     analyzer_runtime.write().await.prompt_active = false;
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let guard = backend.lock().await;
     let _ = adapter
         .lock()
         .await
-        .write_input(guard.as_ref(), text)
+        .write_input(backend.as_ref(), text)
         .await?;
     Ok(())
 }

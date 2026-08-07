@@ -49,6 +49,7 @@ pub(crate) struct AppState {
     pub(crate) started_at: chrono::DateTime<Utc>,
     pub(crate) sessions: Arc<Mutex<HashMap<String, Session>>>,
     pub(crate) workers: Arc<Mutex<HashMap<String, WorkerHandle>>>,
+    pub(crate) worker_health: Arc<Mutex<HashMap<String, WorkerHealthEntry>>>,
     pub(crate) attempt_resumes: Arc<Mutex<HashMap<String, AttemptResumeEntry>>>,
     pub(crate) shutdown: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     pub(crate) options: RunOptions,
@@ -71,6 +72,16 @@ pub(crate) struct AppState {
 pub(crate) struct WorkerHandle {
     pub(crate) child: Child,
     pub(crate) stdin: Arc<Mutex<ChildStdin>>,
+}
+
+/// Daemon-side view of a worker's liveness, fed by `WorkerToDaemon::Heartbeat`
+/// IPC messages. `last_heartbeat` drives the periodic unresponsiveness check;
+/// `processing_since_ms` distinguishes "stuck on one message" from "dead".
+#[derive(Debug, Clone)]
+pub(crate) struct WorkerHealthEntry {
+    pub(crate) last_heartbeat: Instant,
+    pub(crate) processing_since_ms: Option<u64>,
+    pub(crate) unresponsive: bool,
 }
 
 #[derive(Debug, Clone)]

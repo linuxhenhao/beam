@@ -35,20 +35,20 @@ impl ZellijObserveBackend {
         }
     }
 
-    fn send_action(&self, args: &[&str]) -> Result<()> {
-        ZellijBackend::send_zellij_action(&self.session_name, args)
+    async fn send_action(&self, args: &[&str]) -> Result<()> {
+        ZellijBackend::send_zellij_action(&self.session_name, args).await
     }
 
-    fn dump_screen(&self) -> Result<String> {
+    async fn dump_screen(&self) -> Result<String> {
         let args = ZellijBackend::dump_screen_viewport_args(&self.pane_id);
         let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        ZellijBackend::run_zellij_action(&self.session_name, &args_refs)
+        ZellijBackend::run_zellij_action(&self.session_name, &args_refs).await
     }
 }
 
 #[async_trait]
 impl SessionBackend for ZellijObserveBackend {
-    async fn spawn(&mut self, _bin: &str, _args: &[String], _opts: SpawnOpts) -> Result<()> {
+    async fn spawn(&self, _bin: &str, _args: &[String], _opts: SpawnOpts) -> Result<()> {
         if !self.subscribe_started.swap(true, Ordering::SeqCst) {
             let session = self.session_name.clone();
             let pid = self.pane_id.clone();
@@ -61,10 +61,12 @@ impl SessionBackend for ZellijObserveBackend {
 
     async fn send_text(&self, text: &str) -> Result<()> {
         self.send_action(&["write-chars", "--pane-id", self.pane_id.as_str(), text])
+            .await
     }
 
     async fn send_enter(&self) -> Result<()> {
         self.send_action(&["send-keys", "--pane-id", self.pane_id.as_str(), "Enter"])
+            .await
     }
 
     async fn send_special_keys(&self, keys: &[String]) -> Result<()> {
@@ -91,10 +93,12 @@ impl SessionBackend for ZellijObserveBackend {
 
     async fn paste_text(&self, text: &str) -> Result<()> {
         self.send_action(&["paste", "--pane-id", self.pane_id.as_str(), text])
+            .await
     }
 
     async fn write_raw(&self, text: &str) -> Result<()> {
         self.send_action(&["write-chars", "--pane-id", self.pane_id.as_str(), text])
+            .await
     }
 
     async fn raw_input(&self, text: &str) -> Result<()> {
@@ -104,7 +108,7 @@ impl SessionBackend for ZellijObserveBackend {
     }
 
     async fn capture_viewport(&self) -> Result<String> {
-        Ok(self.dump_screen()?.replace('\n', "\r\n"))
+        Ok(self.dump_screen().await?.replace('\n', "\r\n"))
     }
 
     async fn capture_current_screen(&self) -> Result<String> {
@@ -112,19 +116,19 @@ impl SessionBackend for ZellijObserveBackend {
     }
 
     async fn is_alive(&self) -> Result<bool> {
-        Ok(ZellijBackend::has_session(&self.session_name))
+        Ok(ZellijBackend::has_session(&self.session_name).await)
     }
 
     async fn child_pid(&self) -> Result<Option<u32>> {
         Ok(self.child_pid)
     }
 
-    async fn kill(&mut self) -> Result<()> {
+    async fn kill(&self) -> Result<()> {
         self.subscribe_stop.store(true, Ordering::Relaxed);
         Ok(())
     }
 
-    async fn destroy_session(&mut self) -> Result<()> {
+    async fn destroy_session(&self) -> Result<()> {
         Ok(())
     }
 
@@ -133,13 +137,17 @@ impl SessionBackend for ZellijObserveBackend {
             Some(id) => id,
             None => return Ok(None),
         };
-        let out = match std::process::Command::new("zellij")
-            .arg("--session")
+        let mut cmd = tokio::process::Command::new("zellij");
+        cmd.arg("--session")
             .arg(&self.session_name)
             .args(["action", "list-panes", "--json", "--all"])
-            .output()
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let out = match tokio::time::timeout(crate::backend::ZELLIJ_ACTION_TIMEOUT, cmd.output()).await
         {
-            Ok(out) if out.status.success() => out,
+            Ok(Ok(out)) if out.status.success() => out,
             _ => return Ok(None),
         };
         let json = String::from_utf8_lossy(&out.stdout);

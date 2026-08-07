@@ -200,7 +200,7 @@ pub(crate) async fn create_session_internal(
         locale: spec.locale.clone(),
         resume_session_id: None,
         agent_attention: None,
-        current_turn_id: None,
+        current_turn_id: prompt_turn_id.clone(),
     };
     {
         let snapshot = {
@@ -532,6 +532,7 @@ mod tests {
             started_at: Utc::now(),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             workers: Arc::new(Mutex::new(HashMap::new())),
+            worker_health: Arc::new(Mutex::new(HashMap::new())),
             attempt_resumes: Arc::new(Mutex::new(HashMap::from([(key.clone(), entry.clone())]))),
             shutdown: Arc::new(Mutex::new(None)),
             options: RunOptions {
@@ -600,6 +601,7 @@ mod tests {
             started_at: Utc::now(),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             workers: Arc::new(Mutex::new(HashMap::new())),
+            worker_health: Arc::new(Mutex::new(HashMap::new())),
             attempt_resumes: Arc::new(Mutex::new(HashMap::from([(key.clone(), entry.clone())]))),
             shutdown: Arc::new(Mutex::new(None)),
             options: RunOptions {
@@ -725,6 +727,7 @@ mod tests {
             started_at: Utc::now(),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             workers: Arc::new(Mutex::new(HashMap::new())),
+            worker_health: Arc::new(Mutex::new(HashMap::new())),
             attempt_resumes: Arc::new(Mutex::new(HashMap::new())),
             shutdown: Arc::new(Mutex::new(None)),
             options: RunOptions {
@@ -790,6 +793,7 @@ mod tests {
             started_at: Utc::now(),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             workers: Arc::new(Mutex::new(HashMap::new())),
+            worker_health: Arc::new(Mutex::new(HashMap::new())),
             attempt_resumes: Arc::new(Mutex::new(HashMap::new())),
             shutdown: Arc::new(Mutex::new(None)),
             options: RunOptions {
@@ -855,6 +859,7 @@ mod tests {
             started_at: Utc::now(),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             workers: Arc::new(Mutex::new(HashMap::new())),
+            worker_health: Arc::new(Mutex::new(HashMap::new())),
             attempt_resumes: Arc::new(Mutex::new(HashMap::new())),
             shutdown: Arc::new(Mutex::new(None)),
             options: RunOptions {
@@ -916,6 +921,25 @@ mod tests {
             session.bot_open_id.as_deref(),
             Some("ou_test_bot_789"),
             "bot_open_id should be populated from bots-info.json"
+        );
+        // The first turn of a prompt-driven session must be recorded on the
+        // daemon side too, otherwise an explicit send cannot mark it as
+        // answered and the worker's final output is delivered a second time.
+        // The worker's init carries the authoritative prompt_turn_id, so the
+        // session's current_turn_id must match it.
+        let init: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(paths.worker_init_json(&summary.session_id))
+                .expect("worker init file"),
+        )
+        .expect("parse worker init");
+        let prompt_turn_id = init
+            .get("prompt_turn_id")
+            .and_then(serde_json::Value::as_str)
+            .expect("prompt_turn_id in worker init");
+        assert_eq!(
+            session.current_turn_id.as_deref(),
+            Some(prompt_turn_id),
+            "current_turn_id should mirror the first-turn prompt turn id"
         );
 
         maybe_remove_dir(&paths.root().to_path_buf());

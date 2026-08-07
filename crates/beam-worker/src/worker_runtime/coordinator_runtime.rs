@@ -89,25 +89,20 @@ fn cached_screen_or_none(cached: &str) -> Option<&str> {
 ///
 /// 1. Reads `latest_raw_screen` (populated by the subscribe task).
 /// 2. If non-empty, returns the cached ANSI viewport snapshot immediately
-///    — **without** locking the backend.  This avoids being blocked behind
-///    the main message handler's backend Mutex held across
-///    `adapter.write_input().await`.
+///    — **without** calling the backend.  This avoids waiting on a slow
+///    backend call inside the main message handler's `write_input().await`.
 /// 3. Only when the cache is empty (subscribe hasn't delivered yet) does
-///    it fall back to `backend.lock().await.capture_viewport()`.
-///
-/// This function does NOT hold the backend lock across upload/render; it
-/// copies the screen string and drops the lock before returning.
+///    it fall back to `backend.capture_viewport()`.
 async fn capture_screen_cached(
     latest_raw_screen: &Arc<RwLock<String>>,
-    backend: &Arc<Mutex<Box<dyn SessionBackend>>>,
+    backend: &Arc<dyn SessionBackend>,
 ) -> String {
     let cached = latest_raw_screen.read().await.clone();
     if let Some(screen) = cached_screen_or_none(&cached) {
         return screen.to_string();
     }
     // Fallback: cache is empty, use backend directly.
-    let guard = backend.lock().await;
-    guard.capture_viewport().await.unwrap_or_default()
+    backend.capture_viewport().await.unwrap_or_default()
 }
 
 /// Reap the completed upload task handle deterministically.
@@ -221,7 +216,7 @@ fn spawn_upload(
 /// Uploads are spawned via [`tokio::spawn`] (tracked by a local `JoinSet`).
 /// On loop exit all in-flight uploads are aborted.
 pub(crate) async fn coordinator_loop(
-    backend: Arc<Mutex<Box<dyn SessionBackend>>>,
+    backend: Arc<dyn SessionBackend>,
     stdout: Arc<Mutex<tokio::io::Stdout>>,
     session_id: String,
     app_id: String,
@@ -359,15 +354,14 @@ pub(crate) async fn coordinator_loop(
                     }
 
                     // Grace/Debounce pending use cache-first capture to
-                    // avoid blocking on the backend Mutex held by
+                    // avoid waiting on a slow backend call inside
                     // write_input().  Refresh/SetDisplayMode/Fallback
                     // pending keep the direct backend path.
                     let screen =
                         if matches!(pending.source, PendingSource::Grace | PendingSource::Debounce) {
                             capture_screen_cached(&latest_raw_screen, &backend).await
                         } else {
-                            let guard = backend.lock().await;
-                            guard.capture_viewport().await.unwrap_or_default()
+                            backend.capture_viewport().await.unwrap_or_default()
                         };
 
                     let analyzing = analyzer_runtime.read().await.is_analyzing;
@@ -612,10 +606,7 @@ pub(crate) async fn coordinator_loop(
                                 continue;
                             }
 
-                            let screen = {
-                                let guard = backend.lock().await;
-                                guard.capture_viewport().await.unwrap_or_default()
-                            };
+                            let screen = backend.capture_viewport().await.unwrap_or_default();
                             let analyzing = analyzer_runtime.read().await.is_analyzing;
                             let base_status = if analyzing {
                                 ScreenStatus::Analyzing
@@ -669,10 +660,7 @@ pub(crate) async fn coordinator_loop(
                     }
                 }
 
-                let screen = {
-                    let guard = backend.lock().await;
-                    guard.capture_viewport().await.unwrap_or_default()
-                };
+                let screen = backend.capture_viewport().await.unwrap_or_default();
 
                 let analyzing = analyzer_runtime.read().await.is_analyzing;
                 let base_status = if analyzing { ScreenStatus::Analyzing } else { ScreenStatus::Working };

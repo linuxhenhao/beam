@@ -210,6 +210,7 @@ async fn dashboard_auth_helpers_support_header_and_cookie_tokens() {
         started_at: Utc::now(),
         sessions: Arc::new(Mutex::new(HashMap::new())),
         workers: Arc::new(Mutex::new(HashMap::new())),
+        worker_health: Arc::new(Mutex::new(HashMap::new())),
         attempt_resumes: Arc::new(Mutex::new(HashMap::new())),
         shutdown: Arc::new(Mutex::new(Some(shutdown_tx))),
         options: RunOptions {
@@ -281,6 +282,7 @@ async fn beam_schedule_host_executor_creates_task_and_returns_task_id() {
         started_at: Utc::now(),
         sessions: Arc::new(Mutex::new(HashMap::new())),
         workers: Arc::new(Mutex::new(HashMap::new())),
+        worker_health: Arc::new(Mutex::new(HashMap::new())),
         shutdown: Arc::new(Mutex::new(Some(shutdown_tx))),
         options: RunOptions {
             worker_exe: PathBuf::from("/bin/true"),

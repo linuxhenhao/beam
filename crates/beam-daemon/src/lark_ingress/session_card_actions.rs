@@ -17,6 +17,12 @@ pub(crate) async fn handle_session_card_action(
             "missing session id",
         )));
     };
+    info!(
+        "[{}] session card action: action={}, operator={}",
+        session_id,
+        action.action,
+        action.operator_open_id.as_deref().unwrap_or("unknown")
+    );
     let session_snapshot = {
         let sessions = state.sessions.lock().await;
         sessions.get(&session_id).cloned()
@@ -509,6 +515,12 @@ async fn handle_toggle_display(
             );
             match lark_update_card(state, bot, &target_message_id, &card_json).await {
                 Ok(()) => {
+                    info!(
+                        "[{}] toggle_display patch succeeded: target={}, mode={:?}",
+                        session_snapshot.session_id,
+                        target_message_id,
+                        session_snapshot.display_mode,
+                    );
                     if let Some(nonce) = stale_frozen_nonce.as_deref() {
                         if let Err(err) =
                             remove_frozen_card(&state.paths, &session_snapshot.session_id, nonce)
@@ -522,13 +534,23 @@ async fn handle_toggle_display(
                         "display updated",
                     )))
                 }
-                Err(err) => Ok(Json(build_lark_card_action_toast(
-                    "error",
-                    &format!("display update failed: {}", err),
-                ))),
+                Err(err) => {
+                    warn!(
+                        "[{}] toggle_display patch failed: target={}, error={:#}",
+                        session_snapshot.session_id, target_message_id, err
+                    );
+                    Ok(Json(build_lark_card_action_toast(
+                        "error",
+                        &format!("display update failed: {}", err),
+                    )))
+                }
             }
         }
         CardRenderTarget::CallbackRaw => {
+            info!(
+                "[{}] toggle_display callback-raw: clicked={:?}, mode={:?}",
+                session_snapshot.session_id, action.clicked_message_id, session_snapshot.display_mode,
+            );
             if let Some(nonce) = stale_frozen_nonce.as_deref() {
                 if let Err(err) =
                     remove_frozen_card(&state.paths, &session_snapshot.session_id, nonce).await

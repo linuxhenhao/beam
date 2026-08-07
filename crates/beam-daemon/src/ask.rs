@@ -425,6 +425,7 @@ mod tests {
             started_at: Utc::now(),
             sessions: Arc::new(Mutex::new(sessions)),
             workers: Arc::new(Mutex::new(HashMap::new())),
+            worker_health: Arc::new(Mutex::new(HashMap::new())),
             attempt_resumes: Arc::new(Mutex::new(HashMap::new())),
             shutdown: Arc::new(Mutex::new(Some(shutdown_tx))),
             options: crate::RunOptions {

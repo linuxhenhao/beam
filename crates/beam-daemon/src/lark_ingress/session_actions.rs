@@ -46,9 +46,22 @@ pub(crate) async fn send_input(
             turn_id,
         }
     };
-    send_worker_message(&state.workers, &session_id, &msg)
-        .await
-        .map_err(internal_error)?;
+    if let Err(err) = send_worker_message(&state.workers, &session_id, &msg).await {
+        // The worker died between ensure_worker_for_session and the send
+        // (e.g. killed; broken pipe already removed the stale handle).
+        // Respawn (resume) once and retry the same turn: the message never
+        // reached the CLI, so resending it cannot duplicate a turn.
+        warn!(
+            "[{}] send to worker failed ({}), respawning worker and retrying once",
+            session_id, err
+        );
+        ensure_worker_for_session(&state, &session_id)
+            .await
+            .map_err(internal_error)?;
+        send_worker_message(&state.workers, &session_id, &msg)
+            .await
+            .map_err(internal_error)?;
+    }
     Ok(StatusCode::ACCEPTED)
 }
 

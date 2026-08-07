@@ -200,6 +200,12 @@ pub(crate) async fn handle_lark_card_action_payload(
         .ok_or_else(|| (StatusCode::NOT_FOUND, "bot config not found".to_string()))?;
 
     let action = parse_lark_card_action(&payload)?;
+    info!(
+        app_id = %app_id,
+        action = %action.action,
+        operator = %action.operator_open_id.as_deref().unwrap_or("unknown"),
+        "lark card action received"
+    );
 
     // Permission check for operate card actions
     if card_action_requires_operate(action.action.as_str())
