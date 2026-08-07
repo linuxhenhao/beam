@@ -150,6 +150,23 @@ pub async fn run(init: InitConfig) -> Result<()> {
         tokio::fs::write(&marker, init.session_id.as_bytes()).await?;
         cli_pid_marker = Some(marker);
     }
+    // TUI CLIs drop keystrokes typed before their input UI is up. Wait for
+    // the CLI's ready marker (kimi's welcome screen, or a generic "welcome"
+    // for TUIs without a known one) before signaling Ready, so the initial
+    // prompt and the first stdin message land on a live input field. Adopted
+    // sessions attach to an already-running CLI; there is nothing to wait for.
+    if init.adopted_from.is_none()
+        && let Some(marker) = crate::adapters::tui_ready_marker(&init.cli_id)
+    {
+        let ready_backend = backend.lock().await;
+        let ready = wait_for_tui_ready(ready_backend.as_ref(), marker).await;
+        drop(ready_backend);
+        if ready {
+            info!(session = %init.session_id, adapter = %init.cli_id, marker, "CLI TUI ready marker observed");
+        } else {
+            warn!(session = %init.session_id, adapter = %init.cli_id, marker, "CLI TUI ready marker not observed within {}s; typing input anyway", TUI_READY_TIMEOUT.as_secs());
+        }
+    }
     let latest_screen = Arc::new(RwLock::new(String::new()));
     let latest_raw_screen = Arc::new(RwLock::new(String::new()));
     let display_mode = Arc::new(RwLock::new(DisplayMode::Hidden));

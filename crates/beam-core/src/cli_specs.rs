@@ -26,6 +26,12 @@ pub struct CliSpec {
     /// Whether the CLI accepts an initial prompt via spawn args while staying
     /// interactive (opencode `--prompt`, gemini `-i`).
     pub passes_initial_prompt_via_args: bool,
+    /// Case-insensitive substring the CLI's TUI renders once its input UI is
+    /// initialized (e.g. kimi's "Welcome to Kimi Code"). The worker waits for
+    /// this marker before the first `write_input` so keystrokes typed during
+    /// TUI boot are not dropped. `None` disables the gate (CLIs that accept
+    /// the initial prompt via spawn args, or adapters that gate themselves).
+    pub tui_ready_marker: Option<&'static str>,
     /// Whether the worker injects `TERM=xterm-256color` when the inherited
     /// TERM is missing/empty/`dumb` (codex/traex require it).
     pub inject_term_xterm: bool,
@@ -41,6 +47,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         adopt_command_patterns: &["claude"],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
+        tui_ready_marker: Some("Welcome"),
         inject_term_xterm: false,
     },
     CliSpec {
@@ -51,6 +58,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         adopt_command_patterns: &["codex"],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
+        tui_ready_marker: None,
         inject_term_xterm: true,
     },
     CliSpec {
@@ -61,6 +69,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         adopt_command_patterns: &["traex"],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
+        tui_ready_marker: None,
         inject_term_xterm: true,
     },
     CliSpec {
@@ -71,6 +80,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         adopt_command_patterns: &[],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
+        tui_ready_marker: Some("Welcome"),
         inject_term_xterm: false,
     },
     CliSpec {
@@ -81,6 +91,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         adopt_command_patterns: &["gemini"],
         supports_resume: false,
         passes_initial_prompt_via_args: true,
+        tui_ready_marker: None,
         inject_term_xterm: false,
     },
     CliSpec {
@@ -91,6 +102,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         adopt_command_patterns: &["opencode"],
         supports_resume: false,
         passes_initial_prompt_via_args: true,
+        tui_ready_marker: None,
         inject_term_xterm: false,
     },
     CliSpec {
@@ -101,6 +113,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         adopt_command_patterns: &["hermes"],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
+        tui_ready_marker: Some("Welcome"),
         inject_term_xterm: false,
     },
     CliSpec {
@@ -111,6 +124,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         adopt_command_patterns: &[],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
+        tui_ready_marker: Some("Welcome"),
         inject_term_xterm: false,
     },
     CliSpec {
@@ -121,6 +135,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         adopt_command_patterns: &["kimi"],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
+        tui_ready_marker: Some("Welcome to Kimi Code"),
         inject_term_xterm: false,
     },
 ];
@@ -194,6 +209,24 @@ mod tests {
             .map(|s| s.cli_id)
             .collect();
         assert_eq!(pass, vec!["gemini", "opencode"]);
+    }
+
+    #[test]
+    fn tui_ready_markers_match_expected_list() {
+        let gated: Vec<_> = CLI_SPECS
+            .iter()
+            .filter_map(|s| s.tui_ready_marker.map(|marker| (s.cli_id, marker)))
+            .collect();
+        assert_eq!(
+            gated,
+            vec![
+                ("claude-code", "Welcome"),
+                ("coco", "Welcome"),
+                ("hermes", "Welcome"),
+                ("antigravity", "Welcome"),
+                ("kimi", "Welcome to Kimi Code"),
+            ]
+        );
     }
 
     #[test]

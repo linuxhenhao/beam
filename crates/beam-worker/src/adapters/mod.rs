@@ -45,9 +45,17 @@ pub fn passes_initial_prompt_via_args(cli_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The TUI-ready marker the worker should wait for (case-insensitive) before
+/// the first `write_input`, if the CLI's TUI exposes one. `None` disables the
+/// gate for CLIs that accept the initial prompt via spawn args or that gate
+/// themselves inside `write_input` (codex/traex).
+pub fn tui_ready_marker(cli_id: &str) -> Option<&'static str> {
+    beam_core::cli_specs::cli_spec(cli_id).and_then(|spec| spec.tui_ready_marker)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::create_adapter;
+    use super::{create_adapter, tui_ready_marker};
     use crate::adapter::test_support::test_init;
 
     #[test]
@@ -67,6 +75,18 @@ mod tests {
         });
         assert_eq!(spec.bin, "traex");
         assert!(spec.args.iter().any(|arg| arg == "-y"));
+    }
+
+    #[test]
+    fn tui_ready_marker_lookup() {
+        assert_eq!(tui_ready_marker("kimi"), Some("Welcome to Kimi Code"));
+        assert_eq!(tui_ready_marker("claude-code"), Some("Welcome"));
+        assert_eq!(tui_ready_marker("coco"), Some("Welcome"));
+        assert_eq!(tui_ready_marker("hermes"), Some("Welcome"));
+        assert_eq!(tui_ready_marker("antigravity"), Some("Welcome"));
+        assert_eq!(tui_ready_marker("codex"), None);
+        assert_eq!(tui_ready_marker("gemini"), None);
+        assert_eq!(tui_ready_marker("unknown-cli"), None);
     }
 
     #[test]
