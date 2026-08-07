@@ -161,9 +161,7 @@ pub async fn run(init: InitConfig) -> Result<()> {
     if init.adopted_from.is_none()
         && let Some(marker) = crate::adapters::tui_ready_marker(&init.cli_id)
     {
-        let ready_backend = backend.lock().await;
-        let ready = wait_for_tui_ready(ready_backend.as_ref(), marker).await;
-        drop(ready_backend);
+        let ready = wait_for_tui_ready(backend.as_ref(), marker).await;
         if ready {
             info!(session = %init.session_id, adapter = %init.cli_id, marker, "CLI TUI ready marker observed");
         } else {

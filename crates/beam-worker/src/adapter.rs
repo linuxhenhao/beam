@@ -619,7 +619,7 @@ mod tests {
 
         #[async_trait]
         impl SessionBackend for ScreenBackend {
-            async fn spawn(&mut self, _bin: &str, _args: &[String], _opts: SpawnOpts) -> Result<()> {
+            async fn spawn(&self, _bin: &str, _args: &[String], _opts: SpawnOpts) -> Result<()> {
                 unimplemented!()
             }
             async fn send_text(&self, _text: &str) -> Result<()> {
@@ -653,10 +653,10 @@ mod tests {
             async fn child_pid(&self) -> Result<Option<u32>> {
                 unimplemented!()
             }
-            async fn kill(&mut self) -> Result<()> {
+            async fn kill(&self) -> Result<()> {
                 unimplemented!()
             }
-            async fn destroy_session(&mut self) -> Result<()> {
+            async fn destroy_session(&self) -> Result<()> {
                 unimplemented!()
             }
             async fn cursor_position(&self) -> Result<Option<(u16, u16)>> {
