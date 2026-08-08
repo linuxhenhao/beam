@@ -68,6 +68,7 @@ fn ws_card_action_handler_routes_toggle_display() {
             restrict_grant_commands: false,
             message_quota: None,
             quota_state: std::collections::HashMap::new(),
+            custom_triggers: Vec::new(),
         };
         let state = make_state(temp_paths("toggle-ws"), HashMap::from([(app_id.to_string(), bot)]));
         let mut session = make_session("sess-toggle-ws");
@@ -141,6 +142,7 @@ fn ws_card_action_handler_routes_ask_toggle_and_submit() {
             restrict_grant_commands: false,
             message_quota: None,
             quota_state: std::collections::HashMap::new(),
+            custom_triggers: Vec::new(),
         };
         let paths = temp_paths("ask-ws");
         let state = make_state(paths.clone(), HashMap::from([(app_id.to_string(), bot)]));

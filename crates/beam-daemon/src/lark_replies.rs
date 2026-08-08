@@ -237,6 +237,7 @@ mod tests {
                 restrict_grant_commands: false,
                 message_quota: None,
                 quota_state: std::collections::HashMap::new(),
+                custom_triggers: Vec::new(),
             };
             let state = make_state(
                 paths.clone(),
@@ -289,6 +290,7 @@ mod tests {
                 restrict_grant_commands: false,
                 message_quota: None,
                 quota_state: std::collections::HashMap::new(),
+                custom_triggers: Vec::new(),
             };
             let state = make_state(
                 paths.clone(),
@@ -369,6 +371,7 @@ mod tests {
                 restrict_grant_commands: false,
                 message_quota: None,
                 quota_state: std::collections::HashMap::new(),
+                custom_triggers: Vec::new(),
             };
             let state = make_state(
                 paths.clone(),

@@ -539,6 +539,7 @@ fn refresh_screenshot_in_hidden_mode_returns_info_toast() {
             restrict_grant_commands: false,
             message_quota: None,
             quota_state: std::collections::HashMap::new(),
+            custom_triggers: Vec::new(),
         };
         let state = make_state(
             temp_paths("refresh-hidden"),
@@ -611,6 +612,7 @@ fn toggle_display_returns_a_screenshot_card_response() {
             restrict_grant_commands: false,
             message_quota: None,
             quota_state: std::collections::HashMap::new(),
+            custom_triggers: Vec::new(),
         };
         let state = make_state(
             temp_paths("toggle-display"),

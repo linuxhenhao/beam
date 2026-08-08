@@ -236,6 +236,7 @@ fn decide_multibot_inbound_gate_requires_mention_for_foreign_bots() {
         Some("ou_peer"),
         Some("ou_self"),
         false,
+        false,
         Some("group"),
         SessionScope::Thread,
         false,
@@ -251,6 +252,7 @@ fn decide_multibot_inbound_gate_requires_mention_for_foreign_bots() {
         Some("ou_peer"),
         Some("ou_self"),
         true,
+        false,
         Some("group"),
         SessionScope::Thread,
         false,
@@ -270,6 +272,7 @@ fn decide_multibot_inbound_gate_allows_single_user_group_without_mention() {
         Some("ou_user"),
         Some("ou_self"),
         false,
+        false,
         Some("group"),
         SessionScope::Thread,
         false,
@@ -288,6 +291,7 @@ fn decide_multibot_inbound_gate_allows_single_user_group_without_mention() {
         Some("ou_user"),
         Some("ou_self"),
         false,
+        false,
         Some("group"),
         SessionScope::Thread,
         false,
@@ -304,11 +308,57 @@ fn decide_multibot_inbound_gate_allows_single_user_group_without_mention() {
 }
 
 #[test]
+fn decide_multibot_inbound_gate_allows_group_custom_trigger_without_mention() {
+    // A configured trigger lets the message through even in a crowded group
+    // where the bot was not mentioned.
+    assert!(decide_multibot_inbound_gate(
+        Some("user"),
+        Some("ou_user"),
+        Some("ou_self"),
+        false,
+        true,
+        Some("group"),
+        SessionScope::Chat,
+        false,
+        false,
+        false,
+        false,
+        false,
+        Some(GroupStats {
+            user_count: 12,
+            bot_count: 3,
+        }),
+        "日报 今天修了三个 bug",
+    ));
+    // Non-matching text still needs a mention or a tiny single-user group.
+    assert!(!decide_multibot_inbound_gate(
+        Some("user"),
+        Some("ou_user"),
+        Some("ou_self"),
+        false,
+        false,
+        Some("group"),
+        SessionScope::Chat,
+        false,
+        false,
+        false,
+        false,
+        false,
+        Some(GroupStats {
+            user_count: 12,
+            bot_count: 3,
+        }),
+        "今天天气不错",
+    ));
+}
+
+#[test]
 fn decide_multibot_inbound_gate_keeps_self_close_only() {
     assert!(decide_multibot_inbound_gate(
         Some("bot"),
         Some("ou_self"),
         Some("ou_self"),
+        false,
         false,
         Some("group"),
         SessionScope::Thread,
@@ -324,6 +374,7 @@ fn decide_multibot_inbound_gate_keeps_self_close_only() {
         Some("bot"),
         Some("ou_self"),
         Some("ou_self"),
+        false,
         false,
         Some("group"),
         SessionScope::Thread,
@@ -344,6 +395,7 @@ fn decide_multibot_inbound_gate_allows_thread_scope_foreign_bot_with_mention() {
         Some("ou_peer"),
         Some("ou_self"),
         true,
+        false,
         Some("group"),
         SessionScope::Thread,
         false,
@@ -363,6 +415,7 @@ fn decide_multibot_inbound_gate_blocks_chat_scope_foreign_bot_without_grant() {
         Some("ou_peer"),
         Some("ou_self"),
         true,
+        false,
         Some("group"),
         SessionScope::Chat,
         false,
@@ -382,6 +435,7 @@ fn decide_multibot_inbound_gate_allows_chat_scope_foreign_bot_with_chat_grant() 
         Some("ou_peer"),
         Some("ou_self"),
         true,
+        false,
         Some("group"),
         SessionScope::Chat,
         false,
@@ -401,6 +455,7 @@ fn decide_multibot_inbound_gate_allows_chat_scope_foreign_bot_if_owns_session() 
         Some("ou_peer"),
         Some("ou_self"),
         true,
+        false,
         Some("group"),
         SessionScope::Chat,
         false,
@@ -420,6 +475,7 @@ fn decide_multibot_inbound_gate_allows_chat_scope_oncall_without_grant() {
         Some("ou_peer"),
         Some("ou_self"),
         true,
+        false,
         Some("group"),
         SessionScope::Chat,
         true,

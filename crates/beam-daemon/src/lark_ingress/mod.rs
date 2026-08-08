@@ -115,6 +115,7 @@ pub(crate) async fn handle_lark_event_payload(
     let bot = ctx.bot;
     let parsed = ctx.parsed;
     let text = ctx.text;
+    let custom_trigger = ctx.custom_trigger;
     let inferred_locale = ctx.inferred_locale;
     let scope = ctx.scope;
     let anchor = ctx.anchor;
@@ -149,7 +150,7 @@ pub(crate) async fn handle_lark_event_payload(
     // --- Session dispatch ---
     let (existing, outcome) = {
         let sessions = state.sessions.lock().await;
-        decide_lark_dispatch(&sessions, &app_id, &parsed)
+        decide_lark_dispatch(&sessions, &app_id, &parsed, custom_trigger.as_ref())
     };
     info!(
         app_id = %app_id,
@@ -175,6 +176,7 @@ pub(crate) async fn handle_lark_event_payload(
         &app_id,
         &parsed,
         &text,
+        custom_trigger.as_ref(),
         &inferred_locale,
         &scope,
         &anchor,

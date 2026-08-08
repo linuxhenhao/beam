@@ -294,6 +294,7 @@ mod tests {
             restrict_grant_commands: false,
             message_quota: None,
             quota_state: std::collections::HashMap::new(),
+            custom_triggers: Vec::new(),
         };
         assert!(can_operate_bot(&bot, None));
         assert!(can_operate_bot(&bot, Some("ou_123")));
@@ -322,6 +323,7 @@ mod tests {
             restrict_grant_commands: false,
             message_quota: None,
             quota_state: std::collections::HashMap::new(),
+            custom_triggers: Vec::new(),
         };
         assert!(can_operate_bot(&bot, Some("ou_owner")));
         assert!(!can_operate_bot(&bot, Some("ou_other")));

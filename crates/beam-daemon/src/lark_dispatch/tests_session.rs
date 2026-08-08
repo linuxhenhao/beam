@@ -2,7 +2,7 @@ use super::*;
 use crate::tests::test_helpers::*;
 
 use axum::http::StatusCode;
-use beam_core::{AdoptedFrom, AgentAttention, BotConfig, SessionScope, SessionStatus};
+use beam_core::{AdoptedFrom, AgentAttention, BotConfig, CustomTrigger, SessionScope, SessionStatus};
 use chrono::Utc;
 use std::collections::HashMap;
 
@@ -249,6 +249,7 @@ fn evaluate_talk_denies_unknown_sender_with_strict_bot() {
         restrict_grant_commands: false,
         message_quota: None,
         quota_state: std::collections::HashMap::new(),
+        custom_triggers: Vec::new(),
     };
     let talk = evaluate_talk_for_bot(&bot, "chat-1", "ou_other");
     assert!(!talk.allowed);
@@ -282,29 +283,86 @@ fn evaluate_lark_preflight_handles_dedupe_empty_and_permission_gate() {
         restrict_grant_commands: false,
         message_quota: None,
         quota_state: std::collections::HashMap::new(),
+        custom_triggers: Vec::new(),
     };
     let state = make_state(
         paths.clone(),
         HashMap::from([(bot.lark_app_id.clone(), bot.clone())]),
     );
     assert_eq!(
-        evaluate_lark_preflight(&state, &bot, "hello", "chat-1", Some("ou_owner"), true),
+        evaluate_lark_preflight(&state, &bot, "hello", "chat-1", Some("ou_owner"), true, false),
         LarkPreflight::Deduped
     );
     assert_eq!(
-        evaluate_lark_preflight(&state, &bot, "", "chat-1", Some("ou_owner"), false),
+        evaluate_lark_preflight(&state, &bot, "", "chat-1", Some("ou_owner"), false, false),
         LarkPreflight::IgnoredEmptyText
     );
     assert_eq!(
-        evaluate_lark_preflight(&state, &bot, "/close", "chat-1", Some("ou_other"), false),
+        evaluate_lark_preflight(&state, &bot, "/close", "chat-1", Some("ou_other"), false, false),
         LarkPreflight::Denied {
             reply: "permission denied"
         }
     );
     assert_eq!(
-        evaluate_lark_preflight(&state, &bot, "hello", "chat-1", Some("ou_other"), false),
+        evaluate_lark_preflight(&state, &bot, "hello", "chat-1", Some("ou_other"), false, false),
         LarkPreflight::Denied {
             reply: "permission denied: you are not authorized to talk to this bot"
+        }
+    );
+    maybe_remove_dir(&paths.root().to_path_buf());
+}
+
+#[test]
+fn evaluate_lark_preflight_allows_slash_custom_trigger_for_grant_user() {
+    let paths = temp_paths("preflight-trigger");
+    maybe_remove_dir(&paths.root().to_path_buf());
+    let bot = BotConfig {
+        lark_app_id: "app-1".to_string(),
+        lark_app_secret: "secret".to_string(),
+        cli_id: "codex".to_string(),
+        global_grants: vec!["ou_grant_user".to_string()],
+        restrict_grant_commands: true,
+        custom_triggers: vec![CustomTrigger {
+            trigger: "/日报".to_string(),
+            prompt: None,
+            skip_dir_select: false,
+            working_dir: None,
+            ack_message: None,
+        }],
+        ..make_bot("app-1")
+    };
+    let state = make_state(
+        paths.clone(),
+        HashMap::from([(bot.lark_app_id.clone(), bot.clone())]),
+    );
+
+    // A configured slash trigger is not treated as a restricted slash
+    // command for grant-authorized users.
+    assert_eq!(
+        evaluate_lark_preflight(
+            &state,
+            &bot,
+            "/日报",
+            "chat-1",
+            Some("ou_grant_user"),
+            false,
+            true
+        ),
+        LarkPreflight::Continue
+    );
+    // Unconfigured slash commands stay restricted for the same user.
+    assert_eq!(
+        evaluate_lark_preflight(
+            &state,
+            &bot,
+            "/foo",
+            "chat-1",
+            Some("ou_grant_user"),
+            false,
+            false
+        ),
+        LarkPreflight::Denied {
+            reply: "slash commands are restricted for grant-authorized users"
         }
     );
     maybe_remove_dir(&paths.root().to_path_buf());

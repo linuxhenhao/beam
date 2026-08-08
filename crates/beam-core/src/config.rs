@@ -103,6 +103,11 @@ pub struct BotConfig {
     pub message_quota: Option<MessageQuotaConfig>,
     #[serde(rename = "quotaState", default)]
     pub quota_state: std::collections::HashMap<String, QuotaEntry>,
+    /// Group-chat keywords that activate the bot without an @mention.
+    /// A matching trigger can also supply the initial prompt for the
+    /// session it creates.
+    #[serde(rename = "customTriggers", default)]
+    pub custom_triggers: Vec<CustomTrigger>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -111,6 +116,33 @@ pub struct OncallChatBinding {
     pub chat_id: String,
     #[serde(rename = "workingDir", default)]
     pub working_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CustomTrigger {
+    /// Keyword that activates the bot. Matched at the start of a group
+    /// message when it is followed by a word boundary (whitespace,
+    /// punctuation, or end of text), so a short keyword does not match
+    /// inside longer words.
+    #[serde(rename = "trigger")]
+    pub trigger: String,
+    /// Initial prompt used when this trigger creates a new session.
+    /// Trailing user text after the keyword is appended after the prompt.
+    #[serde(rename = "prompt", default)]
+    pub prompt: Option<String>,
+    /// When true, a session created by this trigger skips the directory
+    /// selection card and uses `workingDir` (or the bot's default).
+    #[serde(rename = "skipDirSelect", default)]
+    pub skip_dir_select: bool,
+    /// Working directory used when this trigger creates a session directly.
+    /// Takes precedence over the bot's `workingDir`.
+    #[serde(rename = "workingDir", default)]
+    pub working_dir: Option<String>,
+    /// Message replied immediately (as a reply to the triggering message)
+    /// when this trigger creates a session, so users know the task was
+    /// accepted before the longer-running work produces output.
+    #[serde(rename = "ackMessage", default)]
+    pub ack_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

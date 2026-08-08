@@ -385,6 +385,7 @@ async fn inbound_quota_consumes_and_exhausts() {
             "chat:chat-1:ou_user".to_string(),
             beam_core::QuotaEntry { limit: 2, used: 1 },
         )]),
+        custom_triggers: Vec::new(),
     };
     let app_id = bot.lark_app_id.clone();
     std::fs::write(

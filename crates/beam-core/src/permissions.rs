@@ -180,6 +180,7 @@ mod tests {
             restrict_grant_commands: false,
             message_quota: None,
             quota_state: HashMap::new(),
+            custom_triggers: Vec::new(),
         }
     }
 

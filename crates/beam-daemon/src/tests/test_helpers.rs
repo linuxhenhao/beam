@@ -355,6 +355,7 @@ pub(crate) fn make_bot(app_id: &str) -> BotConfig {
         restrict_grant_commands: false,
         message_quota: None,
         quota_state: std::collections::HashMap::new(),
+        custom_triggers: Vec::new(),
     }
 }
 

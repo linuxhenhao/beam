@@ -95,13 +95,22 @@ pub(crate) fn build_session_create_spec_from_pending(
     }
 }
 
-fn resolve_direct_create_working_dir(bot: &BotConfig, daemon_working_dirs: &[String]) -> String {
-    dir_select::determine_root_working_dir(bot.working_dir.as_deref(), daemon_working_dirs)
+fn resolve_direct_create_working_dir(
+    bot: &BotConfig,
+    daemon_working_dirs: &[String],
+    working_dir_override: Option<&str>,
+) -> String {
+    working_dir_override
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            dir_select::determine_root_working_dir(bot.working_dir.as_deref(), daemon_working_dirs)
+        })
 }
 
 pub(crate) fn build_direct_create_session_spec_from_bot(
     bot: &BotConfig,
     daemon_working_dirs: &[String],
+    working_dir_override: Option<String>,
     title: String,
     chat_id: String,
     chat_type: Option<String>,
@@ -115,7 +124,11 @@ pub(crate) fn build_direct_create_session_spec_from_bot(
     locale: Option<String>,
     adopted_from: Option<AdoptedFrom>,
 ) -> SessionCreateSpec {
-    let working_dir = resolve_direct_create_working_dir(bot, daemon_working_dirs);
+    let working_dir = resolve_direct_create_working_dir(
+        bot,
+        daemon_working_dirs,
+        working_dir_override.as_deref(),
+    );
     SessionCreateSpec {
         title,
         chat_id,
@@ -312,6 +325,7 @@ mod tests {
         let spec = build_direct_create_session_spec_from_bot(
             &bot,
             &daemon_working_dirs,
+            None,
             "title".to_string(),
             "chat".to_string(),
             Some("group".to_string()),
@@ -345,6 +359,7 @@ mod tests {
         let spec = build_direct_create_session_spec_from_bot(
             &bot,
             &daemon_working_dirs,
+            None,
             "title".to_string(),
             "chat".to_string(),
             Some("group".to_string()),

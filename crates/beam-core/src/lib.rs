@@ -12,6 +12,7 @@ pub mod persist;
 pub mod schedule_parser;
 pub mod schedule_store;
 pub mod session;
+pub mod triggers;
 pub mod workflow;
 pub mod workflow_actions;
 pub mod workflow_binding;
@@ -43,8 +44,8 @@ pub use api::{
 pub use ask::{AskOption, AskQuestion, AskRequest, AskResult, legacy_selected};
 pub use cli_specs::{CLI_SPECS, CliSpec, cli_spec};
 pub use config::{
-    BotConfig, Config, DaemonConfig, LarkConfig, MessageQuotaConfig, OncallChatBinding, QuotaEntry,
-    ScreenAnalyzerConfig, WebConfig,
+    BotConfig, Config, CustomTrigger, DaemonConfig, LarkConfig, MessageQuotaConfig,
+    OncallChatBinding, QuotaEntry, ScreenAnalyzerConfig, WebConfig,
 };
 pub use ipc::{
     CliUsageLimitKind, CliUsageLimitState, DaemonToWorker, DisplayMode, FinalOutputKind,
@@ -61,6 +62,7 @@ pub use schedule_store::{
     ScheduleRepeat, ScheduleStoreError, ScheduleTaskUpdate, ScheduledTask, append_output_log,
     create_task, get_task, list_tasks, mark_run, remove_task, update_task,
 };
+pub use triggers::{custom_trigger_rest, resolve_custom_trigger, resolve_trigger_message};
 pub use session::{
     AdoptedFrom, AgentAttention, ChatMode, PendingResponseCardState, Session, SessionScope,
     SessionStatus,

@@ -4,8 +4,9 @@ use axum::http::StatusCode;
 use beam_core::{Session, SessionScope, SessionStatus};
 
 use crate::{
-    LarkEventOutcome, LarkTextAction, ParsedLarkCardAction, ParsedLarkInboundMessage,
-    build_adopt_already_attached_reply, classify_lark_text_action, session_anchor_matches,
+    CustomTrigger, LarkEventOutcome, LarkTextAction, ParsedLarkCardAction,
+    ParsedLarkInboundMessage, build_adopt_already_attached_reply, classify_lark_text_action,
+    session_anchor_matches,
 };
 
 pub(crate) fn resolve_lark_card_action_session_id(
@@ -107,9 +108,20 @@ pub(crate) fn decide_lark_dispatch(
     sessions: &HashMap<String, Session>,
     lark_app_id: &str,
     parsed: &ParsedLarkInboundMessage,
+    custom_trigger: Option<&CustomTrigger>,
 ) -> (Option<Session>, LarkEventOutcome) {
     let existing = resolve_existing_lark_session(sessions, lark_app_id, parsed);
-    let action = classify_lark_text_action(&parsed.text, existing.is_some());
+    let mut action = classify_lark_text_action(&parsed.text, existing.is_some());
+    if custom_trigger.is_some()
+        && existing.is_none()
+        && matches!(action, LarkTextAction::PassthroughInput(_))
+    {
+        // A configured trigger that starts with "/" would otherwise be
+        // routed as a passthrough command; on first activation treat it
+        // as session creation. With an existing session the message keeps
+        // its normal slash-command behavior.
+        action = LarkTextAction::CreateSession;
+    }
     let outcome = decide_lark_event_outcome(action, existing.as_ref());
     (existing, outcome)
 }

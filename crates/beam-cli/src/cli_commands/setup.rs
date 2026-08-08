@@ -229,6 +229,7 @@ pub(crate) async fn prompt_setup_bot() -> Result<BotConfig> {
         restrict_grant_commands: false,
         message_quota: None,
         quota_state: std::collections::HashMap::new(),
+        custom_triggers: Vec::new(),
     })
 }
 

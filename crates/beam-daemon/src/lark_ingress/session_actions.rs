@@ -480,6 +480,7 @@ pub(crate) async fn dispatch_event_outcome(
     app_id: &str,
     parsed: &ParsedLarkInboundMessage,
     text: &str,
+    custom_trigger: Option<&CustomTrigger>,
     inferred_locale: &str,
     scope: &SessionScope,
     anchor: &str,
@@ -750,6 +751,21 @@ pub(crate) async fn dispatch_event_outcome(
             Ok(Json(serde_json::json!({ "ok": true })))
         }
         LarkEventOutcome::CreateSession => {
+            let (effective_text, title) = match custom_trigger {
+                Some(trigger) => (
+                    resolve_trigger_message(text, trigger),
+                    trigger.trigger.chars().take(32).collect::<String>(),
+                ),
+                None => (text.to_string(), text.chars().take(32).collect::<String>()),
+            };
+            // Acknowledge the trigger immediately so users know the task was
+            // accepted before the long-running work produces output.
+            if let Some(ack) = custom_trigger
+                .and_then(|trigger| trigger.ack_message.as_deref())
+                .filter(|ack| !ack.is_empty())
+            {
+                let _ = lark_reply_message(state, bot, message_id, ack).await;
+            }
             let root_working_dir = dir_select::determine_root_working_dir(
                 bot.working_dir.as_deref(),
                 &state.config.daemon.working_dirs,
@@ -758,19 +774,22 @@ pub(crate) async fn dispatch_event_outcome(
                 .root_id
                 .clone()
                 .unwrap_or_else(|| message_id.to_string());
-            let title = text.chars().take(32).collect::<String>();
             let quota_key = talk
                 .and_then(|t| t.quota_key.as_deref())
                 .map(|s| s.to_string());
 
-            if bot.skip_working_dir_prompt {
+            // A trigger can opt out of the directory selection card and pin
+            // its own working dir; otherwise the bot-level setting applies.
+            let skip_dir_select = bot.skip_working_dir_prompt
+                || custom_trigger.map_or(false, |trigger| trigger.skip_dir_select);
+            if skip_dir_select {
                 let mentions = parsed.mentions.clone();
                 let prompt_raw = prompt::build_quote_hint(
                     parsed.parent_id.as_deref(),
                     message_id,
                     *scope,
                     &root_message_id,
-                ) + text;
+                ) + &effective_text;
                 let prompt = if bot.cli_id == "opencode" {
                     let (bot_name, bot_open_id) = load_bot_identity(&state.paths, &bot.lark_app_id);
                     let observed_bots =
@@ -815,6 +834,7 @@ pub(crate) async fn dispatch_event_outcome(
                     build_direct_create_session_spec_from_bot(
                         bot,
                         &state.config.daemon.working_dirs,
+                        custom_trigger.and_then(|trigger| trigger.working_dir.clone()),
                         title.clone(),
                         chat_id.to_string(),
                         parsed.chat_type.clone(),
@@ -869,7 +889,7 @@ pub(crate) async fn dispatch_event_outcome(
                     break;
                 }
             }
-            let kwds = dir_select::tokenize_keywords(text);
+            let kwds = dir_select::tokenize_keywords(&effective_text);
             if !kwds.is_empty() && recommended.len() < 8 {
                 let kw_refs: Vec<&str> = kwds.iter().map(|s| s.as_str()).collect();
                 let keyword_matched = dir_select::match_dirs(&candidate_dirs, &kw_refs);
@@ -895,7 +915,7 @@ pub(crate) async fn dispatch_event_outcome(
                 thread_id: parsed.thread_id.clone(),
                 root_id: parsed.root_id.clone(),
                 title: title.clone(),
-                text: text.to_string(),
+                text: effective_text,
                 sender_open_id: sender_open_id.map(|s| s.to_string()),
                 sender_type: parsed.sender_type.clone(),
                 locale: Some(inferred_locale.to_string()),

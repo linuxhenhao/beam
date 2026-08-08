@@ -117,14 +117,15 @@ use base64::Engine;
 use beam_core::{
     AdoptedFrom, AgentAttention, ApiHealth, AttemptResumeRequest, AttentionRequest, BeamPaths,
     BotConfig, BotSummary, ChatMode, CliUsageLimitState, ColdWorkflowRun, Config,
-    CreateSessionRequest, DaemonOverview, DaemonRuntimeState, DaemonToWorker, DisplayMode,
-    EventDraft, EventLog, EventWindowOpts, FinalOutputKind, FinalOutputRequest, InitConfig,
-    PendingResponseCardState, RestartSessionRequest, ResumeSessionRequest, RunChatBinding,
-    RunStatus, ScheduleChatType, ScreenStatus, Session, SessionGroup, SessionInputRequest,
-    SessionLocateInfo, SessionScope, SessionStatus, SessionSummary, TalkEvaluation, TermActionKey,
-    TranscriptChoice, TuiPromptOption, WaitResolution, WorkerToDaemon, WorkflowActor,
-    WorkflowOutputRef, can_operate, evaluate_talk, parse_workflow_definition, read_event_window,
-    read_run_events_pure, read_run_snapshot, scan_cold_workflow_runs,
+    CreateSessionRequest, CustomTrigger, DaemonOverview, DaemonRuntimeState, DaemonToWorker,
+    DisplayMode, EventDraft, EventLog, EventWindowOpts, FinalOutputKind, FinalOutputRequest,
+    InitConfig, PendingResponseCardState, RestartSessionRequest, ResumeSessionRequest,
+    RunChatBinding, RunStatus, ScheduleChatType, ScreenStatus, Session, SessionGroup,
+    SessionInputRequest, SessionLocateInfo, SessionScope, SessionStatus, SessionSummary,
+    TalkEvaluation, TermActionKey, TranscriptChoice, TuiPromptOption, WaitResolution,
+    WorkerToDaemon, WorkflowActor, WorkflowOutputRef, can_operate, evaluate_talk,
+    parse_workflow_definition, read_event_window, read_run_events_pure, read_run_snapshot,
+    resolve_custom_trigger, resolve_trigger_message, scan_cold_workflow_runs,
 };
 use chrono::Utc;
 use connector_store::{

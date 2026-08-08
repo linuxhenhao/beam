@@ -417,6 +417,7 @@ mod tests {
             restrict_grant_commands: false,
             message_quota: None,
             quota_state: HashMap::new(),
+            custom_triggers: Vec::new(),
         };
 
         let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel();

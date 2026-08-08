@@ -332,6 +332,7 @@ pub(crate) fn decide_multibot_inbound_gate(
     sender_open_id: Option<&str>,
     self_bot_open_id: Option<&str>,
     mentioned_self_bot: bool,
+    custom_trigger_hit: bool,
     chat_type: Option<&str>,
     scope: SessionScope,
     is_oncall_chat: bool,
@@ -361,7 +362,7 @@ pub(crate) fn decide_multibot_inbound_gate(
     }
 
     if chat_type == Some("group") {
-        if mentioned_self_bot {
+        if mentioned_self_bot || custom_trigger_hit {
             return true;
         }
         let Some(stats) = group_stats else {
