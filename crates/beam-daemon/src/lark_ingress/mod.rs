@@ -150,7 +150,13 @@ pub(crate) async fn handle_lark_event_payload(
     // --- Session dispatch ---
     let (existing, outcome) = {
         let sessions = state.sessions.lock().await;
-        decide_lark_dispatch(&sessions, &app_id, &parsed, custom_trigger.as_ref())
+        decide_lark_dispatch(
+            &sessions,
+            &app_id,
+            &parsed,
+            custom_trigger.as_ref(),
+            ctx.trigger_activation,
+        )
     };
     info!(
         app_id = %app_id,
@@ -177,6 +183,7 @@ pub(crate) async fn handle_lark_event_payload(
         &parsed,
         &text,
         custom_trigger.as_ref(),
+        ctx.trigger_activation,
         inferred_locale,
         &scope,
         &anchor,

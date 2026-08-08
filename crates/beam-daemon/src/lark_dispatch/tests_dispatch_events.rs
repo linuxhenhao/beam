@@ -464,3 +464,160 @@ fn handle_lark_event_trigger_sends_ack_reply() {
         maybe_remove_dir(&paths.root().to_path_buf());
     });
 }
+
+#[test]
+fn handle_lark_event_trigger_inactive_when_chat_owns_session() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let _env_lock = lark_base_url_env_lock().lock().expect("lark env lock");
+
+        let reply_requests: std::sync::Arc<tokio::sync::Mutex<Vec<Value>>> =
+            std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let reply_state = reply_requests.clone();
+        let app = Router::new()
+            .route(
+                "/auth/v3/tenant_access_token/internal",
+                post(|| async {
+                    Json(serde_json::json!({
+                        "code": 0,
+                        "tenant_access_token": "mock-token",
+                        "expire": 7200,
+                    }))
+                }),
+            )
+            .route(
+                "/im/v1/chats/{chat_id}",
+                get(|AxumPath(_chat_id): AxumPath<String>| async {
+                    Json(serde_json::json!({
+                        "code": 0,
+                        "data": {
+                            "chat_mode": "topic",
+                            "group_message_type": "thread",
+                            "user_count": 1,
+                            "bot_count": 0,
+                        }
+                    }))
+                }),
+            )
+            .route(
+                "/im/v1/messages/{message_id}/reply",
+                post(
+                    move |AxumPath(_message_id): AxumPath<String>, Json(body): Json<Value>| {
+                        let reply_state = reply_state.clone();
+                        async move {
+                            reply_state.lock().await.push(body);
+                            Json(serde_json::json!({
+                                "code": 0,
+                                "data": { "message_id": "om_reply" },
+                            }))
+                        }
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let _env_guard = LarkBaseUrlEnvGuard::set(&format!("http://{}", addr));
+
+        let paths = temp_paths("trigger-inactive");
+        maybe_remove_dir(&paths.root().to_path_buf());
+
+        let app_id = "app-trigger-inactive";
+        let bot = BotConfig {
+            name: None,
+            lark_app_id: app_id.to_string(),
+            lark_app_secret: "secret".to_string(),
+            cli_id: "codex".to_string(),
+            cli_bin: None,
+            cli_args: Vec::new(),
+            skip_working_dir_prompt: true,
+            model: None,
+            working_dir: Some("/bot/default".to_string()),
+            lark_encrypt_key: None,
+            lark_verification_token: None,
+            allowed_users: vec!["ou_user".to_string()],
+            private_card: false,
+            allowed_chat_groups: Vec::new(),
+            chat_grants: std::collections::HashMap::new(),
+            global_grants: Vec::new(),
+            oncall_chats: Vec::new(),
+            restrict_grant_commands: false,
+            message_quota: None,
+            quota_state: std::collections::HashMap::new(),
+            custom_triggers: vec![CustomTrigger {
+                trigger: "日报".to_string(),
+                prompt: Some("TRIGGER_PROMPT_MARKER".to_string()),
+                skip_dir_select: true,
+                working_dir: Some("/trigger/dir".to_string()),
+                ack_message: Some("ACK_MARKER".to_string()),
+            }],
+        };
+        let state = make_state(paths.clone(), HashMap::from([(app_id.to_string(), bot)]));
+
+        // The chat already owns an active Chat-scope session, so the trigger
+        // keyword must not get its special treatment (prompt, ack, pinned
+        // working dir) even in a brand-new topic.
+        let mut seeded = make_session("seeded-chat-session");
+        seeded.status = SessionStatus::Active;
+        seeded.closed_at = None;
+        seeded.scope = SessionScope::Chat;
+        seeded.chat_id = "chat-trigger-inactive".to_string();
+        seeded.lark_app_id = app_id.to_string();
+        seeded.root_message_id = "seed-root".to_string();
+        state
+            .sessions
+            .lock()
+            .await
+            .insert(seeded.session_id.clone(), seeded);
+
+        let payload = serde_json::json!({
+            "header": { "event_type": "im.message.receive_v1", "event_id": "evt-trigger-inactive" },
+            "event": {
+                "sender": { "sender_id": { "open_id": "ou_user" }, "sender_type": "user" },
+                "message": {
+                    "message_id": "msg-trigger-inactive",
+                    "chat_id": "chat-trigger-inactive",
+                    "chat_type": "group",
+                    "content": "{\"text\":\"日报 今天修了三个 bug\"}",
+                    "mentions": []
+                }
+            }
+        });
+
+        let result =
+            handle_lark_event_payload(state.clone(), app_id.to_string(), payload, None).await;
+        assert!(result.is_ok());
+
+        // No ack reply: the trigger is not activating.
+        let requests = reply_requests.lock().await;
+        assert!(
+            requests.is_empty(),
+            "trigger must not ack when the chat already owns a session: {:?}",
+            *requests
+        );
+        drop(requests);
+
+        // The keyword still follows the normal group rules (new topic creates
+        // a session), but without trigger special-casing: the bot's working
+        // dir is used instead of the trigger's pinned dir, and the title is
+        // the raw message rather than the trigger keyword.
+        let sessions = state.sessions.lock().await;
+        let created = sessions
+            .values()
+            .find(|s| s.session_id != "seeded-chat-session")
+            .expect("a session should be created for the new topic");
+        assert_eq!(created.scope, SessionScope::Thread);
+        assert_eq!(created.working_dir.as_deref(), Some("/bot/default"));
+        assert_eq!(created.title, "日报 今天修了三个 bug");
+        assert_eq!(created.chat_id, "chat-trigger-inactive");
+
+        maybe_remove_dir(&paths.root().to_path_buf());
+    });
+}
