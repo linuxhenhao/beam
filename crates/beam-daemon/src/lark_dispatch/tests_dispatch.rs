@@ -131,9 +131,10 @@ fn decide_lark_dispatch_slash_trigger_keeps_passthrough_with_existing_session() 
 }
 
 #[test]
-fn decide_lark_dispatch_slash_trigger_ignored_in_new_topic_when_chat_session_active() {
-    // The chat already owns an active Chat-scope session; the trigger keyword
-    // must not activate a second session in a new topic.
+fn decide_lark_dispatch_slash_trigger_activates_in_new_topic_when_chat_session_elsewhere() {
+    // The chat owns an active Chat-scope session elsewhere, but the new topic
+    // is its own Thread anchor with no session: per-anchor activation still
+    // fires the trigger.
     let mut chat_session = make_session("chat-session");
     chat_session.status = SessionStatus::Active;
     chat_session.closed_at = None;
@@ -165,18 +166,12 @@ fn decide_lark_dispatch_slash_trigger_ignored_in_new_topic_when_chat_session_act
         ack_message: None,
     };
 
-    // trigger_activation is false because the chat already owns a session, so
-    // the keyword keeps its normal slash-command behavior instead of creating
-    // a session.
+    // trigger_activation is true because the message's own anchor (the new
+    // topic) has no active session, even though the chat owns one elsewhere.
     let (existing, outcome) =
-        decide_lark_dispatch(&sessions, "app-1", &parsed, Some(&trigger), false);
+        decide_lark_dispatch(&sessions, "app-1", &parsed, Some(&trigger), true);
     assert!(existing.is_none());
-    assert_eq!(
-        outcome,
-        LarkEventOutcome::ReplyOnly {
-            reply: "this command requires an active CLI session".to_string()
-        }
-    );
+    assert_eq!(outcome, LarkEventOutcome::CreateSession);
 }
 
 #[test]

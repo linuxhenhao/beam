@@ -90,7 +90,7 @@ pub(crate) fn decide_lark_event_outcome(
     }
 }
 
-fn resolve_existing_lark_session(
+pub(crate) fn resolve_existing_lark_session(
     sessions: &HashMap<String, Session>,
     lark_app_id: &str,
     parsed: &ParsedLarkInboundMessage,
@@ -118,11 +118,12 @@ pub(crate) fn decide_lark_dispatch(
         && existing.is_none()
         && matches!(action, LarkTextAction::PassthroughInput(_))
     {
-        // A configured trigger only activates when no active session exists
-        // anywhere in the chat. On first activation a "/" trigger would
+        // A configured trigger only activates when the message's own anchor
+        // has no active session (a regular group is one Chat anchor; each
+        // topic is its own Thread anchor). On activation a "/" trigger would
         // otherwise be routed as a passthrough command; treat it as session
-        // creation instead. With an existing session (or a matching trigger
-        // that is not activating) the message keeps its normal behavior.
+        // creation instead. Inside an existing session (or when the trigger
+        // is not activating) the message keeps its normal behavior.
         action = LarkTextAction::CreateSession;
     }
     let outcome = decide_lark_event_outcome(action, existing.as_ref());
