@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.8.0...beam-worker-v0.9.0) - 2026-08-08
+
+### Other
+
+- Merge pull request #53 from linuxhenhao/feat/custom-triggers
+- 全仓清理 clippy 警告至清零
+- 全仓 rustfmt 格式化，消除历史格式遗留
+
 ## [0.8.0](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.7.4...beam-worker-v0.8.0) - 2026-08-07
 
 ### Fixed

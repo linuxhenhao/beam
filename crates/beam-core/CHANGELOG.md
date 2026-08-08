@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/linuxhenhao/beam/compare/beam-core-v0.8.0...beam-core-v0.9.0) - 2026-08-08
+
+### Added
+
+- group-chat custom triggers with per-trigger prompt, dir and ack
+
+### Other
+
+- Merge pull request #53 from linuxhenhao/feat/custom-triggers
+- 全仓清理 clippy 警告至清零
+- 全仓 rustfmt 格式化，消除历史格式遗留
+- 修复 custom-triggers 分支引入的 rustfmt 格式问题
+
 ## [0.8.0](https://github.com/linuxhenhao/beam/compare/beam-core-v0.7.4...beam-core-v0.8.0) - 2026-08-07
 
 ### Fixed

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.8.0...beam-daemon-v0.9.0) - 2026-08-08
+
+### Added
+
+- group-chat custom triggers with per-trigger prompt, dir and ack
+
+### Fixed
+
+- *(daemon)* 触发词按会话锚点激活，话题群新话题可独立触发
+- *(daemon)* 活跃会话存在时触发词不再注入 prompt/ack
+- *(daemon)* 清理拆分测试文件后的 unused import 警告
+- *(daemon)* 拆分超长源文件，通过行数上限 harness 检查
+- *(daemon)* parse string-form group member counts in multi-bot gate
+
+### Other
+
+- Merge pull request #55 from linuxhenhao/feat/custom-triggers
+- 全仓清理 clippy 警告至清零
+- 全仓 rustfmt 格式化，消除历史格式遗留
+- 修复 custom-triggers 分支引入的 rustfmt 格式问题
+
 ## [0.8.0](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.7.4...beam-daemon-v0.8.0) - 2026-08-07
 
 ### Fixed
