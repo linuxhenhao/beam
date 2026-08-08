@@ -74,7 +74,7 @@ pub(crate) async fn zellij_web_login(
     let set_cookie = headers
         .get(reqwest_header::SET_COOKIE)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| terminal_auth::extract_zellij_set_cookie(v));
+        .and_then(terminal_auth::extract_zellij_set_cookie);
 
     match set_cookie {
         Some(cookie) => {
@@ -250,10 +250,10 @@ pub(crate) async fn try_ticket_login(
         .insert(zellij_cookie, session_id.to_string(), permission)
         .await;
 
-    if should_ensure_read_only_anchor(permission, &state.zellij_tokens) {
-        if let Some(zellij_session) = resolve_zellij_session(&state.sessions, session_id).await {
-            anchor::ensure_read_only_anchor(state, session_id, &zellij_session).await;
-        }
+    if should_ensure_read_only_anchor(permission, &state.zellij_tokens)
+        && let Some(zellij_session) = resolve_zellij_session(&state.sessions, session_id).await
+    {
+        anchor::ensure_read_only_anchor(state, session_id, &zellij_session).await;
     }
 
     // Build redirect to clean URL (no query params)

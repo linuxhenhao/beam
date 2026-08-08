@@ -180,6 +180,7 @@ pub(crate) fn build_tui_prompt_resolved_card(
     .to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_workflow_approval_resolved_card(
     action: &str,
     run_id: &str,

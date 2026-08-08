@@ -128,6 +128,7 @@ pub(crate) async fn simulate_lark_message_handler(
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use crate::tests::test_helpers::*;
@@ -250,7 +251,7 @@ mod tests {
             stored
                 .last_cli_input
                 .as_deref()
-                .map_or(false, |s| s.contains("hello world  ")),
+                .is_some_and(|s| s.contains("hello world  ")),
             "last_cli_input must contain original text: {:?}",
             stored.last_cli_input
         );

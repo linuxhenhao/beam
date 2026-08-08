@@ -54,11 +54,11 @@ impl Adapter for CoCoState {
         if !init.disable_cli_bypass {
             args.push("--yolo".to_string());
         }
-        if let Some(model) = &init.model {
-            if !model.is_empty() {
-                args.push("--config".to_string());
-                args.push(format!("model.name={}", model));
-            }
+        if let Some(model) = &init.model
+            && !model.is_empty()
+        {
+            args.push("--config".to_string());
+            args.push(format!("model.name={}", model));
         }
         args.push("--disallowed-tool".to_string());
         args.push("EnterPlanMode".to_string());
@@ -125,27 +125,24 @@ impl Adapter for CoCoState {
             let Some(mode) = value.get("mode").and_then(Value::as_str) else {
                 continue;
             };
-            match mode {
-                "assistant" => {
-                    if value
-                        .get("message")
-                        .and_then(|v| v.get("message"))
-                        .and_then(|v| v.get("response_meta"))
-                        .and_then(|v| v.get("finish_reason"))
-                        .and_then(Value::as_str)
-                        != Some("stop")
-                    {
-                        continue;
-                    }
-                    if let Some(text) = value.get("content").and_then(Value::as_str) {
-                        if let Some(emitted) = self.cursor.emit_if_new(text) {
-                            result.final_output = Some(emitted);
-                            result.final_output_kind = Some(FinalOutputKind::Bridge);
-                            result.prompt_ready = true;
-                        }
-                    }
+            if mode == "assistant" {
+                if value
+                    .get("message")
+                    .and_then(|v| v.get("message"))
+                    .and_then(|v| v.get("response_meta"))
+                    .and_then(|v| v.get("finish_reason"))
+                    .and_then(Value::as_str)
+                    != Some("stop")
+                {
+                    continue;
                 }
-                _ => {}
+                if let Some(text) = value.get("content").and_then(Value::as_str)
+                    && let Some(emitted) = self.cursor.emit_if_new(text)
+                {
+                    result.final_output = Some(emitted);
+                    result.final_output_kind = Some(FinalOutputKind::Bridge);
+                    result.prompt_ready = true;
+                }
             }
         }
 
@@ -165,11 +162,7 @@ fn coco_history_match(
     if size <= from_byte {
         return Ok(None);
     }
-    let start = if from_byte > HISTORY_LOOKBACK {
-        from_byte - HISTORY_LOOKBACK
-    } else {
-        0
-    };
+    let start = from_byte.saturating_sub(HISTORY_LOOKBACK);
     let mut file = File::open(history_path)?;
     file.seek(SeekFrom::Start(start))?;
     let mut text = String::new();

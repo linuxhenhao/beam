@@ -578,10 +578,10 @@ async fn list_runs(runs_dir: &Path, args: &WorkflowLsArgs) -> Result<Vec<Workflo
         if !args.all && is_terminal_status(&status) {
             continue;
         }
-        if let Some(filter) = &statuses {
-            if !filter.contains(&status) {
-                continue;
-            }
+        if let Some(filter) = &statuses
+            && !filter.contains(&status)
+        {
+            continue;
         }
         let meta_path = run_dir.join("events.ndjson");
         let updated_at = fs::metadata(&meta_path)

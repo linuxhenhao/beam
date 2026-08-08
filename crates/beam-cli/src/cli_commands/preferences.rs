@@ -30,7 +30,7 @@ pub(crate) fn cmd_lang(args: Vec<String>) -> Result<()> {
     }
     match sub {
         "zh" | "en" => {
-            let locale = beam_core::i18n::Locale::from_str(sub);
+            let locale = beam_core::i18n::Locale::from_code(sub);
             global_config::set_global_locale(Some(locale))?;
             println!("✅ Set global lang → {}.", sub);
             println!("Run `beam restart` for changes to take effect.");
@@ -188,10 +188,10 @@ pub(crate) fn cmd_voice(args: Vec<String>) -> Result<()> {
     }
 
     let rate = ask_line("语速倍率（留空=1.1）: ")?;
-    if !rate.is_empty() {
-        if let Ok(parsed) = rate.parse::<f64>() {
-            voice.rate = Some(parsed);
-        }
+    if !rate.is_empty()
+        && let Ok(parsed) = rate.parse::<f64>()
+    {
+        voice.rate = Some(parsed);
     }
 
     global_config::set_global_voice(Some(voice))?;

@@ -21,7 +21,7 @@ pub enum OrchestratorAction {
     DispatchWork {
         node_id: String,
         activity_id: String,
-        node: WorkflowNode,
+        node: Box<WorkflowNode>,
     },
     CompleteNodeSucceeded {
         node_id: String,

@@ -150,12 +150,12 @@ pub(crate) fn load_observed_bot_open_ids_for_app(
         if !file_name.starts_with(&prefix) || !file_name.ends_with(".json") {
             continue;
         }
-        if let Ok(raw) = fs::read_to_string(&path) {
-            if let Ok(records) = serde_json::from_str::<Vec<ObservedBotRecord>>(&raw) {
-                for record in records {
-                    if !record.open_id.trim().is_empty() {
-                        out.insert(record.open_id);
-                    }
+        if let Ok(raw) = fs::read_to_string(&path)
+            && let Ok(records) = serde_json::from_str::<Vec<ObservedBotRecord>>(&raw)
+        {
+            for record in records {
+                if !record.open_id.trim().is_empty() {
+                    out.insert(record.open_id);
                 }
             }
         }

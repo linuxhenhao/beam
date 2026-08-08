@@ -60,11 +60,11 @@ impl Adapter for GeminiState {
         if !init.disable_cli_bypass {
             args.push("--yolo".to_string());
         }
-        if let Some(model) = &init.model {
-            if !model.is_empty() {
-                args.push("--model".to_string());
-                args.push(model.clone());
-            }
+        if let Some(model) = &init.model
+            && !model.is_empty()
+        {
+            args.push("--model".to_string());
+            args.push(model.clone());
         }
         if let Some(prompt) = &init.initial_prompt {
             args.push("-i".to_string());
@@ -82,8 +82,7 @@ impl Adapter for GeminiState {
         backend: &dyn SessionBackend,
         content: &str,
     ) -> Result<SubmitResult> {
-        let base_path =
-            current_gemini_transcript_path().or_else(|| latest_gemini_transcript_path());
+        let base_path = current_gemini_transcript_path().or_else(latest_gemini_transcript_path);
         let base_size = base_path
             .as_ref()
             .map(|path| file_size(path.as_path()))
@@ -95,7 +94,7 @@ impl Adapter for GeminiState {
 
         let mut confirm = || -> Result<bool> {
             let Some(path) =
-                current_gemini_transcript_path().or_else(|| latest_gemini_transcript_path())
+                current_gemini_transcript_path().or_else(latest_gemini_transcript_path)
             else {
                 return Ok(false);
             };
@@ -108,7 +107,7 @@ impl Adapter for GeminiState {
 
         if confirmed {
             if let Some(path) =
-                current_gemini_transcript_path().or_else(|| latest_gemini_transcript_path())
+                current_gemini_transcript_path().or_else(latest_gemini_transcript_path)
             {
                 update_runtime_for_path(&path);
             }
@@ -127,8 +126,7 @@ impl Adapter for GeminiState {
     }
 
     fn poll(&mut self) -> Result<PollResult> {
-        let Some(path) =
-            current_gemini_transcript_path().or_else(|| latest_gemini_transcript_path())
+        let Some(path) = current_gemini_transcript_path().or_else(latest_gemini_transcript_path)
         else {
             return Ok(PollResult {
                 cli_session_id: runtime_snapshot().cli_session_id,
@@ -165,15 +163,14 @@ impl Adapter for GeminiState {
             ..Default::default()
         };
 
-        if let Some(final_text) = snapshot.final_output {
-            if !final_text.is_empty()
-                && runtime.emitted_final_text.as_deref() != Some(final_text.as_str())
-            {
-                runtime.emitted_final_text = Some(final_text.clone());
-                result.final_output = Some(final_text);
-                result.final_output_kind = Some(FinalOutputKind::Bridge);
-                result.prompt_ready = true;
-            }
+        if let Some(final_text) = snapshot.final_output
+            && !final_text.is_empty()
+            && runtime.emitted_final_text.as_deref() != Some(final_text.as_str())
+        {
+            runtime.emitted_final_text = Some(final_text.clone());
+            result.final_output = Some(final_text);
+            result.final_output_kind = Some(FinalOutputKind::Bridge);
+            result.prompt_ready = true;
         }
 
         Ok(result)
@@ -438,6 +435,7 @@ fn file_size(path: &Path) -> u64 {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use crate::adapter::test_support::{home_test_lock, set_home, temp_home, test_init};

@@ -356,7 +356,7 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
                     sessions
                         .get(&marker.session_id)
                         .map(|s| {
-                            marker.turn_id.as_deref().map_or(true, |tid| {
+                            marker.turn_id.as_deref().is_none_or(|tid| {
                                 // Resume if last_final_output_turn_id doesn't match this turn
                                 s.last_final_output_turn_id.as_deref() != Some(tid)
                             })

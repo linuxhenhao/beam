@@ -75,6 +75,7 @@ pub async fn dashboard_approve_or_reject_wait(
         .map_err(internal_error)?;
     let def = parse_workflow_definition(&raw_def).map_err(internal_error)?;
 
+    #[allow(clippy::type_complexity)]
     let mut candidates: Vec<(String, String, Option<Vec<String>>, Option<String>)> = Vec::new();
     for activity_id in &snapshot.dangling.waits {
         let Some(activity) = snapshot
@@ -372,23 +373,23 @@ pub async fn lark_approve_or_reject_wait(
     }
 
     // Check approver allowlist.
-    if let Some(approvers) = wait.approvers.as_ref().filter(|v| !v.is_empty()) {
-        if !approvers.contains(&operator_open_id.to_string()) {
-            return Ok(ApproveOrRejectOutcome {
-                ok: false,
-                run_id: run_id.to_string(),
-                activity_id: activity_id.to_string(),
-                attempt_id: attempt_id.to_string(),
-                resolution: super::resolution_str(resolution).to_string(),
-                resolved_at: None,
-                last_seq: None,
-                already_resolved: false,
-                already_terminal: false,
-                is_decision_node: None,
-                error_code: Some("not_approved".to_string()),
-                error_hint: Some("Operator is not in the approver allowlist".to_string()),
-            });
-        }
+    if let Some(approvers) = wait.approvers.as_ref().filter(|v| !v.is_empty())
+        && !approvers.contains(&operator_open_id.to_string())
+    {
+        return Ok(ApproveOrRejectOutcome {
+            ok: false,
+            run_id: run_id.to_string(),
+            activity_id: activity_id.to_string(),
+            attempt_id: attempt_id.to_string(),
+            resolution: super::resolution_str(resolution).to_string(),
+            resolved_at: None,
+            last_seq: None,
+            already_resolved: false,
+            already_terminal: false,
+            is_decision_node: None,
+            error_code: Some("not_approved".to_string()),
+            error_hint: Some("Operator is not in the approver allowlist".to_string()),
+        });
     }
 
     let is_decision_node = activity

@@ -52,11 +52,11 @@ impl Adapter for KimiState {
         if !init.disable_cli_bypass {
             args.push("--yolo".to_string());
         }
-        if let Some(model) = &init.model {
-            if !model.is_empty() {
-                args.push("--model".to_string());
-                args.push(model.clone());
-            }
+        if let Some(model) = &init.model
+            && !model.is_empty()
+        {
+            args.push("--model".to_string());
+            args.push(model.clone());
         }
         args.extend(init.cli_args.clone());
         SpawnSpec {
@@ -168,12 +168,12 @@ impl Adapter for KimiState {
             }
         }
 
-        if let Some(text) = final_text {
-            if let Some(emitted) = self.cursor.emit_if_new(&text) {
-                result.final_output = Some(emitted);
-                result.final_output_kind = Some(FinalOutputKind::Bridge);
-                result.prompt_ready = true;
-            }
+        if let Some(text) = final_text
+            && let Some(emitted) = self.cursor.emit_if_new(&text)
+        {
+            result.final_output = Some(emitted);
+            result.final_output_kind = Some(FinalOutputKind::Bridge);
+            result.prompt_ready = true;
         }
 
         Ok(result)
@@ -325,6 +325,7 @@ fn kimi_submit_confirmed(path: &Path, from_byte: u64, expected_text: &str) -> Re
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use crate::adapter::test_support::{home_test_lock, set_home, temp_home, test_init};

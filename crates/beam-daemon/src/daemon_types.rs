@@ -150,7 +150,7 @@ pub(crate) struct AttemptResumeEntry {
 
 #[derive(Debug)]
 pub(crate) enum AttemptResumeWaitOutcome {
-    Ready(AttemptResumeEntry),
+    Ready(Box<AttemptResumeEntry>),
     Failed {
         error: String,
         message: Option<String>,

@@ -60,7 +60,7 @@ fn opencode_reader_finds_sessions_and_final_output() {
     assert_eq!(state.transcript_offset, 1500);
     let second = state.poll().expect("second poll");
     assert!(second.final_output.is_none());
-    assert!(second.prompt_ready == false);
+    assert!(!second.prompt_ready);
     let _ = fs::remove_dir_all(root);
 }
 

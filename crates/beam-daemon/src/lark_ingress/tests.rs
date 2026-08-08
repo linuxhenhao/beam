@@ -1,3 +1,5 @@
+#![allow(clippy::await_holding_lock)]
+
 use super::*;
 use crate::tests::test_helpers::*;
 
@@ -176,11 +178,9 @@ fn ws_card_action_handler_routes_ask_toggle_and_submit() {
                 if let Ok(Some(snaps)) = beam_core::persist::read_json::<
                     Vec<ask::AskPendingSnapshot>,
                 >(&paths.ask_pending_json())
-                {
-                    if let Some(snap) = snaps.into_iter().next() {
+                    && let Some(snap) = snaps.into_iter().next() {
                         break snap;
                     }
-                }
                 assert!(
                     std::time::Instant::now() < deadline,
                     "ask pending snapshot was not persisted"

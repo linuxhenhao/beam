@@ -239,7 +239,7 @@ async fn handle_terminal_link(
         let ro_token_available = load_zellij_web_tokens_for_card()
             .as_ref()
             .and_then(|t| t.read_only_token.as_deref())
-            .map_or(false, |t| !t.is_empty());
+            .is_some_and(|t| !t.is_empty());
         if !ro_token_available {
             return Ok(Json(build_lark_card_action_toast(
                 "error",
@@ -252,7 +252,7 @@ async fn handle_terminal_link(
                 .unwrap_or(None)
                 .as_ref()
                 .and_then(|t| t.write_token.as_deref())
-                .map_or(false, |t| !t.is_empty());
+                .is_some_and(|t| !t.is_empty());
         if !write_token_available {
             return Ok(Json(build_lark_card_action_toast(
                 "error",
@@ -521,13 +521,12 @@ async fn handle_toggle_display(
                         target_message_id,
                         session_snapshot.display_mode,
                     );
-                    if let Some(nonce) = stale_frozen_nonce.as_deref() {
-                        if let Err(err) =
+                    if let Some(nonce) = stale_frozen_nonce.as_deref()
+                        && let Err(err) =
                             remove_frozen_card(&state.paths, &session_snapshot.session_id, nonce)
                                 .await
-                        {
-                            warn!("failed to remove migrated frozen card {}: {}", nonce, err);
-                        }
+                    {
+                        warn!("failed to remove migrated frozen card {}: {}", nonce, err);
                     }
                     Ok(Json(build_lark_card_action_toast(
                         "success",
@@ -553,12 +552,11 @@ async fn handle_toggle_display(
                 action.clicked_message_id,
                 session_snapshot.display_mode,
             );
-            if let Some(nonce) = stale_frozen_nonce.as_deref() {
-                if let Err(err) =
+            if let Some(nonce) = stale_frozen_nonce.as_deref()
+                && let Err(err) =
                     remove_frozen_card(&state.paths, &session_snapshot.session_id, nonce).await
-                {
-                    warn!("failed to remove migrated frozen card {}: {}", nonce, err);
-                }
+            {
+                warn!("failed to remove migrated frozen card {}: {}", nonce, err);
             }
             Ok(Json(serde_json::json!({
                 "toast": {
@@ -818,37 +816,35 @@ async fn handle_tui_keys(
     )
     .await;
     let processing_text = resolved_text.clone();
-    if is_final {
-        if let Some(card_id) = prompt_card_id {
-            let state = state.clone();
-            let session_id = session_id.to_string();
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                let snapshot = {
-                    let sessions = state.sessions.lock().await;
-                    sessions.get(&session_id).cloned()
-                };
-                let Some(session) = snapshot else {
-                    return;
-                };
-                if session.lark_app_id == "local" {
-                    return;
-                }
-                let Some(bot) = state.bots.get(&session.lark_app_id).cloned() else {
-                    return;
-                };
-                let _ = lark_update_card(
-                    &state,
-                    &bot,
-                    &card_id,
-                    &build_tui_prompt_resolved_card(
-                        Some(resolved_text.as_str()),
-                        session.locale.as_deref(),
-                    ),
-                )
-                .await;
-            });
-        }
+    if is_final && let Some(card_id) = prompt_card_id {
+        let state = state.clone();
+        let session_id = session_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            let snapshot = {
+                let sessions = state.sessions.lock().await;
+                sessions.get(&session_id).cloned()
+            };
+            let Some(session) = snapshot else {
+                return;
+            };
+            if session.lark_app_id == "local" {
+                return;
+            }
+            let Some(bot) = state.bots.get(&session.lark_app_id).cloned() else {
+                return;
+            };
+            let _ = lark_update_card(
+                &state,
+                &bot,
+                &card_id,
+                &build_tui_prompt_resolved_card(
+                    Some(resolved_text.as_str()),
+                    session.locale.as_deref(),
+                ),
+            )
+            .await;
+        });
     }
     let card = serde_json::from_str::<Value>(&build_tui_prompt_processing_card(
         Some(&processing_text),

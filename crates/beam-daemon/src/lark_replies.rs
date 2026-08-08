@@ -158,6 +158,7 @@ pub(crate) fn build_card_not_ready_reply() -> &'static str {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use crate::tests::test_helpers::*;

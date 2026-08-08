@@ -137,32 +137,30 @@ pub(crate) fn normalize_lark_ws_card_action_from_raw(
         .map_err(|err| feishu_core::Error::InvalidEventFormat(err.to_string()))?;
     let mut payload = normalize_lark_ws_card_action(card_action);
 
-    if let Some(fv) = form_value_snapshot {
-        if let Some(action) = payload.pointer_mut("/action") {
-            if let Some(obj) = action.as_object_mut() {
-                obj.insert("form_value".to_string(), fv);
-            }
-        }
+    if let Some(fv) = form_value_snapshot
+        && let Some(action) = payload.pointer_mut("/action")
+        && let Some(obj) = action.as_object_mut()
+    {
+        obj.insert("form_value".to_string(), fv);
     }
 
-    if let Some(op) = operator_snapshot {
-        if let Some(obj) = payload.as_object_mut() {
-            obj.insert("operator".to_string(), op);
-        }
+    if let Some(op) = operator_snapshot
+        && let Some(obj) = payload.as_object_mut()
+    {
+        obj.insert("operator".to_string(), op);
     }
 
-    if let Some(op_id) = operator_id_snapshot {
-        if let Some(obj) = payload.as_object_mut() {
-            if !obj.contains_key("operator") {
-                obj.insert("operator_id".to_string(), op_id);
-            }
-        }
+    if let Some(op_id) = operator_id_snapshot
+        && let Some(obj) = payload.as_object_mut()
+        && !obj.contains_key("operator")
+    {
+        obj.insert("operator_id".to_string(), op_id);
     }
 
-    if let Some(ctx) = context_snapshot {
-        if let Some(obj) = payload.as_object_mut() {
-            obj.insert("context".to_string(), ctx);
-        }
+    if let Some(ctx) = context_snapshot
+        && let Some(obj) = payload.as_object_mut()
+    {
+        obj.insert("context".to_string(), ctx);
     }
 
     Ok(payload)

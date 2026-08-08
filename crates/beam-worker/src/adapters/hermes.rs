@@ -175,15 +175,14 @@ impl Adapter for HermesState {
             ..Default::default()
         };
 
-        if let Some(final_text) = snapshot.final_output {
-            if !final_text.is_empty()
-                && runtime.emitted_final_text.as_deref() != Some(final_text.as_str())
-            {
-                runtime.emitted_final_text = Some(final_text.clone());
-                result.final_output = Some(final_text);
-                result.final_output_kind = Some(beam_core::FinalOutputKind::Bridge);
-                result.prompt_ready = true;
-            }
+        if let Some(final_text) = snapshot.final_output
+            && !final_text.is_empty()
+            && runtime.emitted_final_text.as_deref() != Some(final_text.as_str())
+        {
+            runtime.emitted_final_text = Some(final_text.clone());
+            result.final_output = Some(final_text);
+            result.final_output_kind = Some(beam_core::FinalOutputKind::Bridge);
+            result.prompt_ready = true;
         }
 
         Ok(result)
@@ -215,10 +214,7 @@ print(row[0] or 0)
         .output()
         .context("failed to query Hermes transcript offset")?;
     if !proc.status.success() {
-        bail!(
-            "{}",
-            String::from_utf8_lossy(&proc.stderr).trim().to_string()
-        );
+        bail!("{}", String::from_utf8_lossy(&proc.stderr).trim());
     }
     Ok(String::from_utf8_lossy(&proc.stdout)
         .trim()
@@ -377,10 +373,7 @@ fn run_python_json<T: serde::de::DeserializeOwned>(script: &str) -> Result<T> {
         .output()
         .context("failed to run python3")?;
     if !proc.status.success() {
-        bail!(
-            "{}",
-            String::from_utf8_lossy(&proc.stderr).trim().to_string()
-        );
+        bail!("{}", String::from_utf8_lossy(&proc.stderr).trim());
     }
     let stdout = String::from_utf8_lossy(&proc.stdout).trim().to_string();
     if stdout.is_empty() {
@@ -390,6 +383,7 @@ fn run_python_json<T: serde::de::DeserializeOwned>(script: &str) -> Result<T> {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use crate::adapter::test_support::{home_test_lock, set_home, temp_home, test_init};

@@ -157,7 +157,7 @@ pub struct QuotaEntry {
     pub used: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct LarkConfig {
     #[serde(default)]
     pub verification_token: Option<String>,
@@ -211,15 +211,6 @@ impl Default for ScreenAnalyzerConfig {
             snapshot_max_chars: default_screen_analyzer_snapshot_max_chars(),
             extra_headers: HashMap::new(),
             extra_body: Map::new(),
-        }
-    }
-}
-
-impl Default for LarkConfig {
-    fn default() -> Self {
-        Self {
-            verification_token: None,
-            encrypt_key: None,
         }
     }
 }

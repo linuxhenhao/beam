@@ -165,10 +165,10 @@ fn parse_opencode(payload: &Value) -> Option<ParsedAsk> {
                     details.push(format!("call: {}", call_id));
                 }
             }
-            if let Some(metadata) = payload.get("metadata").and_then(Value::as_object) {
-                if let Some(description) = metadata.get("description").and_then(Value::as_str) {
-                    details.push(description.to_string());
-                }
+            if let Some(metadata) = payload.get("metadata").and_then(Value::as_object)
+                && let Some(description) = metadata.get("description").and_then(Value::as_str)
+            {
+                details.push(description.to_string());
             }
             let prompt = if details.is_empty() {
                 permission.to_string()

@@ -31,12 +31,7 @@ pub async fn read_run_snapshot(run_dir: &Path) -> Result<Option<RunSnapshotDTO>>
         loops: if snap.loops.is_empty() {
             None
         } else {
-            Some(
-                snap.loops
-                    .into_iter()
-                    .map(|(key, value)| (key, value))
-                    .collect(),
-            )
+            Some(snap.loops.into_iter().collect())
         },
         dangling: DanglingSnapshot {
             activities: snap.dangling_activities,
@@ -100,21 +95,21 @@ fn build_attempt_io(
             if let Some(output_ref) = attempt.output.as_ref() {
                 io.output = Some(preview_ref(run_dir, output_ref, &mut cache)?);
             }
-            if let Some(wait) = attempt.wait.as_ref() {
-                if let Some(prompt_ref) = wait.prompt_ref.as_ref() {
-                    io.wait_prompt = Some(preview_ref(run_dir, prompt_ref, &mut cache)?);
-                }
+            if let Some(wait) = attempt.wait.as_ref()
+                && let Some(prompt_ref) = wait.prompt_ref.as_ref()
+            {
+                io.wait_prompt = Some(preview_ref(run_dir, prompt_ref, &mut cache)?);
             }
-            if let Some(input_value) = io.input.as_ref().and_then(|preview| preview.value.clone()) {
-                if let Some(def) = def {
-                    io.resolved_input = Some(preview_resolved_input(
-                        run_dir,
-                        snap,
-                        def,
-                        input_value,
-                        &mut cache,
-                    )?);
-                }
+            if let Some(input_value) = io.input.as_ref().and_then(|preview| preview.value.clone())
+                && let Some(def) = def
+            {
+                io.resolved_input = Some(preview_resolved_input(
+                    run_dir,
+                    snap,
+                    def,
+                    input_value,
+                    &mut cache,
+                )?);
             }
             out.insert(attempt.attempt_id.clone(), io);
         }

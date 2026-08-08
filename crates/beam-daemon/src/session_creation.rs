@@ -23,6 +23,7 @@ pub(crate) fn next_session_turn_id() -> String {
     Uuid::new_v4().simple().to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_session_create_spec_from_bot(
     bot: &BotConfig,
     title: String,
@@ -59,6 +60,7 @@ pub(crate) fn build_session_create_spec_from_bot(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_session_create_spec_from_pending(
     pending: &dir_select::PendingCreateSession,
     title: String,
@@ -107,6 +109,7 @@ fn resolve_direct_create_working_dir(
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_direct_create_session_spec_from_bot(
     bot: &BotConfig,
     daemon_working_dirs: &[String],

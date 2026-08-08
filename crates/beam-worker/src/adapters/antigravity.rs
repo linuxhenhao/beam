@@ -108,14 +108,13 @@ impl Adapter for AntigravityState {
             let Some(role) = value.get("role").and_then(Value::as_str) else {
                 continue;
             };
-            if role == "model" {
-                if let Some(text) = value.get("display").and_then(Value::as_str) {
-                    if let Some(emitted) = self.cursor.emit_if_new(text) {
-                        result.final_output = Some(emitted);
-                        result.final_output_kind = Some(FinalOutputKind::Bridge);
-                        result.prompt_ready = true;
-                    }
-                }
+            if role == "model"
+                && let Some(text) = value.get("display").and_then(Value::as_str)
+                && let Some(emitted) = self.cursor.emit_if_new(text)
+            {
+                result.final_output = Some(emitted);
+                result.final_output_kind = Some(FinalOutputKind::Bridge);
+                result.prompt_ready = true;
             }
         }
 
@@ -131,11 +130,7 @@ fn agy_history_match(history_path: &Path, from_byte: u64, expected_text: &str) -
     if size <= from_byte {
         return Ok(false);
     }
-    let start = if from_byte > HISTORY_LOOKBACK {
-        from_byte - HISTORY_LOOKBACK
-    } else {
-        0
-    };
+    let start = from_byte.saturating_sub(HISTORY_LOOKBACK);
     let mut file = File::open(history_path)?;
     file.seek(SeekFrom::Start(start))?;
     let mut text = String::new();

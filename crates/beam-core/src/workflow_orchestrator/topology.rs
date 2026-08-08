@@ -88,10 +88,10 @@ pub(super) fn find_sinks(def: &WorkflowDefinition) -> Vec<String> {
 }
 
 pub(super) fn dependency_is_succeeded(snapshot: &RunSnapshotDTO, node_id: &str) -> bool {
-    if let Some(node) = node_state(snapshot, node_id) {
-        if node.status == NodeStatus::Succeeded {
-            return true;
-        }
+    if let Some(node) = node_state(snapshot, node_id)
+        && node.status == NodeStatus::Succeeded
+    {
+        return true;
     }
     if let Some(loop_state) = snapshot.loops.as_ref().and_then(|loops| loops.get(node_id)) {
         return matches!(loop_state.status, LoopStatus::Succeeded);

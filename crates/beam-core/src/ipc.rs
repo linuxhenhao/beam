@@ -119,7 +119,7 @@ pub struct InitConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonToWorker {
-    Init(InitConfig),
+    Init(Box<InitConfig>),
     Message { content: String, turn_id: String },
     RawInput { content: String, turn_id: String },
     Close,

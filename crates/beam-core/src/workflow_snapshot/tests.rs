@@ -139,7 +139,7 @@ async fn read_run_snapshot_replays_outputs_and_binding() {
         r#"{"schemaVersion":1,"sessionId":"sess-1","webPort":8080,"status":"live","startedAt":1,"updatedAt":2}"#,
     )
     .unwrap();
-    let events = vec![
+    let events = [
         env(
             "run-1-1",
             "run-1",

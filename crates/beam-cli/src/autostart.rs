@@ -374,15 +374,11 @@ fn status_linux() -> Result<()> {
         .output()?;
     println!(
         "enabled: {}",
-        String::from_utf8_lossy(&is_enabled.stdout)
-            .trim()
-            .to_string()
+        String::from_utf8_lossy(&is_enabled.stdout).trim()
     );
     println!(
         "active: {}",
-        String::from_utf8_lossy(&is_active.stdout)
-            .trim()
-            .to_string()
+        String::from_utf8_lossy(&is_active.stdout).trim()
     );
     println!(
         "Linger: {}",

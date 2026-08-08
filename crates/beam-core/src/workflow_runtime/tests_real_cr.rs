@@ -293,8 +293,7 @@ async fn real_code_review_loop_reject_enters_iter2_with_comment() {
     let recorded = prompts.lock().await;
     let iter2_implement = recorded
         .iter()
-        .filter(|(node_id, _)| node_id == "implement")
-        .last()
+        .rfind(|(node_id, _)| node_id == "implement")
         .map(|(_, p)| p.clone())
         .expect("implement iter2 must have been dispatched");
     eprintln!("implement prompt iter2: {iter2_implement}");

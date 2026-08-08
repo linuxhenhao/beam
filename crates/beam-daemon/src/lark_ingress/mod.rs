@@ -177,7 +177,7 @@ pub(crate) async fn handle_lark_event_payload(
         &parsed,
         &text,
         custom_trigger.as_ref(),
-        &inferred_locale,
+        inferred_locale,
         &scope,
         &anchor,
         sender_open_id.as_deref(),

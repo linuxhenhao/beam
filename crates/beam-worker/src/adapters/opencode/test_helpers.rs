@@ -322,6 +322,7 @@ CREATE TABLE part (
     assert!(status.success(), "failed to create multi-session sqlite db");
 }
 
+#[allow(clippy::type_complexity)]
 pub(crate) fn create_db_with_session_rows(
     db_path: &Path,
     sessions: &[(&str, &str, u64, Option<u64>, Option<&str>)],

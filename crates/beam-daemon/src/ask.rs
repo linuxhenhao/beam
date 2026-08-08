@@ -319,7 +319,254 @@ async fn resolve_ask_approvers(state: &AppState, req: &AskRequestBody) -> HashSe
     resolved
 }
 
+fn build_ask_card(
+    ask_id: &str,
+    nonce: &str,
+    questions: &[AskQuestion],
+    selections: &[HashSet<String>],
+    settled: bool,
+    settled_text_zh: Option<&str>,
+    settled_text_en: Option<&str>,
+) -> String {
+    let settled_title_zh = "问答已完成";
+    let settled_title_en = "Ask answered";
+    let settled_body_zh = settled_text_zh.unwrap_or("答复已提交");
+    let settled_body_en = settled_text_en.unwrap_or("Answer submitted");
+    let mut elements = Vec::new();
+    if settled {
+        elements.push(serde_json::json!({
+            "tag": "markdown",
+            "content": settled_body_en,
+            "i18n_content": {
+                "zh_cn": settled_body_zh,
+                "en_us": settled_body_en,
+            },
+        }));
+    }
+    for (idx, question) in questions.iter().enumerate() {
+        elements.push(serde_json::json!({
+            "tag": "markdown",
+            "content": format!("**{}**", question.prompt),
+            "i18n_content": {
+                "zh_cn": format!("**{}**", question.prompt),
+                "en_us": format!("**{}**", question.prompt),
+            },
+        }));
+        let mut buttons = Vec::new();
+        let selected = selections.get(idx);
+        for option in &question.options {
+            let checked = selected
+                .map(|set| set.contains(&option.key))
+                .unwrap_or(false);
+            buttons.push(serde_json::json!({
+                "tag": "button",
+                "text": card_i18n::plain_text(
+                    None,
+                    if checked {
+                        format!("✓ {}", option.label)
+                    } else {
+                        option.label.clone()
+                    },
+                    if checked {
+                        format!("✓ {}", option.label)
+                    } else {
+                        option.label.clone()
+                    }
+                ),
+                "type": "default",
+                "value": {
+                    "action": "ask_toggle",
+                    "ask_id": ask_id,
+                    "nonce": nonce,
+                    "question_index": idx,
+                    "key": option.key,
+                }
+            }));
+        }
+        elements.push(serde_json::json!({
+            "tag": "action",
+            "actions": buttons,
+        }));
+    }
+    if !settled {
+        elements.push(serde_json::json!({
+            "tag": "action",
+            "actions": [{
+                "tag": "button",
+                "text": card_i18n::plain_text(None, "提交", "Submit"),
+                "type": "primary",
+                "value": {
+                    "action": "ask_submit",
+                    "ask_id": ask_id,
+                    "nonce": nonce,
+                }
+            }],
+        }));
+    }
+    serde_json::json!({
+        "config": { "wide_screen_mode": true },
+        "header": {
+            "template": if settled { "green" } else { "blue" },
+            "title": {
+                "tag": "plain_text",
+                "content": if settled { settled_title_en } else { "Ask question" },
+                "i18n_content": {
+                    "zh_cn": if settled { settled_title_zh } else { "提问" },
+                    "en_us": if settled { settled_title_en } else { "Ask question" },
+                },
+            },
+        },
+        "elements": elements,
+    })
+    .to_string()
+}
+
+pub async fn handle_ask_card_action(
+    state: &AppState,
+    _app_id: &str,
+    action: &crate::ParsedLarkCardAction,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let ask_id = action.ask_id.clone().unwrap_or_default();
+    let nonce = action.ask_nonce.clone().unwrap_or_default();
+    if ask_id.trim().is_empty() || nonce.trim().is_empty() {
+        return Ok(Json(build_lark_card_action_toast(
+            "error",
+            "missing ask id",
+        )));
+    }
+    let mut pending = state.ask_pending.lock().await;
+    let Some(entry) = pending.get_mut(&ask_id) else {
+        return Ok(Json(build_lark_card_action_toast("info", "ask expired")));
+    };
+    // If entry was restored from disk, the oneshot channel is gone.
+    if entry.tx.is_none() {
+        pending.remove(&ask_id);
+        drop(pending);
+        let pending = state.ask_pending.lock().await;
+        persist_ask_pending_now(&state.paths, &pending).await;
+        return Ok(Json(build_lark_card_action_toast(
+            "info",
+            "ask expired (daemon restarted)",
+        )));
+    }
+    if entry.nonce != nonce {
+        return Ok(Json(build_lark_card_action_toast("info", "ask expired")));
+    }
+    if !action
+        .operator_open_id
+        .as_deref()
+        .map(|open_id| entry.request.approvers.contains(open_id))
+        .unwrap_or(false)
+    {
+        return Ok(Json(build_lark_card_action_toast(
+            "error",
+            "permission denied",
+        )));
+    }
+
+    if action.ask_submit {
+        let answers = entry
+            .request
+            .questions
+            .iter()
+            .enumerate()
+            .map(|(idx, question)| {
+                let sel = entry.selections.get(idx).cloned().unwrap_or_default();
+                if !question.multi_select && sel.len() != 1 {
+                    return Vec::new();
+                }
+                sel.into_iter().collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let result = AskResult::answered(
+            answers.clone(),
+            action.operator_open_id.clone().unwrap_or_default(),
+        );
+        if let Some(tx) = entry.tx.take() {
+            let _ = tx.send(result);
+        }
+        let selections = entry.selections.clone();
+        let card = build_ask_card(
+            &ask_id,
+            &nonce,
+            &entry.request.questions,
+            &selections,
+            true,
+            Some("答复已提交"),
+            Some("Answer submitted"),
+        );
+        pending.remove(&ask_id);
+        drop(pending);
+        let pending = state.ask_pending.lock().await;
+        persist_ask_pending_now(&state.paths, &pending).await;
+        return Ok(Json(serde_json::json!({
+            "toast": { "type": "success", "content": "ask submitted" },
+            "card": { "type": "raw", "data": serde_json::from_str::<serde_json::Value>(&card).unwrap_or_else(|_| serde_json::json!({})) }
+        })));
+    }
+
+    let Some(question_index) = action.ask_question_index else {
+        return Ok(Json(build_lark_card_action_toast(
+            "error",
+            "missing question index",
+        )));
+    };
+    let Some(key) = action.ask_key.clone() else {
+        return Ok(Json(build_lark_card_action_toast(
+            "error",
+            "missing ask key",
+        )));
+    };
+    let Some(question) = entry.request.questions.get(question_index) else {
+        return Ok(Json(build_lark_card_action_toast(
+            "error",
+            "invalid ask question",
+        )));
+    };
+    if !question.options.iter().any(|option| option.key == key) {
+        return Ok(Json(build_lark_card_action_toast(
+            "error",
+            "invalid ask option",
+        )));
+    }
+
+    let current = entry.selections.get_mut(question_index).unwrap();
+    if question.multi_select {
+        if current.contains(&key) {
+            current.remove(&key);
+        } else {
+            current.insert(key);
+        }
+    } else {
+        current.clear();
+        current.insert(key);
+    }
+
+    let card = build_ask_card(
+        &ask_id,
+        &nonce,
+        &entry.request.questions,
+        &entry.selections,
+        false,
+        None,
+        None,
+    );
+    let card_json =
+        serde_json::from_str::<serde_json::Value>(&card).unwrap_or_else(|_| serde_json::json!({}));
+    // Persist updated selections after toggle: drop lock, then re-acquire read-only to save
+    drop(pending);
+    {
+        let pending = state.ask_pending.lock().await;
+        persist_ask_pending_now(&state.paths, &pending).await;
+    }
+    Ok(Json(serde_json::json!({
+        "toast": { "type": "success", "content": "selection updated" },
+        "card": { "type": "raw", "data": card_json }
+    })))
+}
+
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
 
@@ -567,250 +814,4 @@ mod tests {
             ask_result
         );
     }
-}
-
-fn build_ask_card(
-    ask_id: &str,
-    nonce: &str,
-    questions: &[AskQuestion],
-    selections: &[HashSet<String>],
-    settled: bool,
-    settled_text_zh: Option<&str>,
-    settled_text_en: Option<&str>,
-) -> String {
-    let settled_title_zh = "问答已完成";
-    let settled_title_en = "Ask answered";
-    let settled_body_zh = settled_text_zh.unwrap_or("答复已提交");
-    let settled_body_en = settled_text_en.unwrap_or("Answer submitted");
-    let mut elements = Vec::new();
-    if settled {
-        elements.push(serde_json::json!({
-            "tag": "markdown",
-            "content": settled_body_en,
-            "i18n_content": {
-                "zh_cn": settled_body_zh,
-                "en_us": settled_body_en,
-            },
-        }));
-    }
-    for (idx, question) in questions.iter().enumerate() {
-        elements.push(serde_json::json!({
-            "tag": "markdown",
-            "content": format!("**{}**", question.prompt),
-            "i18n_content": {
-                "zh_cn": format!("**{}**", question.prompt),
-                "en_us": format!("**{}**", question.prompt),
-            },
-        }));
-        let mut buttons = Vec::new();
-        let selected = selections.get(idx);
-        for option in &question.options {
-            let checked = selected
-                .map(|set| set.contains(&option.key))
-                .unwrap_or(false);
-            buttons.push(serde_json::json!({
-                "tag": "button",
-                "text": card_i18n::plain_text(
-                    None,
-                    if checked {
-                        format!("✓ {}", option.label)
-                    } else {
-                        option.label.clone()
-                    },
-                    if checked {
-                        format!("✓ {}", option.label)
-                    } else {
-                        option.label.clone()
-                    }
-                ),
-                "type": "default",
-                "value": {
-                    "action": "ask_toggle",
-                    "ask_id": ask_id,
-                    "nonce": nonce,
-                    "question_index": idx,
-                    "key": option.key,
-                }
-            }));
-        }
-        elements.push(serde_json::json!({
-            "tag": "action",
-            "actions": buttons,
-        }));
-    }
-    if !settled {
-        elements.push(serde_json::json!({
-            "tag": "action",
-            "actions": [{
-                "tag": "button",
-                "text": card_i18n::plain_text(None, "提交", "Submit"),
-                "type": "primary",
-                "value": {
-                    "action": "ask_submit",
-                    "ask_id": ask_id,
-                    "nonce": nonce,
-                }
-            }],
-        }));
-    }
-    serde_json::json!({
-        "config": { "wide_screen_mode": true },
-        "header": {
-            "template": if settled { "green" } else { "blue" },
-            "title": {
-                "tag": "plain_text",
-                "content": if settled { settled_title_en } else { "Ask question" },
-                "i18n_content": {
-                    "zh_cn": if settled { settled_title_zh } else { "提问" },
-                    "en_us": if settled { settled_title_en } else { "Ask question" },
-                },
-            },
-        },
-        "elements": elements,
-    })
-    .to_string()
-}
-
-pub async fn handle_ask_card_action(
-    state: &AppState,
-    _app_id: &str,
-    action: &crate::ParsedLarkCardAction,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let ask_id = action.ask_id.clone().unwrap_or_default();
-    let nonce = action.ask_nonce.clone().unwrap_or_default();
-    if ask_id.trim().is_empty() || nonce.trim().is_empty() {
-        return Ok(Json(build_lark_card_action_toast(
-            "error",
-            "missing ask id",
-        )));
-    }
-    let mut pending = state.ask_pending.lock().await;
-    let Some(entry) = pending.get_mut(&ask_id) else {
-        return Ok(Json(build_lark_card_action_toast("info", "ask expired")));
-    };
-    // If entry was restored from disk, the oneshot channel is gone.
-    if entry.tx.is_none() {
-        pending.remove(&ask_id);
-        drop(pending);
-        let pending = state.ask_pending.lock().await;
-        persist_ask_pending_now(&state.paths, &pending).await;
-        return Ok(Json(build_lark_card_action_toast(
-            "info",
-            "ask expired (daemon restarted)",
-        )));
-    }
-    if entry.nonce != nonce {
-        return Ok(Json(build_lark_card_action_toast("info", "ask expired")));
-    }
-    if !action
-        .operator_open_id
-        .as_deref()
-        .map(|open_id| entry.request.approvers.contains(open_id))
-        .unwrap_or(false)
-    {
-        return Ok(Json(build_lark_card_action_toast(
-            "error",
-            "permission denied",
-        )));
-    }
-
-    if action.ask_submit {
-        let answers = entry
-            .request
-            .questions
-            .iter()
-            .enumerate()
-            .map(|(idx, question)| {
-                let sel = entry.selections.get(idx).cloned().unwrap_or_default();
-                if !question.multi_select && sel.len() != 1 {
-                    return Vec::new();
-                }
-                sel.into_iter().collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        let result = AskResult::answered(
-            answers.clone(),
-            action.operator_open_id.clone().unwrap_or_default(),
-        );
-        if let Some(tx) = entry.tx.take() {
-            let _ = tx.send(result);
-        }
-        let selections = entry.selections.clone();
-        let card = build_ask_card(
-            &ask_id,
-            &nonce,
-            &entry.request.questions,
-            &selections,
-            true,
-            Some("答复已提交"),
-            Some("Answer submitted"),
-        );
-        pending.remove(&ask_id);
-        drop(pending);
-        let pending = state.ask_pending.lock().await;
-        persist_ask_pending_now(&state.paths, &pending).await;
-        return Ok(Json(serde_json::json!({
-            "toast": { "type": "success", "content": "ask submitted" },
-            "card": { "type": "raw", "data": serde_json::from_str::<serde_json::Value>(&card).unwrap_or_else(|_| serde_json::json!({})) }
-        })));
-    }
-
-    let Some(question_index) = action.ask_question_index else {
-        return Ok(Json(build_lark_card_action_toast(
-            "error",
-            "missing question index",
-        )));
-    };
-    let Some(key) = action.ask_key.clone() else {
-        return Ok(Json(build_lark_card_action_toast(
-            "error",
-            "missing ask key",
-        )));
-    };
-    let Some(question) = entry.request.questions.get(question_index) else {
-        return Ok(Json(build_lark_card_action_toast(
-            "error",
-            "invalid ask question",
-        )));
-    };
-    if !question.options.iter().any(|option| option.key == key) {
-        return Ok(Json(build_lark_card_action_toast(
-            "error",
-            "invalid ask option",
-        )));
-    }
-
-    let current = entry.selections.get_mut(question_index).unwrap();
-    if question.multi_select {
-        if current.contains(&key) {
-            current.remove(&key);
-        } else {
-            current.insert(key);
-        }
-    } else {
-        current.clear();
-        current.insert(key);
-    }
-
-    let card = build_ask_card(
-        &ask_id,
-        &nonce,
-        &entry.request.questions,
-        &entry.selections,
-        false,
-        None,
-        None,
-    );
-    let card_json =
-        serde_json::from_str::<serde_json::Value>(&card).unwrap_or_else(|_| serde_json::json!({}));
-    // Persist updated selections after toggle: drop lock, then re-acquire read-only to save
-    drop(pending);
-    {
-        let pending = state.ask_pending.lock().await;
-        persist_ask_pending_now(&state.paths, &pending).await;
-    }
-    Ok(Json(serde_json::json!({
-        "toast": { "type": "success", "content": "selection updated" },
-        "card": { "type": "raw", "data": card_json }
-    })))
 }

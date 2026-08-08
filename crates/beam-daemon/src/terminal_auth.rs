@@ -75,10 +75,10 @@ fn ticket_secret() -> &'static [u8] {
     SECRET.get_or_init(|| {
         let path = ticket_secret_path();
         // Try to load existing secret from disk (survives restart)
-        if let Ok(bytes) = std::fs::read(&path) {
-            if bytes.len() >= 16 {
-                return bytes;
-            }
+        if let Ok(bytes) = std::fs::read(&path)
+            && bytes.len() >= 16
+        {
+            return bytes;
         }
         // Generate new secret and persist
         let secret = uuid::Uuid::new_v4().as_bytes().to_vec();
@@ -415,7 +415,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(hex: &str) -> Option<Vec<u8>> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return None;
     }
     (0..hex.len())

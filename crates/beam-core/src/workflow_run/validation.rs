@@ -67,13 +67,13 @@ pub fn normalize_workflow_params(
 
                 // Special handling: required string that is blank/whitespace
                 // is treated as missing (preserving previous semantics).
-                if param_def.required == Some(true) && param_def.param_type == "string" {
-                    if let Value::String(s) = &coerced {
-                        if s.trim().is_empty() {
-                            missing.push(name.clone());
-                            continue;
-                        }
-                    }
+                if param_def.required == Some(true)
+                    && param_def.param_type == "string"
+                    && let Value::String(s) = &coerced
+                    && s.trim().is_empty()
+                {
+                    missing.push(name.clone());
+                    continue;
                 }
                 // For non-string required types with blank input, type
                 // validation already failed above (e.g. "" is not a bool).
@@ -338,9 +338,9 @@ fn describe_value_kind(value: &Value) -> &'static str {
 /// - `string`:  pass through unchanged (no JSON parse).
 /// - `boolean`: accept case-sensitive `true` / `false` strings (trimmed).
 /// - `number`:  parse as JSON number via `serde_json`; rejects NaN/inf/
-///              blank/objects/arrays/non-numeric JSON.
+///   blank/objects/arrays/non-numeric JSON.
 /// - `integer`: accept only decimal integer strings (e.g. `42`, `-1`);
-///              rejects `1.0`, `1.5`, `1e3` and other formats.
+///   rejects `1.0`, `1.5`, `1e3` and other formats.
 /// - `object`:  parse string as JSON, must produce a JSON object.
 /// - `array`:   parse string as JSON, must produce a JSON array.
 ///

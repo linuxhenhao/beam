@@ -136,7 +136,7 @@ pub fn read_global_config() -> GlobalConfig {
     let lang = raw
         .get("lang")
         .and_then(Value::as_str)
-        .map(Locale::from_str);
+        .map(Locale::from_code);
     let voice = raw.get("voice").and_then(read_voice);
     GlobalConfig { lang, voice }
 }
@@ -162,10 +162,7 @@ pub fn set_global_locale(locale: Option<Locale>) -> Result<(), std::io::Error> {
 }
 
 pub fn set_global_voice(voice: Option<VoiceConfig>) -> Result<(), std::io::Error> {
-    let value = match voice {
-        Some(voice) => Some(serde_json::to_value(voice).unwrap_or(Value::Null)),
-        None => None,
-    };
+    let value = voice.map(|voice| serde_json::to_value(voice).unwrap_or(Value::Null));
     merge_global_config(&[("voice", value)])
 }
 

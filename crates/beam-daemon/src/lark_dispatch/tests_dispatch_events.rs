@@ -1,3 +1,5 @@
+#![allow(clippy::await_holding_lock)]
+
 use crate::tests::test_helpers::*;
 
 use axum::{

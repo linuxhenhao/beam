@@ -218,10 +218,9 @@ pub(crate) async fn lark_tenant_token(state: &AppState, bot: &BotConfig) -> Resu
         .await
         .get(&bot.lark_app_id)
         .cloned()
+        && cached.expires_at > Instant::now() + Duration::from_secs(30)
     {
-        if cached.expires_at > Instant::now() + Duration::from_secs(30) {
-            return Ok(cached.token);
-        }
+        return Ok(cached.token);
     }
 
     let resp = state

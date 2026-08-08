@@ -63,14 +63,14 @@ pub fn evaluate_talk(
         };
     }
 
-    if let Some(granted) = bot.chat_grants.get(chat_id) {
-        if granted.iter().any(|id| id == sender_open_id) {
-            return TalkEvaluation {
-                allowed: true,
-                reason: TalkReason::ChatGrant,
-                quota_key: Some(format!("chat:{}:{}", chat_id, sender_open_id)),
-            };
-        }
+    if let Some(granted) = bot.chat_grants.get(chat_id)
+        && granted.iter().any(|id| id == sender_open_id)
+    {
+        return TalkEvaluation {
+            allowed: true,
+            reason: TalkReason::ChatGrant,
+            quota_key: Some(format!("chat:{}:{}", chat_id, sender_open_id)),
+        };
     }
 
     if bot.global_grants.iter().any(|id| id == sender_open_id) {

@@ -115,14 +115,13 @@ pub(crate) fn terminal_link_choice_candidates(
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .and_then(normalize_terminal_base_url)
+        && !candidate_base_urls.contains(&current_base)
     {
-        if !candidate_base_urls.contains(&current_base) {
-            candidates.push(TerminalLinkCandidate::new(
-                "当前地址",
-                "Current address",
-                candidate_url(&current_base),
-            ));
-        }
+        candidates.push(TerminalLinkCandidate::new(
+            "当前地址",
+            "Current address",
+            candidate_url(&current_base),
+        ));
     }
 
     candidates

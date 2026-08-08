@@ -87,11 +87,11 @@ pub fn create(init: &InitConfig) -> Box<dyn Adapter> {
 impl Adapter for OpenCodeState {
     fn build_spawn_spec(&self, init: &InitConfig) -> SpawnSpec {
         let mut args = Vec::new();
-        if let Some(model) = &init.model {
-            if !model.is_empty() {
-                args.push("--model".to_string());
-                args.push(model.clone());
-            }
+        if let Some(model) = &init.model
+            && !model.is_empty()
+        {
+            args.push("--model".to_string());
+            args.push(model.clone());
         }
         if let Some(prompt) = &init.initial_prompt {
             args.push("--prompt".to_string());

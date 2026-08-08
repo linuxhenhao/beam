@@ -539,7 +539,7 @@ pub(crate) async fn cancel_workflow_run(
                 outcome
                     .error_code
                     .as_deref()
-                    .and_then(|_| Some(404_u16))
+                    .map(|_| 404_u16)
                     .unwrap_or(500),
             )
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -677,13 +677,11 @@ pub(crate) async fn resume_workflow_run(
                 .activities
                 .iter()
                 .find(|candidate| &candidate.activity_id == activity_id)
-            {
-                if let Some(outcome) =
+                && let Some(outcome) =
                     append_resume_wait_recovery(&mut log, &workflow_def, activity)
                         .map_err(internal_error)?
-                {
-                    wait_recovery_outcomes.push(outcome);
-                }
+            {
+                wait_recovery_outcomes.push(outcome);
             }
         }
         for activity_id in &snapshot_before_runtime.dangling.cancels {
@@ -691,13 +689,11 @@ pub(crate) async fn resume_workflow_run(
                 .activities
                 .iter()
                 .find(|candidate| &candidate.activity_id == activity_id)
-            {
-                if let Some(outcome) =
+                && let Some(outcome) =
                     append_resume_cancel_recovery(&mut log, &event_index, activity)
                         .map_err(internal_error)?
-                {
-                    cancel_recovery_outcomes.push(outcome);
-                }
+            {
+                cancel_recovery_outcomes.push(outcome);
             }
         }
         for activity_id in &snapshot_before_runtime.dangling.activities {
@@ -705,12 +701,10 @@ pub(crate) async fn resume_workflow_run(
                 .activities
                 .iter()
                 .find(|candidate| &candidate.activity_id == activity_id)
-            {
-                if let Some(outcome) =
+                && let Some(outcome) =
                     append_resume_worker_crashed(&mut log, activity).map_err(internal_error)?
-                {
-                    worker_crashed_outcomes.push(outcome);
-                }
+            {
+                worker_crashed_outcomes.push(outcome);
             }
         }
     }

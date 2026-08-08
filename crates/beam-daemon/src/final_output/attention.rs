@@ -16,9 +16,7 @@ pub(super) const VALID_ATTENTION_KINDS: [&str; 4] = ["authz", "decision", "block
 ///
 /// Returns `Some(error_message)` if invalid, `None` if the request is acceptable.
 pub(crate) fn validate_attention_constraints(req: &FinalOutputRequest) -> Option<String> {
-    if req.attention.is_none() {
-        return None;
-    }
+    req.attention.as_ref()?;
     if req.top_level || req.chat_id.is_some() || req.into.is_some() {
         return Some(
             "--attention cannot be combined with --top-level / --chat-id / --into. \
@@ -50,10 +48,10 @@ pub(crate) fn normalize_attention_reason(raw: &str) -> String {
     } else {
         let mut truncated: String = trimmed.chars().take(500).collect();
         // Try to cut at the last whitespace boundary before 500 for readability.
-        if let Some(pos) = truncated.rfind(' ') {
-            if pos > 400 {
-                truncated.truncate(pos);
-            }
+        if let Some(pos) = truncated.rfind(' ')
+            && pos > 400
+        {
+            truncated.truncate(pos);
         }
         truncated
     }

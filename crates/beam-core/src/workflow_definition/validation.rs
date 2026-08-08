@@ -52,21 +52,18 @@ pub fn validate_workflow_definition(def: &WorkflowDefinition) -> Result<()> {
         }
     }
     for (node_id, node) in &def.nodes {
-        match node {
-            WorkflowNode::HostExecutor(host) => {
-                // Side-effect executors must be gated
-                if is_side_effect_executor(&host.executor)
-                    && host.base.human_gate.is_none()
-                    && !host.base.unsafe_allow_ungated.unwrap_or(false)
-                {
-                    anyhow::bail!(
-                        "nodeId '{}': side-effect executor '{}' must have a humanGate or set unsafeAllowUngated: true",
-                        node_id,
-                        host.executor
-                    );
-                }
+        if let WorkflowNode::HostExecutor(host) = node {
+            // Side-effect executors must be gated
+            if is_side_effect_executor(&host.executor)
+                && host.base.human_gate.is_none()
+                && !host.base.unsafe_allow_ungated.unwrap_or(false)
+            {
+                anyhow::bail!(
+                    "nodeId '{}': side-effect executor '{}' must have a humanGate or set unsafeAllowUngated: true",
+                    node_id,
+                    host.executor
+                );
             }
-            _ => {}
         }
     }
     for (node_id, node) in &def.nodes {
@@ -294,13 +291,11 @@ fn validate_loop_definitions(def: &WorkflowDefinition) -> Result<()> {
 
     // Rule 3b: all Decision nodes must be owned by some loop (no standalone Decision)
     for (node_id, node) in &def.nodes {
-        if matches!(node, WorkflowNode::Decision(_)) {
-            if !decision_loop_owner.contains_key(node_id) {
-                anyhow::bail!(
-                    "Decision node '{}' is standalone; Decision nodes must be used as a loop's terminate.node and reside in that loop's body",
-                    node_id
-                );
-            }
+        if matches!(node, WorkflowNode::Decision(_)) && !decision_loop_owner.contains_key(node_id) {
+            anyhow::bail!(
+                "Decision node '{}' is standalone; Decision nodes must be used as a loop's terminate.node and reside in that loop's body",
+                node_id
+            );
         }
     }
 
@@ -360,13 +355,13 @@ fn validate_loop_definitions(def: &WorkflowDefinition) -> Result<()> {
     // A loop is a "sink" if no non-body, non-decision node depends on it.
     let sinks = find_non_body_sinks(def, &body_owner);
     for sink_id in &sinks {
-        if let Some(WorkflowNode::Loop(loop_node)) = def.nodes.get(sink_id) {
-            if loop_node.output.is_none() {
-                anyhow::bail!(
-                    "sink loop '{}' must declare output.from (the loop is not depended on by any external node)",
-                    sink_id
-                );
-            }
+        if let Some(WorkflowNode::Loop(loop_node)) = def.nodes.get(sink_id)
+            && loop_node.output.is_none()
+        {
+            anyhow::bail!(
+                "sink loop '{}' must declare output.from (the loop is not depended on by any external node)",
+                sink_id
+            );
         }
     }
 

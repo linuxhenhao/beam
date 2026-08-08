@@ -8,25 +8,25 @@ pub(crate) fn load_known_bot_open_ids_for_app(
     let cross_ref_path = paths
         .root()
         .join(format!("bot-openids-{}.json", lark_app_id));
-    if let Ok(payload) = std::fs::read_to_string(cross_ref_path) {
-        if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&payload) {
-            for value in map.values() {
-                if let Some(open_id) = value.as_str() {
-                    out.insert(open_id.to_string());
-                }
+    if let Ok(payload) = std::fs::read_to_string(cross_ref_path)
+        && let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&payload)
+    {
+        for value in map.values() {
+            if let Some(open_id) = value.as_str() {
+                out.insert(open_id.to_string());
             }
         }
     }
 
     let bots_info_path = paths.root().join("bots-info.json");
-    if let Ok(payload) = std::fs::read_to_string(bots_info_path) {
-        if let Ok(Value::Array(entries)) = serde_json::from_str::<Value>(&payload) {
-            for entry in entries {
-                if entry.get("larkAppId").and_then(Value::as_str) == Some(lark_app_id) {
-                    if let Some(open_id) = entry.get("botOpenId").and_then(Value::as_str) {
-                        out.insert(open_id.to_string());
-                    }
-                }
+    if let Ok(payload) = std::fs::read_to_string(bots_info_path)
+        && let Ok(Value::Array(entries)) = serde_json::from_str::<Value>(&payload)
+    {
+        for entry in entries {
+            if entry.get("larkAppId").and_then(Value::as_str) == Some(lark_app_id)
+                && let Some(open_id) = entry.get("botOpenId").and_then(Value::as_str)
+            {
+                out.insert(open_id.to_string());
             }
         }
     }
@@ -273,10 +273,10 @@ pub(crate) async fn get_lark_chat_mode(
     let cache_key = format!("{}::{}", bot.lark_app_id, chat_id);
     if !force_refresh {
         let cache = state.chat_mode_cache.lock().await;
-        if let Some(entry) = cache.get(&cache_key) {
-            if entry.cached_at.elapsed().as_secs() < CHAT_MODE_TTL_SECS {
-                return Ok(entry.mode);
-            }
+        if let Some(entry) = cache.get(&cache_key)
+            && entry.cached_at.elapsed().as_secs() < CHAT_MODE_TTL_SECS
+        {
+            return Ok(entry.mode);
         }
     }
     let token = lark_tenant_token(state, bot).await?;
@@ -336,6 +336,7 @@ pub(crate) fn current_bot_is_mentioned(
         .any(|mention| mention.key == bot_open_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn decide_multibot_inbound_gate(
     sender_type: Option<&str>,
     sender_open_id: Option<&str>,
@@ -354,18 +355,22 @@ pub(crate) fn decide_multibot_inbound_gate(
 ) -> bool {
     let is_bot_sender = matches!(sender_type, Some("bot") | Some("app"));
     if is_bot_sender {
-        if let (Some(sender_open_id), Some(self_bot_open_id)) = (sender_open_id, self_bot_open_id) {
-            if sender_open_id == self_bot_open_id {
-                return text.trim() == "/close";
-            }
+        if let (Some(sender_open_id), Some(self_bot_open_id)) = (sender_open_id, self_bot_open_id)
+            && sender_open_id == self_bot_open_id
+        {
+            return text.trim() == "/close";
         }
         if !mentioned_self_bot {
             return false;
         }
-        if scope == SessionScope::Chat && !is_oncall_chat {
-            if !owns_session && !is_known_peer_bot && !has_chat_grant && !has_global_grant {
-                return false;
-            }
+        if scope == SessionScope::Chat
+            && !is_oncall_chat
+            && !owns_session
+            && !is_known_peer_bot
+            && !has_chat_grant
+            && !has_global_grant
+        {
+            return false;
         }
         return true;
     }

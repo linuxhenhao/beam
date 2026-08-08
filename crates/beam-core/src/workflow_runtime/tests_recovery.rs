@@ -221,28 +221,27 @@ impl WorkflowExecutionHooks for RecoveringHooks {
                 .activities
                 .iter()
                 .find(|a| &a.activity_id == activity_id)
+                && let Some(latest) = activity.attempts.last()
             {
-                if let Some(latest) = activity.attempts.last() {
-                    let output_ref = WorkflowOutputRef {
-                        output_hash: "sha256:recovered".to_string(),
-                        output_path: "/tmp/recovered".to_string(),
-                        output_bytes: 3,
-                        output_schema_version: 1,
-                        content_type: Some("application/json".to_string()),
-                    };
-                    let _ = log.append(EventDraft {
-                        event_type: "activitySucceeded".to_string(),
-                        actor: WorkflowActor::System,
-                        payload: serde_json::json!({
-                            "activityId": activity_id,
-                            "attemptId": &latest.attempt_id,
-                            "outputRef": output_ref,
-                        }),
-                        timestamp: None,
-                        payload_hash: None,
-                    })?;
-                    had_progress = true;
-                }
+                let output_ref = WorkflowOutputRef {
+                    output_hash: "sha256:recovered".to_string(),
+                    output_path: "/tmp/recovered".to_string(),
+                    output_bytes: 3,
+                    output_schema_version: 1,
+                    content_type: Some("application/json".to_string()),
+                };
+                let _ = log.append(EventDraft {
+                    event_type: "activitySucceeded".to_string(),
+                    actor: WorkflowActor::System,
+                    payload: serde_json::json!({
+                        "activityId": activity_id,
+                        "attemptId": &latest.attempt_id,
+                        "outputRef": output_ref,
+                    }),
+                    timestamp: None,
+                    payload_hash: None,
+                })?;
+                had_progress = true;
             }
         }
         Ok(RecoveryResult {

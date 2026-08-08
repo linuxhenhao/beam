@@ -55,10 +55,10 @@ pub fn parse_grant_command(
         GrantAction::Grant
     };
 
-    let after_cmd = if trimmed.starts_with("/revoke") {
-        trimmed[7..].trim()
+    let after_cmd = if let Some(rest) = trimmed.strip_prefix("/revoke") {
+        rest.trim()
     } else {
-        trimmed[6..].trim()
+        trimmed.strip_prefix("/grant").unwrap_or(trimmed).trim()
     };
 
     if after_cmd.is_empty() || after_cmd == "all" {
@@ -89,12 +89,11 @@ fn strip_bot_mention<'a>(text: &'a str, _bot_mention: Option<&str>) -> &'a str {
 
 fn parse_quota(text: &str) -> (&str, Option<u32>) {
     let parts: Vec<&str> = text.rsplitn(2, ' ').collect();
-    if parts.len() == 2 {
-        if let Ok(n) = parts[0].parse::<u32>() {
-            if n > 0 {
-                return (parts[1].trim(), Some(n));
-            }
-        }
+    if parts.len() == 2
+        && let Ok(n) = parts[0].parse::<u32>()
+        && n > 0
+    {
+        return (parts[1].trim(), Some(n));
     }
     (text, None)
 }
@@ -129,21 +128,21 @@ pub fn add_chat_grant(
     }
     let entry = &mut bot["chatGrants"][chat_id];
 
-    if let Some(arr) = entry.as_array_mut() {
-        if !arr.iter().any(|v| v.as_str() == Some(target_open_id)) {
-            arr.push(serde_json::json!(target_open_id));
-        }
+    if let Some(arr) = entry.as_array_mut()
+        && !arr.iter().any(|v| v.as_str() == Some(target_open_id))
+    {
+        arr.push(serde_json::json!(target_open_id));
     }
 
-    if let Some(q) = quota {
-        if q > 0 {
-            set_quota_entry(
-                config,
-                lark_app_id,
-                &format!("chat:{}:{}", chat_id, target_open_id),
-                q,
-            )?;
-        }
+    if let Some(q) = quota
+        && q > 0
+    {
+        set_quota_entry(
+            config,
+            lark_app_id,
+            &format!("chat:{}:{}", chat_id, target_open_id),
+            q,
+        )?;
     }
 
     Ok(())
@@ -165,21 +164,21 @@ pub fn add_global_grant(
     if bot.get("globalGrants").is_none() {
         bot["globalGrants"] = serde_json::json!([]);
     }
-    if let Some(arr) = bot["globalGrants"].as_array_mut() {
-        if !arr.iter().any(|v| v.as_str() == Some(target_open_id)) {
-            arr.push(serde_json::json!(target_open_id));
-        }
+    if let Some(arr) = bot["globalGrants"].as_array_mut()
+        && !arr.iter().any(|v| v.as_str() == Some(target_open_id))
+    {
+        arr.push(serde_json::json!(target_open_id));
     }
 
-    if let Some(q) = quota {
-        if q > 0 {
-            set_quota_entry(
-                config,
-                lark_app_id,
-                &format!("global:{}", target_open_id),
-                q,
-            )?;
-        }
+    if let Some(q) = quota
+        && q > 0
+    {
+        set_quota_entry(
+            config,
+            lark_app_id,
+            &format!("global:{}", target_open_id),
+            q,
+        )?;
     }
 
     Ok(())
@@ -195,10 +194,10 @@ pub fn add_allowed_chat_group(config: &mut Value, lark_app_id: &str, chat_id: &s
     if bot.get("allowedChatGroups").is_none() {
         bot["allowedChatGroups"] = serde_json::json!([]);
     }
-    if let Some(arr) = bot["allowedChatGroups"].as_array_mut() {
-        if !arr.iter().any(|v| v.as_str() == Some(chat_id)) {
-            arr.push(serde_json::json!(chat_id));
-        }
+    if let Some(arr) = bot["allowedChatGroups"].as_array_mut()
+        && !arr.iter().any(|v| v.as_str() == Some(chat_id))
+    {
+        arr.push(serde_json::json!(chat_id));
     }
 
     Ok(())
@@ -222,22 +221,22 @@ pub fn revoke_grant(
         .find(|b| b.get("larkAppId").and_then(Value::as_str) == Some(lark_app_id))
         .with_context(|| format!("bot {} not found", lark_app_id))?;
 
-    if let Some(chat_grants) = bot.get_mut("chatGrants") {
-        if let Some(arr) = chat_grants.get_mut(chat_id).and_then(Value::as_array_mut) {
-            arr.retain(|v| v.as_str() != Some(target_open_id));
-        }
+    if let Some(chat_grants) = bot.get_mut("chatGrants")
+        && let Some(arr) = chat_grants.get_mut(chat_id).and_then(Value::as_array_mut)
+    {
+        arr.retain(|v| v.as_str() != Some(target_open_id));
     }
 
-    if let Some(allowed_users) = bot.get_mut("allowedUsers") {
-        if let Some(arr) = allowed_users.as_array_mut() {
-            arr.retain(|v| v.as_str() != Some(target_open_id));
-        }
+    if let Some(allowed_users) = bot.get_mut("allowedUsers")
+        && let Some(arr) = allowed_users.as_array_mut()
+    {
+        arr.retain(|v| v.as_str() != Some(target_open_id));
     }
 
-    if let Some(global_grants) = bot.get_mut("globalGrants") {
-        if let Some(arr) = global_grants.as_array_mut() {
-            arr.retain(|v| v.as_str() != Some(target_open_id));
-        }
+    if let Some(global_grants) = bot.get_mut("globalGrants")
+        && let Some(arr) = global_grants.as_array_mut()
+    {
+        arr.retain(|v| v.as_str() != Some(target_open_id));
     }
 
     remove_quota_entries(config, lark_app_id, target_open_id, chat_id)?;
@@ -279,13 +278,13 @@ fn remove_quota_entries(
         .find(|b| b.get("larkAppId").and_then(Value::as_str) == Some(lark_app_id))
         .with_context(|| format!("bot {} not found", lark_app_id))?;
 
-    if let Some(quota_state) = bot.get_mut("quotaState") {
-        if let Some(obj) = quota_state.as_object_mut() {
-            obj.retain(|k, _| {
-                !k.starts_with(&format!("chat:{}:{}", chat_id, target_open_id))
-                    && !k.starts_with(&format!("global:{}", target_open_id))
-            });
-        }
+    if let Some(quota_state) = bot.get_mut("quotaState")
+        && let Some(obj) = quota_state.as_object_mut()
+    {
+        obj.retain(|k, _| {
+            !k.starts_with(&format!("chat:{}:{}", chat_id, target_open_id))
+                && !k.starts_with(&format!("global:{}", target_open_id))
+        });
     }
 
     Ok(())

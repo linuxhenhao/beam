@@ -137,7 +137,7 @@ fn decide_plain_node(
             actions: vec![OrchestratorAction::DispatchWork {
                 node_id: node_id.to_string(),
                 activity_id: work_activity_id.to_string(),
-                node,
+                node: Box::new(node),
             }],
             is_succeeded: false,
             is_failed: false,

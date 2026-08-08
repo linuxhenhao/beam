@@ -49,10 +49,10 @@ pub(crate) fn expand_tilde(path: &str) -> String {
 }
 
 pub(crate) fn is_retryable_feishu_resume_error(err: &anyhow::Error) -> bool {
-    if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>() {
-        if reqwest_err.is_timeout() || reqwest_err.is_connect() {
-            return true;
-        }
+    if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>()
+        && (reqwest_err.is_timeout() || reqwest_err.is_connect())
+    {
+        return true;
     }
     let haystacks = err
         .chain()

@@ -113,7 +113,7 @@ pub(crate) fn parse_retry_time(text: &str, now_ms: u64) -> Option<(u64, String)>
         .take(2)
         .collect::<Vec<_>>()
         .join(" ")
-        .trim_end_matches(|ch: char| ch == '.' || ch == ',' || ch == ';')
+        .trim_end_matches(['.', ',', ';'])
         .to_string();
     Some((retry_at, label))
 }
@@ -201,11 +201,11 @@ pub(crate) fn load_font_files() {
     };
 
     for path in &search_paths {
-        if let Ok(data) = std::fs::read(path) {
-            if let Ok(font) = FontVec::try_from_vec(data) {
-                *primary = Some(font);
-                break;
-            }
+        if let Ok(data) = std::fs::read(path)
+            && let Ok(font) = FontVec::try_from_vec(data)
+        {
+            *primary = Some(font);
+            break;
         }
     }
 
@@ -222,11 +222,11 @@ pub(crate) fn load_font_files() {
 
     let mut cjk = CJK_FONT.lock().unwrap();
     for path in &cjk_search {
-        if let Ok(data) = std::fs::read(path) {
-            if let Ok(font) = FontVec::try_from_vec(data) {
-                *cjk = Some(font);
-                break;
-            }
+        if let Ok(data) = std::fs::read(path)
+            && let Ok(font) = FontVec::try_from_vec(data)
+        {
+            *cjk = Some(font);
+            break;
         }
     }
 }
@@ -435,7 +435,7 @@ pub(crate) fn fallback_bitmap_png(screen: &str) -> Result<Vec<u8>> {
     let mut image = ImageBuffer::from_pixel(width, height, bg);
 
     for (row, line) in lines.iter().enumerate() {
-        for (col, ch) in line.chars().take(cols as usize).enumerate() {
+        for (col, ch) in line.chars().take(cols).enumerate() {
             let glyph = font8x8::BASIC_FONTS
                 .get(ch)
                 .or_else(|| font8x8::BASIC_FONTS.get('?'))
@@ -633,6 +633,7 @@ macro_rules! screenshot_failure_event {
 ///
 /// Use [`perform_screenshot_upload`] when the caller wants the shared hash
 /// update to happen inside the same await (blocking path).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn do_screenshot_upload(
     stdout: &Arc<Mutex<tokio::io::Stdout>>,
     session_id: &str,
@@ -777,6 +778,7 @@ pub(crate) async fn do_screenshot_upload(
 /// Note: kept for API completeness; new code should prefer
 /// [`do_screenshot_upload`] and manage dedup state separately.
 #[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn perform_screenshot_upload(
     stdout: &Arc<Mutex<tokio::io::Stdout>>,
     session_id: &str,

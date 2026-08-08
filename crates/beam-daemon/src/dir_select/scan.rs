@@ -21,13 +21,13 @@ pub fn determine_root_working_dir(
 
 /// Expand ~ to the user's home directory.
 pub(crate) fn expand_tilde(path: &str) -> String {
-    if path.starts_with("~/") || path == "~" {
-        if let Ok(home) = std::env::var("HOME") {
-            if path == "~" {
-                return home;
-            }
-            return format!("{}/{}", home, &path[2..]);
+    if (path.starts_with("~/") || path == "~")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        if path == "~" {
+            return home;
         }
+        return format!("{}/{}", home, &path[2..]);
     }
     path.to_string()
 }

@@ -367,7 +367,7 @@ fn process_loop_iteration_body(
                     actions: vec![OrchestratorAction::DispatchWork {
                         node_id: node_id.clone(),
                         activity_id: work_id,
-                        node: node.clone(),
+                        node: Box::new(node.clone()),
                     }],
                     is_succeeded: false,
                     is_failed: false,

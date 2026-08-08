@@ -132,6 +132,7 @@ pub(crate) fn provider_result_to_feishu_result(
 /// Merges schedule reconciler outcomes, Feishu IM outcomes, wait/cancel/
 /// worker-crashed recovery outcomes, and registry-check metadata into a single
 /// response payload.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_workflow_resume_response(
     run_id: String,
     status: RunStatus,
@@ -298,7 +299,7 @@ pub(crate) fn build_resume_reconcile_outcome(
                 && event.payload.get("attemptId").and_then(Value::as_str) == Some(attempt_id)
         })
         .max_by_key(|event| event_seq_from_id(&event.event_id))
-        .map(|event| workflow_event_json(event));
+        .map(workflow_event_json);
     let reconcile_event_json = if recovered {
         Value::Null
     } else {

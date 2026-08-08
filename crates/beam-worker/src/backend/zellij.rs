@@ -336,7 +336,7 @@ impl ZellijBackend {
             .map(|bin| bin == "zellij")
             .unwrap_or(false);
         is_zellij_bin
-            && argv.iter().any(|a| *a == "--server")
+            && argv.contains(&"--server")
             && argv.iter().any(|a| a.rsplit('/').next() == Some(session))
     }
 
@@ -620,10 +620,11 @@ impl SessionBackend for ZellijBackend {
         let text = String::from_utf8_lossy(&out.stdout);
         for line in text.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 && parts[1] != "zellij" {
-                if let Ok(pid) = parts[0].parse::<u32>() {
-                    return Ok(Some(pid));
-                }
+            if parts.len() >= 2
+                && parts[1] != "zellij"
+                && let Ok(pid) = parts[0].parse::<u32>()
+            {
+                return Ok(Some(pid));
             }
         }
         Ok(None)

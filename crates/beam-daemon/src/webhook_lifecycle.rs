@@ -265,13 +265,12 @@ pub fn fail_webhook_lifecycle_group(
 ) -> Result<()> {
     let _lock = FileLock::acquire(paths)?;
     let mut store = read_store(paths)?;
-    if let Some(idx) = find_index(&store, connector_id, dedup_key) {
-        if store.records[idx].lifecycle_id == lifecycle_id
-            && store.records[idx].status == "creating"
-        {
-            store.records.remove(idx);
-            write_store(paths, &store)?;
-        }
+    if let Some(idx) = find_index(&store, connector_id, dedup_key)
+        && store.records[idx].lifecycle_id == lifecycle_id
+        && store.records[idx].status == "creating"
+    {
+        store.records.remove(idx);
+        write_store(paths, &store)?;
     }
     Ok(())
 }

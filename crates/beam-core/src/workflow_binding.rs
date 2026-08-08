@@ -297,15 +297,15 @@ fn find_loop_output_ref<'a>(
         if parsed.node_id != node_id || parsed.activity_kind != expected_kind {
             continue;
         }
-        if let Some(loop_id) = loop_id {
-            if parsed.loop_id.as_deref() != Some(loop_id) {
-                continue;
-            }
+        if let Some(loop_id) = loop_id
+            && parsed.loop_id != Some(loop_id)
+        {
+            continue;
         }
-        if let Some(iteration) = iteration {
-            if parsed.iteration != Some(iteration) {
-                continue;
-            }
+        if let Some(iteration) = iteration
+            && parsed.iteration != Some(iteration)
+        {
+            continue;
         }
         let iter = parsed.iteration.unwrap_or(0);
         if best.map(|(prev, _)| iter > prev).unwrap_or(true) {
@@ -332,9 +332,8 @@ fn parse_activity_id<'a>(s: &'a str) -> Option<ParsedActivityId<'a>> {
         let (loop_id, iter) = loop_part.rsplit_once('.')?;
         let iteration = iter.parse().ok()?;
         let after_iter = &after_loop[iter_end + 2..];
-        let mut segs = after_iter.splitn(2, "::");
-        let activity_kind = segs.next()?;
-        let node_id = segs.next()?;
+        let (activity_kind, node_id) = after_iter.split_once("::")?;
+
         let _ = run_id_end; // keep the parser symmetric with TS, run id is not needed here.
         return Some(ParsedActivityId {
             node_id,

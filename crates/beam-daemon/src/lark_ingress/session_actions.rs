@@ -139,13 +139,12 @@ pub(crate) async fn restart_session(
         .adopted_from
         .as_ref()
         .and_then(|v| v.zellij_session.as_ref())
+        && !zellij_has_session(adopted)
     {
-        if !zellij_has_session(adopted) {
-            return Err((
-                StatusCode::CONFLICT,
-                "adopted zellij session no longer exists".to_string(),
-            ));
-        }
+        return Err((
+            StatusCode::CONFLICT,
+            "adopted zellij session no longer exists".to_string(),
+        ));
     }
 
     let _ = send_worker_message(&state.workers, &session_id, &DaemonToWorker::Close).await;
@@ -474,6 +473,7 @@ pub(crate) async fn ensure_worker_for_session(state: &AppState, session_id: &str
 // Event outcome dispatch (from handle_lark_event_payload's match on outcome)
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch_event_outcome(
     state: &AppState,
     bot: &BotConfig,
@@ -706,7 +706,7 @@ pub(crate) async fn dispatch_event_outcome(
                         &parsed.message_id,
                         *scope,
                         session_root,
-                    ) + &text;
+                    ) + text;
                     prompt::build_follow_up_content(
                         &raw,
                         &prompt::FollowUpContentOptions {
@@ -781,7 +781,7 @@ pub(crate) async fn dispatch_event_outcome(
             // A trigger can opt out of the directory selection card and pin
             // its own working dir; otherwise the bot-level setting applies.
             let skip_dir_select = bot.skip_working_dir_prompt
-                || custom_trigger.map_or(false, |trigger| trigger.skip_dir_select);
+                || custom_trigger.is_some_and(|trigger| trigger.skip_dir_select);
             if skip_dir_select {
                 let mentions = parsed.mentions.clone();
                 let prompt_raw = prompt::build_quote_hint(

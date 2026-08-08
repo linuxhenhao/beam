@@ -472,10 +472,11 @@ pub async fn run(init: InitConfig) -> Result<()> {
                     Ok(chunk) => {
                         // latest wins: the chunk is the full viewport (not incremental)
                         *sub_latest_raw_screen.write().await = chunk;
-                        match sub_trigger_tx.try_send(Trigger::PaneUpdate) {
-                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
-                            _ => {} // Ok or Full → discard, keep listening
-                        }
+                        if let Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) =
+                            sub_trigger_tx.try_send(Trigger::PaneUpdate)
+                        {
+                            break;
+                        } // Ok or Full → discard, keep listening
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,

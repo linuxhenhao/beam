@@ -330,7 +330,7 @@ pub(crate) async fn lark_list_thread_history(
     if !looks_like_lark_message_id(&session.root_message_id) {
         anyhow::bail!("thread history requires session.thread_id or a root message id");
     }
-    let scan_limit = (limit * 4).max(50).min(LARK_HISTORY_MAX_LIMIT);
+    let scan_limit = (limit * 4).clamp(50, LARK_HISTORY_MAX_LIMIT);
     let scanned = lark_list_chat_history(state, bot, &session.chat_id, scan_limit).await?;
     Ok(scanned
         .into_iter()
@@ -353,7 +353,7 @@ pub(crate) async fn lark_list_ambient_history(
     session: &Session,
     limit: usize,
 ) -> Result<Vec<Value>> {
-    let scan_limit = (limit * 4).max(50).min(LARK_HISTORY_MAX_LIMIT);
+    let scan_limit = (limit * 4).clamp(50, LARK_HISTORY_MAX_LIMIT);
     let before_ms = if looks_like_lark_message_id(&session.root_message_id) {
         lark_get_message_detail(state, bot, &session.root_message_id, false)
             .await
@@ -381,15 +381,14 @@ pub(crate) async fn lark_list_ambient_history(
             if thread.is_some() && item.get("thread_id").and_then(Value::as_str) == thread {
                 return false;
             }
-            if let Some(before_ms) = before_ms {
-                if item
+            if let Some(before_ms) = before_ms
+                && item
                     .get("create_time")
                     .and_then(Value::as_str)
                     .and_then(|v| v.parse::<i64>().ok())
                     .is_some_and(|created| created >= before_ms)
-                {
-                    return false;
-                }
+            {
+                return false;
             }
             true
         })

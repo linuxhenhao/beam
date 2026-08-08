@@ -331,11 +331,10 @@ pub async fn run_tick<H: WorkflowExecutionHooks + Clone + Send + 'static>(
                 }
             }
             _ = tokio::time::sleep(Duration::from_millis(20)), if cancel_seen => {
-                if let Some(deadline) = cancel_abort_deadline {
-                    if Instant::now() >= deadline {
+                if let Some(deadline) = cancel_abort_deadline
+                    && Instant::now() >= deadline {
                         join_set.abort_all();
                     }
-                }
             }
         }
     }
@@ -488,17 +487,17 @@ async fn check_pending_cancels<H: WorkflowExecutionHooks + Send>(
         .await;
     }
 
-    if let Some(ref intent) = snapshot.run.cancelled_run_intent {
-        if snapshot.run.status != RunStatus::Cancelled {
-            let _ = crate::complete_run_cancel(
-                &mut rt.log,
-                crate::CompleteRunCancelInput {
-                    cancel_origin_event_id: intent.cancel_origin_event_id.clone(),
-                },
-                WorkflowActor::Scheduler,
-            )
-            .await;
-        }
+    if let Some(ref intent) = snapshot.run.cancelled_run_intent
+        && snapshot.run.status != RunStatus::Cancelled
+    {
+        let _ = crate::complete_run_cancel(
+            &mut rt.log,
+            crate::CompleteRunCancelInput {
+                cancel_origin_event_id: intent.cancel_origin_event_id.clone(),
+            },
+            WorkflowActor::Scheduler,
+        )
+        .await;
     }
 
     if !snapshot.run.cancelled_node_intents.is_empty() {
@@ -561,7 +560,7 @@ fn select_tick_actions(
 fn action_serialization_key(_def: &WorkflowDefinition, action: &OrchestratorAction) -> String {
     match action {
         OrchestratorAction::DispatchWork { node_id, node, .. } => {
-            let bot_key = match node {
+            let bot_key = match node.as_ref() {
                 WorkflowNode::Subagent(node) => Some(format!("bot:{}", node.bot)),
                 WorkflowNode::HostExecutor(node) => Some(format!("executor:{}", node.executor)),
                 WorkflowNode::Loop(_) | WorkflowNode::Decision(_) => None,

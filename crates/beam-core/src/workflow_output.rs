@@ -36,9 +36,7 @@ fn sanitize_workflow_output_block(block: &str) -> String {
     block
         .replace("\u{1b}][", "")
         .replace("\u{1b}[", "")
-        .replace('\u{7}', "")
-        .replace('\u{1b}', "")
-        .replace('\u{0}', "")
+        .replace(['\u{7}', '\u{1b}', '\u{0}'], "")
         .trim()
         .to_string()
 }
