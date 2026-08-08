@@ -49,7 +49,12 @@ pub(crate) async fn validate_setup_credentials(app_id: &str, app_secret: &str) -
 
 pub(crate) fn default_cli_args_for_cli_id(cli_id: &str) -> Vec<String> {
     cli_spec(cli_id)
-        .map(|spec| spec.default_cli_args.iter().map(ToString::to_string).collect())
+        .map(|spec| {
+            spec.default_cli_args
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        })
         .unwrap_or_default()
 }
 

@@ -270,10 +270,7 @@ pub(crate) const TUI_READY_TIMEOUT: Duration = Duration::from_secs(60);
 /// marker (see `CliSpec::tui_ready_marker`). Returns `true` when the marker
 /// was seen; `false` on timeout — callers proceed anyway, degrading to the
 /// un-gated behavior.
-pub(crate) async fn wait_for_tui_ready(
-    backend: &dyn SessionBackend,
-    marker: &str,
-) -> bool {
+pub(crate) async fn wait_for_tui_ready(backend: &dyn SessionBackend, marker: &str) -> bool {
     wait_for_tui_ready_with_timeout(backend, marker, TUI_READY_TIMEOUT).await
 }
 
@@ -567,17 +564,22 @@ mod tests {
 
         #[tokio::test]
         async fn succeeds_on_first_confirm_without_extra_enter() {
-            let backend = EnterCounter { enters: AtomicUsize::new(0) };
-            let ok = confirm_submit_loop_with_interval(&backend, || Ok(true), Duration::from_millis(1))
-                .await
-                .unwrap();
+            let backend = EnterCounter {
+                enters: AtomicUsize::new(0),
+            };
+            let ok =
+                confirm_submit_loop_with_interval(&backend, || Ok(true), Duration::from_millis(1))
+                    .await
+                    .unwrap();
             assert!(ok);
             assert_eq!(backend.enters.load(Ordering::SeqCst), 0);
         }
 
         #[tokio::test]
         async fn resends_enter_between_attempts() {
-            let backend = EnterCounter { enters: AtomicUsize::new(0) };
+            let backend = EnterCounter {
+                enters: AtomicUsize::new(0),
+            };
             let calls = AtomicUsize::new(0);
             let ok = confirm_submit_loop_with_interval(
                 &backend,
@@ -593,10 +595,13 @@ mod tests {
 
         #[tokio::test]
         async fn returns_false_after_all_attempts() {
-            let backend = EnterCounter { enters: AtomicUsize::new(0) };
-            let ok = confirm_submit_loop_with_interval(&backend, || Ok(false), Duration::from_millis(1))
-                .await
-                .unwrap();
+            let backend = EnterCounter {
+                enters: AtomicUsize::new(0),
+            };
+            let ok =
+                confirm_submit_loop_with_interval(&backend, || Ok(false), Duration::from_millis(1))
+                    .await
+                    .unwrap();
             assert!(!ok);
             // 4 attempts, Enter resent after the first 3
             assert_eq!(backend.enters.load(Ordering::SeqCst), 3);
@@ -604,7 +609,7 @@ mod tests {
     }
 
     mod tui_ready_gate {
-        use super::super::{wait_for_tui_ready_with_timeout};
+        use super::super::wait_for_tui_ready_with_timeout;
         use crate::backend::{SessionBackend, SpawnOpts};
         use anyhow::Result;
         use async_trait::async_trait;
@@ -706,8 +711,7 @@ mod tests {
                 screens: vec!["still booting".to_string()],
                 calls: AtomicUsize::new(0),
             };
-            let ok =
-                wait_for_tui_ready_with_timeout(&backend, "welcome", Duration::ZERO).await;
+            let ok = wait_for_tui_ready_with_timeout(&backend, "welcome", Duration::ZERO).await;
             assert!(!ok);
         }
     }

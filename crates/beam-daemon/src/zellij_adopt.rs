@@ -522,7 +522,10 @@ mod tests {
         assert_eq!(cli_id_from_zellij_command("/usr/bin/codex"), "codex");
         assert_eq!(cli_id_from_zellij_command("/usr/bin/traex"), "traex");
         assert_eq!(cli_id_from_zellij_command("claude"), "claude-code");
-        assert_eq!(cli_id_from_zellij_command("/home/u/.kimi-code/bin/kimi"), "kimi");
+        assert_eq!(
+            cli_id_from_zellij_command("/home/u/.kimi-code/bin/kimi"),
+            "kimi"
+        );
         assert_eq!(cli_id_from_zellij_command("custom-tool"), "custom-tool");
     }
 

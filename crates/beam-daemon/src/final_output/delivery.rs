@@ -478,7 +478,10 @@ pub(crate) async fn commit_delivered_final_output(
 /// Snapshot the session's current turn id for an explicit send. On success the
 /// send marks that turn as answered, so the worker's final output for the same
 /// turn is skipped by turn-id dedupe regardless of content differences.
-pub(crate) async fn current_turn_id_for_explicit_send(state: &AppState, session_id: &str) -> Option<String> {
+pub(crate) async fn current_turn_id_for_explicit_send(
+    state: &AppState,
+    session_id: &str,
+) -> Option<String> {
     let sessions = state.sessions.lock().await;
     sessions
         .get(session_id)

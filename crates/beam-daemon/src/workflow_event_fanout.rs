@@ -509,7 +509,9 @@ mod tests {
             grant_pending: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             pending_creates: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             dashboard_token: Arc::new(tokio::sync::Mutex::new(None)),
-            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(crate::ApiTokenState::for_test())),
+            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::ApiTokenState::for_test(),
+            )),
             external_host: Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
         }
     }

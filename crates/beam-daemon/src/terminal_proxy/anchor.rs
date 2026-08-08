@@ -227,7 +227,9 @@ pub(crate) async fn ensure_read_only_anchor(
                 outcome = "error",
                 session_id = session_id_for_log,
                 "terminal proxy: zellij read-only anchor ended for session {} zellij={}: {}",
-                session_id_for_log, zellij_session_for_task, err
+                session_id_for_log,
+                zellij_session_for_task,
+                err
             );
         }
     });

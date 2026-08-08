@@ -139,9 +139,10 @@ impl Adapter for OpenCodeState {
         backend.send_text(content).await?;
         tokio::time::sleep(Duration::from_millis(200)).await;
         backend.send_enter().await?;
-        let confirmed =
-            confirm_submit_loop(backend, || opencode_submit_confirmed(&source, base_offset, content))
-                .await?;
+        let confirmed = confirm_submit_loop(backend, || {
+            opencode_submit_confirmed(&source, base_offset, content)
+        })
+        .await?;
         if confirmed {
             return Ok(SubmitResult {
                 submitted: true,

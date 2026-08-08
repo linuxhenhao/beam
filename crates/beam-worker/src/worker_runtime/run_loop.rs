@@ -569,8 +569,7 @@ pub async fn run(init: InitConfig) -> Result<()> {
                 }
                 ResolveOutcome::NotFound { reason } => {
                     info!(session = %init.session_id, adapter = %init.cli_id, "transcript source not found: {}", reason);
-                    send_message(&stdout, &WorkerToDaemon::UserNotify { message: reason })
-                        .await?;
+                    send_message(&stdout, &WorkerToDaemon::UserNotify { message: reason }).await?;
                 }
             }
         }
@@ -581,8 +580,7 @@ pub async fn run(init: InitConfig) -> Result<()> {
     // both the processing watchdog (WARN past the threshold) and the
     // heartbeat IPC, so the daemon can tell "worker dead" apart from
     // "worker stuck on a message".
-    let processing_since: Arc<StdMutex<Option<(String, u64)>>> =
-        Arc::new(StdMutex::new(None));
+    let processing_since: Arc<StdMutex<Option<(String, u64)>>> = Arc::new(StdMutex::new(None));
 
     // stdin reader runs on a dedicated OS thread: while the message loop is
     // busy handling one message, subsequent daemon messages keep being
@@ -651,7 +649,11 @@ pub async fn run(init: InitConfig) -> Result<()> {
         worker_joins.spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(10)).await;
-                let since = hb_processing.lock().unwrap().as_ref().map(|(_, start)| *start);
+                let since = hb_processing
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|(_, start)| *start);
                 if send_message(
                     &hb_stdout,
                     &WorkerToDaemon::Heartbeat {

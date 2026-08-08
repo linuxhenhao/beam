@@ -1,8 +1,8 @@
 //! Linux-only adopted PID tests for the opencode adapter.
 
 use super::super::*;
-use super::test_helpers::*;
 use super::OpenCodeState;
+use super::test_helpers::*;
 use crate::adapter::ResolveOutcome;
 use std::fs;
 
@@ -200,7 +200,8 @@ async fn adopted_pid_alive_screen_disambiguation_still_works_in_write_input() {
     let backend = RecordingBackend::new(db_path.clone(), true, 2001)
         .with_target_session("sess-a")
         .with_screen("The tests all passed, 42 assertions succeeded.".to_string());
-    let result = state.write_input(&backend, "next command")
+    let result = state
+        .write_input(&backend, "next command")
         .await
         .expect("write input");
     assert!(
@@ -269,7 +270,8 @@ async fn adopted_pid_alive_weak_screen_match_stays_ambiguous() {
     };
     let backend = RecordingBackend::new(db_path.clone(), false, 2001)
         .with_screen("some totally unrelated content here".to_string());
-    let result = state.write_input(&backend, "cmd")
+    let result = state
+        .write_input(&backend, "cmd")
         .await
         .expect("write input");
     assert!(!result.submitted, "weak screen match should stay ambiguous");

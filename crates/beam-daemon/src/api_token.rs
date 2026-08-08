@@ -177,7 +177,9 @@ pub(crate) async fn load_or_create_api_token(paths: &BeamPaths) -> Result<ApiTok
         .map(|issued_at| !token_age_due(issued_at, now))
         .unwrap_or(false);
     if fresh {
-        return Ok(ApiTokenState::new(existing.expect("fresh implies some token")));
+        return Ok(ApiTokenState::new(
+            existing.expect("fresh implies some token"),
+        ));
     }
     let new_token = generate_api_token();
     write_api_token(paths, &new_token)?;
@@ -360,16 +362,47 @@ mod tests {
         let (mut state, key) = signed_state();
         let now = now_unix_secs();
         let sig = beam_core::api_token::sign_request(
-            &key, now, "nonce-1", "POST", "/sessions/abc/input", b"body",
+            &key,
+            now,
+            "nonce-1",
+            "POST",
+            "/sessions/abc/input",
+            b"body",
         );
-        assert!(state.verify_signature(now, "nonce-1", "POST", "/sessions/abc/input", b"body", &sig));
+        assert!(state.verify_signature(
+            now,
+            "nonce-1",
+            "POST",
+            "/sessions/abc/input",
+            b"body",
+            &sig
+        ));
         // Replay with the same nonce is rejected.
-        assert!(!state.verify_signature(now, "nonce-1", "POST", "/sessions/abc/input", b"body", &sig));
+        assert!(!state.verify_signature(
+            now,
+            "nonce-1",
+            "POST",
+            "/sessions/abc/input",
+            b"body",
+            &sig
+        ));
         // A fresh nonce still works.
         let sig2 = beam_core::api_token::sign_request(
-            &key, now, "nonce-2", "POST", "/sessions/abc/input", b"body",
+            &key,
+            now,
+            "nonce-2",
+            "POST",
+            "/sessions/abc/input",
+            b"body",
         );
-        assert!(state.verify_signature(now, "nonce-2", "POST", "/sessions/abc/input", b"body", &sig2));
+        assert!(state.verify_signature(
+            now,
+            "nonce-2",
+            "POST",
+            "/sessions/abc/input",
+            b"body",
+            &sig2
+        ));
     }
 
     #[test]
@@ -377,9 +410,7 @@ mod tests {
         let (mut state, key) = signed_state();
         let now = now_unix_secs();
         let stale_ts = now - SIG_WINDOW_SECS - 10;
-        let sig = beam_core::api_token::sign_request(
-            &key, stale_ts, "n", "GET", "/sessions", b"",
-        );
+        let sig = beam_core::api_token::sign_request(&key, stale_ts, "n", "GET", "/sessions", b"");
         assert!(!state.verify_signature(stale_ts, "n", "GET", "/sessions", b"", &sig));
         // Well-formed headers but wrong signature (signed over other data).
         let bad = beam_core::api_token::sign_request(&key, now, "n", "GET", "/other", b"");
@@ -407,7 +438,8 @@ mod tests {
             p.valid_until_unix = now.saturating_sub(1);
             p
         });
-        let sig2 = beam_core::api_token::sign_request(&old_key2, now, "n2", "GET", "/sessions", b"");
+        let sig2 =
+            beam_core::api_token::sign_request(&old_key2, now, "n2", "GET", "/sessions", b"");
         assert!(!state2.verify_signature(now, "n2", "GET", "/sessions", b"", &sig2));
     }
 }

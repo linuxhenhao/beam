@@ -255,7 +255,8 @@ pub(crate) async fn require_dashboard_access(
     };
     // Accept the rotating local api token as well: local clients (beam CLI)
     // cannot complete the dashboard login flow but can read the token file.
-    if dashboard_token_is_valid(state, &token).await || state.api_token.read().await.is_valid(&token)
+    if dashboard_token_is_valid(state, &token).await
+        || state.api_token.read().await.is_valid(&token)
     {
         Ok(())
     } else {
@@ -324,12 +325,14 @@ async fn verify_signed_request(
         .path_and_query()
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| parts.uri.path().to_string());
-    let bytes = axum::body::to_bytes(body, SIG_BODY_LIMIT).await.map_err(|_| {
-        (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "request body too large".to_string(),
-        )
-    })?;
+    let bytes = axum::body::to_bytes(body, SIG_BODY_LIMIT)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request body too large".to_string(),
+            )
+        })?;
     let verified = state.api_token.write().await.verify_signature(
         ts,
         &nonce,

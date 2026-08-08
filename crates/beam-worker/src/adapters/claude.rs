@@ -12,8 +12,8 @@ use beam_core::{FinalOutputKind, InitConfig};
 use serde_json::Value;
 
 use crate::adapter::{
-    Adapter, PendingTurnKind, PollResult, ResolveOutcome, SpawnSpec, SubmitResult, TranscriptCursor,
-    confirm_submit_loop, file_size, normalize_history_text, realpath_cwd,
+    Adapter, PendingTurnKind, PollResult, ResolveOutcome, SpawnSpec, SubmitResult,
+    TranscriptCursor, confirm_submit_loop, file_size, normalize_history_text, realpath_cwd,
 };
 use crate::backend::SessionBackend;
 

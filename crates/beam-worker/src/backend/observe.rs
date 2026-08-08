@@ -145,11 +145,11 @@ impl SessionBackend for ZellijObserveBackend {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        let out = match tokio::time::timeout(crate::backend::ZELLIJ_ACTION_TIMEOUT, cmd.output()).await
-        {
-            Ok(Ok(out)) if out.status.success() => out,
-            _ => return Ok(None),
-        };
+        let out =
+            match tokio::time::timeout(crate::backend::ZELLIJ_ACTION_TIMEOUT, cmd.output()).await {
+                Ok(Ok(out)) if out.status.success() => out,
+                _ => return Ok(None),
+            };
         let json = String::from_utf8_lossy(&out.stdout);
         Ok(parse_zellij_cursor_from_list_panes(&json, numeric_id))
     }

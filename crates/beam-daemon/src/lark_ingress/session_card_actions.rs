@@ -549,7 +549,9 @@ async fn handle_toggle_display(
         CardRenderTarget::CallbackRaw => {
             info!(
                 "[{}] toggle_display callback-raw: clicked={:?}, mode={:?}",
-                session_snapshot.session_id, action.clicked_message_id, session_snapshot.display_mode,
+                session_snapshot.session_id,
+                action.clicked_message_id,
+                session_snapshot.display_mode,
             );
             if let Some(nonce) = stale_frozen_nonce.as_deref() {
                 if let Err(err) =

@@ -444,7 +444,9 @@ mod tests {
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
             pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
-            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(crate::ApiTokenState::for_test())),
+            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::ApiTokenState::for_test(),
+            )),
             external_host: std::sync::Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
         }
     }
@@ -518,7 +520,9 @@ mod tests {
 
     #[tokio::test]
     async fn create_ask_timeout_returns_timed_out_result() {
-        let _env_lock = test_helpers::lark_base_url_env_lock().lock().expect("lark env lock");
+        let _env_lock = test_helpers::lark_base_url_env_lock()
+            .lock()
+            .expect("lark env lock");
         let base_url = test_helpers::start_mock_lark_server().await;
         let _env_guard = test_helpers::LarkBaseUrlEnvGuard::set(&base_url);
         let app_id = "app-ask-timeout";
@@ -552,7 +556,13 @@ mod tests {
         let ask_result: AskResult =
             serde_json::from_value(result.unwrap().0).expect("valid AskResult JSON");
         assert!(
-            matches!(ask_result, AskResult::TimedOut { timed_out: true, .. }),
+            matches!(
+                ask_result,
+                AskResult::TimedOut {
+                    timed_out: true,
+                    ..
+                }
+            ),
             "expected TimedOut, got {:?}",
             ask_result
         );

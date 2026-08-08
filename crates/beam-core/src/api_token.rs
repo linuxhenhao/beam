@@ -132,8 +132,8 @@ pub fn sign_request(
     body: &[u8],
 ) -> String {
     let payload = signature_payload(ts_unix, nonce, method, path_query, body);
-    let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes())
-        .expect("hmac accepts keys of any length");
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("hmac accepts keys of any length");
     mac.update(payload.as_bytes());
     hex_encode(&mac.finalize().into_bytes())
 }
@@ -152,8 +152,8 @@ pub fn verify_request_signature(
         return false;
     };
     let payload = signature_payload(ts_unix, nonce, method, path_query, body);
-    let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes())
-        .expect("hmac accepts keys of any length");
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("hmac accepts keys of any length");
     mac.update(payload.as_bytes());
     mac.verify_slice(&sig_bytes).is_ok()
 }
@@ -254,12 +254,24 @@ mod tests {
         let body = br#"{"content":"hello"}"#;
         let sig = sign_request(&key, 1000, "nonce-1", "POST", "/sessions/abc/input", body);
         assert!(verify_request_signature(
-            &key, 1000, "nonce-1", "POST", "/sessions/abc/input", body, &sig
+            &key,
+            1000,
+            "nonce-1",
+            "POST",
+            "/sessions/abc/input",
+            body,
+            &sig
         ));
         // Same payload with another key must fail.
         let other_key = generate_api_token();
         assert!(!verify_request_signature(
-            &other_key, 1000, "nonce-1", "POST", "/sessions/abc/input", body, &sig
+            &other_key,
+            1000,
+            "nonce-1",
+            "POST",
+            "/sessions/abc/input",
+            body,
+            &sig
         ));
     }
 
@@ -270,23 +282,59 @@ mod tests {
         let sig = sign_request(&key, 1000, "n", "POST", "/sessions/abc/input", body);
         // Tampered body, method, path, timestamp, or nonce all fail.
         assert!(!verify_request_signature(
-            &key, 1000, "n", "POST", "/sessions/abc/input", b"tampered", &sig
+            &key,
+            1000,
+            "n",
+            "POST",
+            "/sessions/abc/input",
+            b"tampered",
+            &sig
         ));
         assert!(!verify_request_signature(
-            &key, 1000, "n", "GET", "/sessions/abc/input", body, &sig
+            &key,
+            1000,
+            "n",
+            "GET",
+            "/sessions/abc/input",
+            body,
+            &sig
         ));
         assert!(!verify_request_signature(
-            &key, 1000, "n", "POST", "/sessions/xyz/input", body, &sig
+            &key,
+            1000,
+            "n",
+            "POST",
+            "/sessions/xyz/input",
+            body,
+            &sig
         ));
         assert!(!verify_request_signature(
-            &key, 9999, "n", "POST", "/sessions/abc/input", body, &sig
+            &key,
+            9999,
+            "n",
+            "POST",
+            "/sessions/abc/input",
+            body,
+            &sig
         ));
         assert!(!verify_request_signature(
-            &key, 1000, "other", "POST", "/sessions/abc/input", body, &sig
+            &key,
+            1000,
+            "other",
+            "POST",
+            "/sessions/abc/input",
+            body,
+            &sig
         ));
         // Malformed signature fails instead of panicking.
         assert!(!verify_request_signature(
-            &key, 1000, "n", "POST", "/sessions/abc/input", body, "not-hex"
+            &key,
+            1000,
+            "n",
+            "POST",
+            "/sessions/abc/input",
+            body,
+            "not-hex"
         ));
     }
 
@@ -294,6 +342,8 @@ mod tests {
     fn signature_method_case_is_normalized() {
         let key = generate_api_token();
         let sig = sign_request(&key, 1000, "n", "post", "/a", b"");
-        assert!(verify_request_signature(&key, 1000, "n", "POST", "/a", b"", &sig));
+        assert!(verify_request_signature(
+            &key, 1000, "n", "POST", "/a", b"", &sig
+        ));
     }
 }

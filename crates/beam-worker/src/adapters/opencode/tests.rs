@@ -6,8 +6,8 @@
 #[path = "test_helpers.rs"]
 mod test_helpers;
 
-use super::*;
 use super::OpenCodeState;
+use super::*;
 use crate::adapter::ResolveOutcome;
 use beam_core::FinalOutputKind;
 use std::fs;
@@ -192,7 +192,8 @@ conn.commit()
         adopted_pid: None,
     };
     let backend = RecordingBackend::new(db_path.clone(), true, 1000);
-    let result = state.write_input(&backend, "hello opencode")
+    let result = state
+        .write_input(&backend, "hello opencode")
         .await
         .expect("write input");
     assert!(result.submitted);
@@ -259,7 +260,8 @@ conn.commit()
         adopted_pid: None,
     };
     let backend = RecordingBackend::new(db_path.clone(), false, 1000);
-    let result = state.write_input(&backend, "hello opencode")
+    let result = state
+        .write_input(&backend, "hello opencode")
         .await
         .expect("write input");
     assert!(!result.submitted);
@@ -512,7 +514,8 @@ async fn opencode_write_input_returns_ambiguous_failure_for_multiple_candidates(
         adopted_pid: None,
     };
     let backend = RecordingBackend::new(db_path.clone(), false, 1000);
-    let result = state.write_input(&backend, "hello")
+    let result = state
+        .write_input(&backend, "hello")
         .await
         .expect("write input");
     assert!(!result.submitted);
@@ -592,7 +595,8 @@ async fn disambiguation_screen_matches_one_candidate_clearly_selects_it() {
     let backend = RecordingBackend::new(db_path.clone(), true, 2001)
         .with_target_session("sess-a")
         .with_screen("The tests all passed, 42 assertions succeeded.".to_string());
-    let result = state.write_input(&backend, "next command")
+    let result = state
+        .write_input(&backend, "next command")
         .await
         .expect("write input");
     assert!(result.submitted, "should auto-select sess-a and submit");
@@ -677,7 +681,8 @@ async fn disambiguation_screen_does_not_match_weakly_stays_ambiguous() {
     // screen contains unrelated text – neither candidate will score well.
     let backend = RecordingBackend::new(db_path.clone(), false, 2001)
         .with_screen("some totally unrelated content here".to_string());
-    let result = state.write_input(&backend, "cmd")
+    let result = state
+        .write_input(&backend, "cmd")
         .await
         .expect("write input");
     assert!(!result.submitted, "should stay ambiguous");
@@ -754,7 +759,8 @@ async fn disambiguation_expected_session_id_still_takes_priority() {
     let backend = RecordingBackend::new(db_path.clone(), true, 2001)
         .with_target_session("sess-one")
         .with_screen("detailed response from session two about deployment".to_string());
-    let result = state.write_input(&backend, "cmd")
+    let result = state
+        .write_input(&backend, "cmd")
         .await
         .expect("write input");
     assert!(result.submitted, "should submit via expected_session_id");

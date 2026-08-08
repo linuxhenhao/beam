@@ -337,9 +337,7 @@ impl ZellijBackend {
             .unwrap_or(false);
         is_zellij_bin
             && argv.iter().any(|a| *a == "--server")
-            && argv
-                .iter()
-                .any(|a| a.rsplit('/').next() == Some(session))
+            && argv.iter().any(|a| a.rsplit('/').next() == Some(session))
     }
 
     /// Parse the parent pid out of /proc/<pid>/stat contents. The comm field
@@ -517,10 +515,7 @@ impl SessionBackend for ZellijBackend {
                 attempt,
                 ZELLIJ_SPAWN_MAX_ATTEMPTS,
                 self.session_name,
-                last_err
-                    .as_ref()
-                    .map(|e| e.to_string())
-                    .unwrap_or_default()
+                last_err.as_ref().map(|e| e.to_string()).unwrap_or_default()
             );
             Self::teardown_broken_session(&self.session_name).await;
             tokio::time::sleep(ZELLIJ_SPAWN_RETRY_BACKOFF).await;
@@ -603,7 +598,9 @@ impl SessionBackend for ZellijBackend {
     /// Timeout/error is treated as "unknown → alive": a wedged zellij server
     /// must not trigger a false CliExit that would tear down the session.
     async fn is_alive(&self) -> Result<bool> {
-        Ok(Self::probe_session(&self.session_name).await.unwrap_or(true))
+        Ok(Self::probe_session(&self.session_name)
+            .await
+            .unwrap_or(true))
     }
 
     async fn child_pid(&self) -> Result<Option<u32>> {
@@ -696,19 +693,19 @@ mod tests {
 
     #[test]
     fn cmdline_matcher_accepts_own_server() {
-        let cmdline =
-            "/home/user/.cargo/bin/zellij\0--server\0/run/user/1000/zellij/contract_version_1/beam-abc123\0";
+        let cmdline = "/home/user/.cargo/bin/zellij\0--server\0/run/user/1000/zellij/contract_version_1/beam-abc123\0";
         assert!(ZellijBackend::cmdline_is_session_server(
-            cmdline, "beam-abc123"
+            cmdline,
+            "beam-abc123"
         ));
     }
 
     #[test]
     fn cmdline_matcher_rejects_other_session_server() {
-        let cmdline =
-            "/home/user/.cargo/bin/zellij\0--server\0/run/user/1000/zellij/contract_version_1/beam-other\0";
+        let cmdline = "/home/user/.cargo/bin/zellij\0--server\0/run/user/1000/zellij/contract_version_1/beam-other\0";
         assert!(!ZellijBackend::cmdline_is_session_server(
-            cmdline, "beam-abc123"
+            cmdline,
+            "beam-abc123"
         ));
     }
 
@@ -716,11 +713,13 @@ mod tests {
     fn cmdline_matcher_rejects_attach_client_and_subscribe() {
         let attach = "/home/user/.cargo/bin/zellij\0--config\0/tmp/x/config.kdl\0attach\0--create-background\0beam-abc123\0";
         assert!(!ZellijBackend::cmdline_is_session_server(
-            attach, "beam-abc123"
+            attach,
+            "beam-abc123"
         ));
         let subscribe = "zellij\0--session\0beam-abc123\0subscribe\0--pane-id\0terminal_0\0";
         assert!(!ZellijBackend::cmdline_is_session_server(
-            subscribe, "beam-abc123"
+            subscribe,
+            "beam-abc123"
         ));
     }
 
@@ -728,7 +727,8 @@ mod tests {
     fn cmdline_matcher_rejects_non_zellij_process() {
         let cmdline = "/bin/sh\0/home/user/.beam/run/worker-wrapper.sh\0codex\0";
         assert!(!ZellijBackend::cmdline_is_session_server(
-            cmdline, "beam-abc123"
+            cmdline,
+            "beam-abc123"
         ));
     }
 

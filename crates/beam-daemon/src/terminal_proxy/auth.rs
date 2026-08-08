@@ -132,7 +132,8 @@ pub(crate) async fn authenticate_via_beam_cookie(
             outcome = "session_mismatch",
             session_id = session_id,
             "terminal proxy: beam cookie session mismatch: cookie for {} but requested {}",
-            stored_session_id, session_id
+            stored_session_id,
+            session_id
         );
         return None;
     }

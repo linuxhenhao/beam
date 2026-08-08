@@ -656,14 +656,13 @@ pub(crate) async fn spawn_worker(
                 }) => {
                     let was_unresponsive = {
                         let mut health = state.worker_health.lock().await;
-                        let entry =
-                            health
-                                .entry(session_id_for_task.clone())
-                                .or_insert(WorkerHealthEntry {
-                                    last_heartbeat: Instant::now(),
-                                    processing_since_ms: None,
-                                    unresponsive: false,
-                                });
+                        let entry = health.entry(session_id_for_task.clone()).or_insert(
+                            WorkerHealthEntry {
+                                last_heartbeat: Instant::now(),
+                                processing_since_ms: None,
+                                unresponsive: false,
+                            },
+                        );
                         let was_unresponsive = entry.unresponsive;
                         entry.last_heartbeat = Instant::now();
                         entry.processing_since_ms = processing_since_ms;
@@ -762,8 +761,7 @@ async fn notify_worker_ready_timeout(state: &AppState, session: &Session) {
     };
     let result = match session.scope {
         SessionScope::Thread if !session.root_message_id.is_empty() => {
-            lark_reply_message_with_opts(state, bot, &session.root_message_id, &message, true)
-                .await
+            lark_reply_message_with_opts(state, bot, &session.root_message_id, &message, true).await
         }
         _ => lark_send_chat_message(state, bot, &session.chat_id, &message).await,
     };
@@ -809,8 +807,8 @@ pub(crate) fn spawn_worker_health_watchdog(state: AppState) {
             for (session_id, processing_since_ms) in stale_sessions {
                 match processing_since_ms {
                     Some(start_ms) => {
-                        let stuck_ms = (Utc::now().timestamp_millis().max(0) as u64)
-                            .saturating_sub(start_ms);
+                        let stuck_ms =
+                            (Utc::now().timestamp_millis().max(0) as u64).saturating_sub(start_ms);
                         warn!(
                             "worker for session {} is unresponsive: no heartbeat for >{}s; message loop stuck processing for {}ms",
                             session_id,

@@ -267,7 +267,9 @@ mod tests {
 
         write_history(
             &state.history_path,
-            &[r#"{"mode":"assistant","message":{"message":{"response_meta":{"finish_reason":"stop"}}},"content":"first"}"#],
+            &[
+                r#"{"mode":"assistant","message":{"message":{"response_meta":{"finish_reason":"stop"}}},"content":"first"}"#,
+            ],
         );
         let second = state.poll().unwrap();
         assert_eq!(second.final_output.as_deref(), Some("first"));

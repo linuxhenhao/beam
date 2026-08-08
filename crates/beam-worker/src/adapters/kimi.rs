@@ -213,10 +213,7 @@ fn latest_kimi_transcript(data_dir: &Path, working_dir: &str) -> Option<PathBuf>
         if !work_dir_matches(&session_work_dir, working_dir) {
             continue;
         }
-        let wire = session_dir
-            .join("agents")
-            .join("main")
-            .join("wire.jsonl");
+        let wire = session_dir.join("agents").join("main").join("wire.jsonl");
         let Ok(meta) = wire.metadata() else {
             continue;
         };
@@ -672,7 +669,11 @@ mod tests {
         let old_wire = wire_path(&home, "session_old");
         append_wire(
             &old_wire,
-            &[step_begin_line(), text_part_line("old"), step_end_line("end_turn")],
+            &[
+                step_begin_line(),
+                text_part_line("old"),
+                step_end_line("end_turn"),
+            ],
         );
         // A session from another working directory must be ignored even if newer.
         let other_wire = wire_path(&home, "session_other");
@@ -790,7 +791,11 @@ mod tests {
                         .join("\n");
                     let _ = fs::write(
                         &index,
-                        if kept.is_empty() { kept } else { format!("{kept}\n") },
+                        if kept.is_empty() {
+                            kept
+                        } else {
+                            format!("{kept}\n")
+                        },
                     );
                 }
             }
@@ -853,7 +858,10 @@ mod tests {
                 break;
             }
         }
-        assert!(ready, "kimi TUI did not reach the welcome screen within 60s");
+        assert!(
+            ready,
+            "kimi TUI did not reach the welcome screen within 60s"
+        );
 
         let submit = state
             .write_input(&backend, "reply with exactly: BEAM_KIMI_OK")
