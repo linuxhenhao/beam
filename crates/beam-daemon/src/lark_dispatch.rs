@@ -17,6 +17,8 @@ pub(crate) use routing::{decide_lark_event_outcome, session_for_lark_anchor};
 #[cfg(test)]
 mod tests_dispatch;
 #[cfg(test)]
+mod tests_dispatch_events;
+#[cfg(test)]
 mod tests_routing;
 #[cfg(test)]
 mod tests_session;
