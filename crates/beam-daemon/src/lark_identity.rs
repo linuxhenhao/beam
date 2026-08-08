@@ -230,15 +230,24 @@ pub(crate) async fn lark_group_stats(
     }
     let value: Value = serde_json::from_str(&payload).unwrap_or(Value::Null);
     Ok(GroupStats {
-        user_count: value
-            .pointer("/data/user_count")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as u32,
-        bot_count: value
-            .pointer("/data/bot_count")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as u32,
+        user_count: parse_group_count(value.pointer("/data/user_count")),
+        bot_count: parse_group_count(value.pointer("/data/bot_count")),
     })
+}
+
+/// Feishu returns `user_count`/`bot_count` as strings (e.g. "2"), so accept
+/// both numbers and numeric strings. Missing/invalid values default to 0,
+/// which keeps the multi-bot gate fail-closed (0 users + 0 bots still passes
+/// the single-user exemption, but a real count will now be honored).
+fn parse_group_count(value: Option<&Value>) -> u32 {
+    match value {
+        Some(v) => v
+            .as_u64()
+            .map(|n| n as u32)
+            .or_else(|| v.as_str().and_then(|s| s.parse::<u32>().ok()))
+            .unwrap_or(0),
+        None => 0,
+    }
 }
 
 const CHAT_MODE_TTL_SECS: u64 = 5 * 60;
@@ -379,6 +388,50 @@ mod tests {
     use super::*;
     use crate::tests::test_helpers::*;
     use serde_json::Value;
+
+    #[test]
+    fn parse_group_count_accepts_string_and_number_forms() {
+        assert_eq!(
+            parse_group_count(Some(&serde_json::json!("2"))),
+            2,
+            "Feishu returns counts as strings"
+        );
+        assert_eq!(
+            parse_group_count(Some(&serde_json::json!(1))),
+            1,
+            "numeric form still works"
+        );
+        assert_eq!(parse_group_count(Some(&serde_json::json!("abc"))), 0);
+        assert_eq!(parse_group_count(None), 0);
+    }
+
+    #[test]
+    fn string_counts_keep_multi_bot_group_gated() {
+        // Feishu reports user_count/bot_count as strings (e.g. "2"). A group
+        // with one user and two bots must still deny a plain, non-mentioned
+        // message; otherwise the multi-bot gate fails open and the bot replies
+        // without any trigger.
+        let stats = GroupStats {
+            user_count: parse_group_count(Some(&serde_json::json!("1"))),
+            bot_count: parse_group_count(Some(&serde_json::json!("2"))),
+        };
+        assert!(!decide_multibot_inbound_gate(
+            Some("user"),
+            Some("ou_user"),
+            Some("ou_self"),
+            false,
+            false,
+            Some("group"),
+            SessionScope::Thread,
+            false,
+            false,
+            false,
+            false,
+            false,
+            Some(stats),
+            "明天深圳天气怎么样",
+        ));
+    }
 
     #[test]
     fn peer_bot_open_ids_load_from_known_sources() {
