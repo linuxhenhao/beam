@@ -1,16 +1,10 @@
 use super::*;
 use crate::tests::test_helpers::*;
 
-use axum::{
-    Json, Router,
-    extract::Path as AxumPath,
-    routing::{get, post},
-};
-use beam_core::{BotConfig, CustomTrigger, SessionScope, SessionStatus};
-use serde_json::Value;
+use beam_core::{CustomTrigger, SessionScope, SessionStatus};
 use std::collections::HashMap;
 
-use crate::{LarkEventOutcome, ParsedLarkInboundMessage, handle_lark_event_payload};
+use crate::{LarkEventOutcome, ParsedLarkInboundMessage};
 
 #[test]
 fn decide_lark_dispatch_reuses_chat_scope_session_for_quote_bubble_messages() {
