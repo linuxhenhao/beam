@@ -215,9 +215,8 @@ pub(crate) fn handle_trigger(
             Action::Capture
         }
         Trigger::FallbackTick => {
-            let needs_capture = current_screen_hash.map_or(false, |hash| {
-                should_upload(&state.current_turn_id, hash, state)
-            });
+            let needs_capture = current_screen_hash
+                .is_some_and(|hash| should_upload(&state.current_turn_id, hash, state));
             if needs_capture {
                 Action::Capture
             } else {

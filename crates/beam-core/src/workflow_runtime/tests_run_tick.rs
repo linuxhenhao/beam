@@ -597,7 +597,7 @@ async fn run_tick_stops_between_actions_when_cancel_arrives() {
     let elapsed = started.elapsed();
     assert!(tick.actions < 2);
     assert!(tick.snapshot.run.cancelled_run_intent.is_some());
-    assert!(tick.snapshot.activities.len() >= 1);
+    assert!(!tick.snapshot.activities.is_empty());
     assert!(
         elapsed < std::time::Duration::from_millis(250),
         "run_tick took {:?}, expected cancel to interrupt long-running actions",
@@ -726,7 +726,8 @@ fn orchestrator_action_is_dispatch_classifies_correctly() {
             working_dir: None,
             model_overrides: None,
             tool_policy: None,
-        }),
+        })
+        .into(),
     };
     assert!(dispatch.is_dispatch());
 

@@ -22,6 +22,7 @@ pub(crate) fn evaluate_lark_preflight(
     chat_id: &str,
     sender_open_id: Option<&str>,
     deduped: bool,
+    custom_trigger_hit: bool,
 ) -> LarkPreflight {
     if deduped {
         return LarkPreflight::Deduped;
@@ -52,7 +53,10 @@ pub(crate) fn evaluate_lark_preflight(
         };
     }
 
-    if grant_restricted(&talk, bot.restrict_grant_commands) && (text.starts_with('/')) {
+    if grant_restricted(&talk, bot.restrict_grant_commands)
+        && text.starts_with('/')
+        && !custom_trigger_hit
+    {
         return LarkPreflight::Denied {
             reply: "slash commands are restricted for grant-authorized users",
         };

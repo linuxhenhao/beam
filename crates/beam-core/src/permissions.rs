@@ -63,14 +63,14 @@ pub fn evaluate_talk(
         };
     }
 
-    if let Some(granted) = bot.chat_grants.get(chat_id) {
-        if granted.iter().any(|id| id == sender_open_id) {
-            return TalkEvaluation {
-                allowed: true,
-                reason: TalkReason::ChatGrant,
-                quota_key: Some(format!("chat:{}:{}", chat_id, sender_open_id)),
-            };
-        }
+    if let Some(granted) = bot.chat_grants.get(chat_id)
+        && granted.iter().any(|id| id == sender_open_id)
+    {
+        return TalkEvaluation {
+            allowed: true,
+            reason: TalkReason::ChatGrant,
+            quota_key: Some(format!("chat:{}:{}", chat_id, sender_open_id)),
+        };
     }
 
     if bot.global_grants.iter().any(|id| id == sender_open_id) {
@@ -180,6 +180,7 @@ mod tests {
             restrict_grant_commands: false,
             message_quota: None,
             quota_state: HashMap::new(),
+            custom_triggers: Vec::new(),
         }
     }
 

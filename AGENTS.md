@@ -18,7 +18,8 @@
 - `beam restart` resolves from `PATH`; on this machine it may hit `~/.cargo/bin/beam` instead of `target/debug/beam`. For workspace verification, prefer `target/debug/beam restart` after rebuilding.
 - Lifecycle commands: `beam start` (background daemon), `beam stop`, `beam restart`, `beam logs`, `beam status`.
 - Logging: daemon and all workers share one log file, `~/.beam/logs/daemon.log` (`$BEAM_HOME/logs/daemon.log` when `BEAM_HOME` is set). The daemon redirects its own stderr to that file and spawns workers with inherited stderr (worker stdout is reserved for JSON IPC). Default level is `INFO`; `RUST_LOG` is only read at process start, so change it via restart, e.g. `RUST_LOG='beam_daemon=debug,beam_worker=debug' target/debug/beam restart`.
-- Run tests: `cargo test --workspace --no-fail-fast`; narrower: `cargo test -p <crate> <filter>`.
+- Run the unified harness before pushing: `scripts/check-all.sh` (runs, in order: `check-fmt.sh`, `check-rust-line-count.sh`, `check-clippy.sh`, `check-build.sh`, `check-tests.sh`). It is the CI entry point (`parity.yml`). Each check can also be run individually; narrower test runs use `cargo test -p <crate> <filter>`.
+- Run clippy before pushing: `scripts/check-clippy.sh` (enforces zero warnings workspace-wide via `cargo clippy --workspace --all-targets -- -D warnings`). Clear any new warnings you introduced; keep the workspace at zero warnings.
 - Rust source-file line limit: run `scripts/check-rust-line-count.sh` directly for an immediate check. The same script is run by CI and by `cargo test --workspace` through the `beam-core` integration test.
 - Test maintenance:
   - Keep pure logic and small component coverage next to the implementation in `src/*.rs` `#[cfg(test)]` modules.
@@ -32,7 +33,7 @@
   - When a file exceeds 1,500 lines, default to splitting it into cohesive submodules; if it remains unsplit, document the reason in the change.
   - Keep `lib.rs` and `main.rs` focused on module declarations, composition, and entrypoint coordination rather than accumulating business logic.
   - Prefer module boundaries based on responsibility, dependency direction, and test ownership over mechanical line-count reduction.
-- There is no repo `lint` or `format` script; do not assume one exists.
+- There is no repo `lint` or `format` script; do not assume one exists. `cargo clippy` and `cargo fmt` are standard toolchain checks you can run anytime; `scripts/check-all.sh` is the CI harness entry point that runs all checks.
 - Commit messages use `type(scope): 中文描述` (conventional commits).
   - `feat:` → minor version bump (0.x.0)
   - `fix:` → patch version bump (0.0.x)

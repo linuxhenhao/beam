@@ -160,8 +160,7 @@ pub(crate) async fn api_trigger(
                 raw: false,
             }),
         )
-        .await
-        .map_err(|(status, error)| (status, error))?;
+        .await?;
         return Ok((
             StatusCode::OK,
             Json(serde_json::json!({
@@ -401,13 +400,12 @@ pub(crate) async fn handle_webhook_trigger(
 
     if let Some(allowed) =
         (!connector.target.allow_chats.is_empty()).then_some(&connector.target.allow_chats)
+        && !allowed.iter().any(|value| value == &chat_id)
     {
-        if !allowed.iter().any(|value| value == &chat_id) {
-            return Err((
-                StatusCode::FORBIDDEN,
-                "chatId is not allowed for this connector".to_string(),
-            ));
-        }
+        return Err((
+            StatusCode::FORBIDDEN,
+            "chatId is not allowed for this connector".to_string(),
+        ));
     }
 
     let trigger = ApiTriggerRequest {
@@ -500,10 +498,10 @@ pub(crate) async fn connector_stats(
         })
         .collect();
     for stat in raw_stats {
-        if let Some(connector_id) = stat.connector_id.clone() {
-            if !known.contains(&connector_id) {
-                stats.push(serde_json::to_value(stat).unwrap_or(Value::Null));
-            }
+        if let Some(connector_id) = stat.connector_id.clone()
+            && !known.contains(&connector_id)
+        {
+            stats.push(serde_json::to_value(stat).unwrap_or(Value::Null));
         }
     }
     Json(serde_json::json!({ "stats": stats }))

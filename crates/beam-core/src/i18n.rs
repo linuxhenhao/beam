@@ -7,7 +7,7 @@ pub enum Locale {
 }
 
 impl Locale {
-    pub fn from_str(s: &str) -> Self {
+    pub fn from_code(s: &str) -> Self {
         match s {
             "en" => Self::En,
             _ => Self::Zh,

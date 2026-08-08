@@ -178,18 +178,17 @@ impl WorkflowExecutionHooks for DaemonWorkflowExecutionHooks {
         // present in the snapshot.
         if let Ok(Some(snap)) =
             beam_core::read_run_snapshot(&self.state.paths.workflow_run_dir(run_id)).await
+            && snap.run.cancelled_run_intent.is_some()
         {
-            if snap.run.cancelled_run_intent.is_some() {
-                let count = registry.cancel_run(run_id).len();
-                if count > 0 {
-                    tracing::debug!(
-                        "cancellation registry: cancelled run {} ({} activities)",
-                        run_id,
-                        count
-                    );
-                }
-                return;
+            let count = registry.cancel_run(run_id).len();
+            if count > 0 {
+                tracing::debug!(
+                    "cancellation registry: cancelled run {} ({} activities)",
+                    run_id,
+                    count
+                );
             }
+            return;
         }
 
         // Node-level cancels: cancel each node's tokens.
@@ -373,7 +372,7 @@ async fn run_workflow_subagent_session(
     };
 
     // Check cancellation before doing heavy work.
-    if cancel_token.map_or(false, |t| t.is_cancelled()) {
+    if cancel_token.is_some_and(|t| t.is_cancelled()) {
         return Ok(WorkflowDispatchOutcome::Cancelled {
             cancel_origin_event_id: String::new(),
             session: None,
@@ -429,7 +428,7 @@ async fn run_workflow_subagent_session(
         Ok(output) => output,
         Err(err) => {
             // Distinguish cancellation from other failures.
-            if cancel_token.map_or(false, |t| t.is_cancelled()) {
+            if cancel_token.is_some_and(|t| t.is_cancelled()) {
                 // Forcefully terminate the worker process before cleaning up
                 // the session.  The gentle DaemonToWorker::Close message may
                 // never be processed by a stuck worker, so we escalate via
@@ -502,7 +501,7 @@ pub(crate) async fn run_workflow_host_executor(
     cancel_token: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<WorkflowDispatchOutcome> {
     // Check cancellation before dispatching to provider.
-    if cancel_token.map_or(false, |t| t.is_cancelled()) {
+    if cancel_token.is_some_and(|t| t.is_cancelled()) {
         return Ok(WorkflowDispatchOutcome::Cancelled {
             cancel_origin_event_id: String::new(),
             session: None,
@@ -512,7 +511,7 @@ pub(crate) async fn run_workflow_host_executor(
     let registry = workflow_host_executors::global_host_executor_registry();
     let executor = match registry.resolve(&node.executor) {
         Ok(executor) => executor,
-        Err(outcome) => return Ok(outcome),
+        Err(outcome) => return Ok(*outcome),
     };
 
     // NOTE: We do NOT interrupt the provider future mid-flight, because

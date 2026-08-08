@@ -383,6 +383,7 @@ pub(crate) fn decide_lark_routing<'a>(
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use crate::tests::test_helpers::*;

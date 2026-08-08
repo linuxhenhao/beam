@@ -332,8 +332,7 @@ fn normalize_attention_reason_collapses_whitespace() {
 
 #[test]
 fn normalize_attention_reason_truncates_over_500() {
-    let long: String = std::iter::repeat("abcde")
-        .take(120)
+    let long: String = std::iter::repeat_n("abcde", 120)
         .collect::<Vec<_>>()
         .join(" ");
     let count = long.len();

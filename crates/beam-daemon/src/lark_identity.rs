@@ -8,25 +8,25 @@ pub(crate) fn load_known_bot_open_ids_for_app(
     let cross_ref_path = paths
         .root()
         .join(format!("bot-openids-{}.json", lark_app_id));
-    if let Ok(payload) = std::fs::read_to_string(cross_ref_path) {
-        if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&payload) {
-            for value in map.values() {
-                if let Some(open_id) = value.as_str() {
-                    out.insert(open_id.to_string());
-                }
+    if let Ok(payload) = std::fs::read_to_string(cross_ref_path)
+        && let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&payload)
+    {
+        for value in map.values() {
+            if let Some(open_id) = value.as_str() {
+                out.insert(open_id.to_string());
             }
         }
     }
 
     let bots_info_path = paths.root().join("bots-info.json");
-    if let Ok(payload) = std::fs::read_to_string(bots_info_path) {
-        if let Ok(Value::Array(entries)) = serde_json::from_str::<Value>(&payload) {
-            for entry in entries {
-                if entry.get("larkAppId").and_then(Value::as_str) == Some(lark_app_id) {
-                    if let Some(open_id) = entry.get("botOpenId").and_then(Value::as_str) {
-                        out.insert(open_id.to_string());
-                    }
-                }
+    if let Ok(payload) = std::fs::read_to_string(bots_info_path)
+        && let Ok(Value::Array(entries)) = serde_json::from_str::<Value>(&payload)
+    {
+        for entry in entries {
+            if entry.get("larkAppId").and_then(Value::as_str) == Some(lark_app_id)
+                && let Some(open_id) = entry.get("botOpenId").and_then(Value::as_str)
+            {
+                out.insert(open_id.to_string());
             }
         }
     }
@@ -230,15 +230,24 @@ pub(crate) async fn lark_group_stats(
     }
     let value: Value = serde_json::from_str(&payload).unwrap_or(Value::Null);
     Ok(GroupStats {
-        user_count: value
-            .pointer("/data/user_count")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as u32,
-        bot_count: value
-            .pointer("/data/bot_count")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as u32,
+        user_count: parse_group_count(value.pointer("/data/user_count")),
+        bot_count: parse_group_count(value.pointer("/data/bot_count")),
     })
+}
+
+/// Feishu returns `user_count`/`bot_count` as strings (e.g. "2"), so accept
+/// both numbers and numeric strings. Missing/invalid values default to 0,
+/// which keeps the multi-bot gate fail-closed (0 users + 0 bots still passes
+/// the single-user exemption, but a real count will now be honored).
+fn parse_group_count(value: Option<&Value>) -> u32 {
+    match value {
+        Some(v) => v
+            .as_u64()
+            .map(|n| n as u32)
+            .or_else(|| v.as_str().and_then(|s| s.parse::<u32>().ok()))
+            .unwrap_or(0),
+        None => 0,
+    }
 }
 
 const CHAT_MODE_TTL_SECS: u64 = 5 * 60;
@@ -264,10 +273,10 @@ pub(crate) async fn get_lark_chat_mode(
     let cache_key = format!("{}::{}", bot.lark_app_id, chat_id);
     if !force_refresh {
         let cache = state.chat_mode_cache.lock().await;
-        if let Some(entry) = cache.get(&cache_key) {
-            if entry.cached_at.elapsed().as_secs() < CHAT_MODE_TTL_SECS {
-                return Ok(entry.mode);
-            }
+        if let Some(entry) = cache.get(&cache_key)
+            && entry.cached_at.elapsed().as_secs() < CHAT_MODE_TTL_SECS
+        {
+            return Ok(entry.mode);
         }
     }
     let token = lark_tenant_token(state, bot).await?;
@@ -327,11 +336,13 @@ pub(crate) fn current_bot_is_mentioned(
         .any(|mention| mention.key == bot_open_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn decide_multibot_inbound_gate(
     sender_type: Option<&str>,
     sender_open_id: Option<&str>,
     self_bot_open_id: Option<&str>,
     mentioned_self_bot: bool,
+    custom_trigger_hit: bool,
     chat_type: Option<&str>,
     scope: SessionScope,
     is_oncall_chat: bool,
@@ -344,24 +355,28 @@ pub(crate) fn decide_multibot_inbound_gate(
 ) -> bool {
     let is_bot_sender = matches!(sender_type, Some("bot") | Some("app"));
     if is_bot_sender {
-        if let (Some(sender_open_id), Some(self_bot_open_id)) = (sender_open_id, self_bot_open_id) {
-            if sender_open_id == self_bot_open_id {
-                return text.trim() == "/close";
-            }
+        if let (Some(sender_open_id), Some(self_bot_open_id)) = (sender_open_id, self_bot_open_id)
+            && sender_open_id == self_bot_open_id
+        {
+            return text.trim() == "/close";
         }
         if !mentioned_self_bot {
             return false;
         }
-        if scope == SessionScope::Chat && !is_oncall_chat {
-            if !owns_session && !is_known_peer_bot && !has_chat_grant && !has_global_grant {
-                return false;
-            }
+        if scope == SessionScope::Chat
+            && !is_oncall_chat
+            && !owns_session
+            && !is_known_peer_bot
+            && !has_chat_grant
+            && !has_global_grant
+        {
+            return false;
         }
         return true;
     }
 
     if chat_type == Some("group") {
-        if mentioned_self_bot {
+        if mentioned_self_bot || custom_trigger_hit {
             return true;
         }
         let Some(stats) = group_stats else {
@@ -378,6 +393,50 @@ mod tests {
     use super::*;
     use crate::tests::test_helpers::*;
     use serde_json::Value;
+
+    #[test]
+    fn parse_group_count_accepts_string_and_number_forms() {
+        assert_eq!(
+            parse_group_count(Some(&serde_json::json!("2"))),
+            2,
+            "Feishu returns counts as strings"
+        );
+        assert_eq!(
+            parse_group_count(Some(&serde_json::json!(1))),
+            1,
+            "numeric form still works"
+        );
+        assert_eq!(parse_group_count(Some(&serde_json::json!("abc"))), 0);
+        assert_eq!(parse_group_count(None), 0);
+    }
+
+    #[test]
+    fn string_counts_keep_multi_bot_group_gated() {
+        // Feishu reports user_count/bot_count as strings (e.g. "2"). A group
+        // with one user and two bots must still deny a plain, non-mentioned
+        // message; otherwise the multi-bot gate fails open and the bot replies
+        // without any trigger.
+        let stats = GroupStats {
+            user_count: parse_group_count(Some(&serde_json::json!("1"))),
+            bot_count: parse_group_count(Some(&serde_json::json!("2"))),
+        };
+        assert!(!decide_multibot_inbound_gate(
+            Some("user"),
+            Some("ou_user"),
+            Some("ou_self"),
+            false,
+            false,
+            Some("group"),
+            SessionScope::Thread,
+            false,
+            false,
+            false,
+            false,
+            false,
+            Some(stats),
+            "明天深圳天气怎么样",
+        ));
+    }
 
     #[test]
     fn peer_bot_open_ids_load_from_known_sources() {

@@ -13,7 +13,9 @@ pub struct AgentAttention {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SessionScope {
+    #[default]
     Thread,
     Chat,
 }
@@ -36,23 +38,13 @@ impl From<&str> for ChatMode {
     }
 }
 
-impl Default for SessionScope {
-    fn default() -> Self {
-        Self::Thread
-    }
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SessionStatus {
+    #[default]
     Active,
     Closed,
-}
-
-impl Default for SessionStatus {
-    fn default() -> Self {
-        Self::Active
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

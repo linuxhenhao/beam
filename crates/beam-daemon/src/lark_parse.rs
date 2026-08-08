@@ -64,7 +64,7 @@ pub(crate) fn resolve_lark_mentions(text: &str, mentions: &[LarkEventMention]) -
     }
     let mut resolved = text.to_string();
     let mut sorted = mentions.iter().collect::<Vec<_>>();
-    sorted.sort_by(|a, b| b.key.len().cmp(&a.key.len()));
+    sorted.sort_by_key(|mention| std::cmp::Reverse(mention.key.len()));
     for mention in sorted {
         resolved = resolved.replace(&mention.key, &format!("@{}", mention.name));
     }
@@ -75,7 +75,7 @@ pub(crate) fn strip_leading_mentions(text: &str, mentions: &[LarkEventMention]) 
     let mut s = text.trim_start().to_string();
     if !mentions.is_empty() {
         let mut sorted = mentions.iter().collect::<Vec<_>>();
-        sorted.sort_by(|a, b| b.name.len().cmp(&a.name.len()));
+        sorted.sort_by_key(|mention| std::cmp::Reverse(mention.name.len()));
         loop {
             let mut changed = false;
             for mention in &sorted {
@@ -93,10 +93,7 @@ pub(crate) fn strip_leading_mentions(text: &str, mentions: &[LarkEventMention]) 
         return s;
     }
 
-    loop {
-        let Some(stripped) = s.strip_prefix('@') else {
-            break;
-        };
+    while let Some(stripped) = s.strip_prefix('@') {
         let end = stripped.find(char::is_whitespace).unwrap_or(stripped.len());
         s = stripped[end..].trim_start().to_string();
     }
@@ -332,12 +329,12 @@ pub(crate) fn parse_lark_card_action(
         pending_id: payload
             .pointer("/action/value/pending_id")
             .and_then(Value::as_str)
-            .or_else(|| opt_pending_id.as_deref())
+            .or(opt_pending_id.as_deref())
             .map(ToOwned::to_owned),
         working_dir: payload
             .pointer("/action/value/working_dir")
             .and_then(Value::as_str)
-            .or_else(|| opt_working_dir.as_deref())
+            .or(opt_working_dir.as_deref())
             .map(ToOwned::to_owned),
         dir_search_keyword: payload
             .pointer("/action/form_value/dir_search_keyword")

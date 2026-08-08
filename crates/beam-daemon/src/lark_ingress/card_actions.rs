@@ -66,7 +66,7 @@ pub(crate) async fn handle_grant_text_command(
                 "granted: all members in this chat can now talk to the bot",
             )
             .await;
-            return Some(());
+            Some(())
         }
         grant::GrantAction::Grant => {
             let targets: Vec<String> = cmd.targets.iter().map(|t| t.open_id.clone()).collect();
@@ -103,7 +103,7 @@ pub(crate) async fn handle_grant_text_command(
             if let Err(e) = lark_reply_card(state, bot, message_id, &card_str).await {
                 warn!("failed to send grant card: {}", e);
             }
-            return Some(());
+            Some(())
         }
         grant::GrantAction::Revoke => {
             let targets: Vec<String> = cmd.targets.iter().map(|t| t.open_id.clone()).collect();
@@ -135,7 +135,7 @@ pub(crate) async fn handle_grant_text_command(
                 return Some(());
             }
             let _ = lark_reply_message(state, bot, message_id, &results.join("\n")).await;
-            return Some(());
+            Some(())
         }
     }
 }
@@ -279,8 +279,6 @@ pub(crate) async fn handle_dir_select_card_action(
                             keyword
                         ))
                     }
-                } else if f.len() == 1 {
-                    None
                 } else {
                     None
                 }
@@ -305,13 +303,13 @@ pub(crate) async fn handle_dir_select_card_action(
             );
 
             // PATCH the card message as a fallback (primary update is via response card field)
-            if let Some(card_msg_id) = &pending.card_message_id {
-                if let Err(e) = lark_update_card(state, bot, card_msg_id, &card).await {
-                    warn!(
-                        "dir_select_filter: PATCH card for {} failed: {:?}",
-                        pending_id, e
-                    );
-                }
+            if let Some(card_msg_id) = &pending.card_message_id
+                && let Err(e) = lark_update_card(state, bot, card_msg_id, &card).await
+            {
+                warn!(
+                    "dir_select_filter: PATCH card for {} failed: {:?}",
+                    pending_id, e
+                );
             }
 
             let card_data = serde_json::from_str::<Value>(&card).unwrap_or(Value::Null);
@@ -461,13 +459,13 @@ pub(crate) async fn handle_dir_select_card_action(
                     );
 
                     // PATCH the card message as a fallback (primary update is via response card field)
-                    if let Some(card_msg_id) = &pending.card_message_id {
-                        if let Err(e) = lark_update_card(state, bot, card_msg_id, &card).await {
-                            warn!(
-                                "dir_select_best: PATCH card for {} failed: {:?}",
-                                pending_id, e
-                            );
-                        }
+                    if let Some(card_msg_id) = &pending.card_message_id
+                        && let Err(e) = lark_update_card(state, bot, card_msg_id, &card).await
+                    {
+                        warn!(
+                            "dir_select_best: PATCH card for {} failed: {:?}",
+                            pending_id, e
+                        );
                     }
 
                     let card_data = serde_json::from_str::<Value>(&card).unwrap_or(Value::Null);

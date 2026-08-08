@@ -113,10 +113,10 @@ fn format_cmdline(args: &[String]) -> String {
 fn get_env_var(data: &[u8], key: &str) -> Option<String> {
     let prefix = format!("{key}=");
     for entry in data.split(|&b| b == 0) {
-        if let Ok(s) = std::str::from_utf8(entry) {
-            if let Some(val) = s.strip_prefix(&prefix) {
-                return Some(val.to_string());
-            }
+        if let Ok(s) = std::str::from_utf8(entry)
+            && let Some(val) = s.strip_prefix(&prefix)
+        {
+            return Some(val.to_string());
         }
     }
     None
@@ -347,10 +347,10 @@ fn live_codex_term_injected_in_zellij() {
         // cmdline check.
         let mut accepted = Vec::new();
         for pid in all_pids_by_env("BEAM_SESSION_ID", &session_id) {
-            if let Some(args) = get_cmdline_args(pid) {
-                if argv_points_to_codex(&args) {
-                    accepted.push((pid, args));
-                }
+            if let Some(args) = get_cmdline_args(pid)
+                && argv_points_to_codex(&args)
+            {
+                accepted.push((pid, args));
             }
         }
         if accepted.len() == 1 {

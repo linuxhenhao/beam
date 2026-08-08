@@ -63,14 +63,14 @@ pub fn bootstrap_workflow_run(
 ) -> Result<WorkflowRunBootstrap> {
     let workflow = parse_workflow_definition(input.workflow_json)?;
     let workflow_id = workflow.workflow_id.clone();
-    if let Some(expected) = input.expected_workflow_id {
-        if expected != workflow_id {
-            anyhow::bail!(
-                "workflowId mismatch: requested={} file={}",
-                expected,
-                workflow_id
-            );
-        }
+    if let Some(expected) = input.expected_workflow_id
+        && expected != workflow_id
+    {
+        anyhow::bail!(
+            "workflowId mismatch: requested={} file={}",
+            expected,
+            workflow_id
+        );
     }
 
     // Validate / normalize params before creating any run artifacts
@@ -134,7 +134,6 @@ pub fn bootstrap_workflow_run(
 ///
 /// If the workflow has no `params` definition (or an empty one), any supplied
 /// params are rejected — no parameters are allowed without a declaration.
-
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -152,5 +151,5 @@ pub(crate) fn lower_hex(bytes: &[u8]) -> String {
 }
 
 pub fn read_workflow_definition_from_path(path: &Path) -> Result<String> {
-    Ok(fs::read_to_string(path).with_context(|| format!("读取 {} 失败", path.display()))?)
+    fs::read_to_string(path).with_context(|| format!("读取 {} 失败", path.display()))
 }

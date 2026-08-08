@@ -44,6 +44,7 @@ pub(crate) fn card_text<'a>(locale: Option<&str>, zh: &'a str, en: &'a str) -> &
 /// - filter_result: optional filtered subset to show as current results
 /// - search_keyword: current search keyword (for restoring input field value)
 /// - message: optional info/warning message to display
+#[allow(clippy::too_many_arguments)]
 pub fn build_dir_select_card(
     pending_id: &str,
     root_dir: &str,

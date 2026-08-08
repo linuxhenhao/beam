@@ -66,41 +66,40 @@ fn parse_chinese_schedule(input: &str) -> Option<(ParsedSchedule, String)> {
     let s = input.trim();
     let norm = s.replace(' ', "");
 
-    if let Some(rest) = norm.strip_prefix("每个工作日") {
-        if let Some((hour, minute, tail)) = parse_time_hm(rest) {
-            return Some((
-                cron_ps(
-                    format!("{minute} {hour} * * 1-5"),
-                    format!("工作日 {hour}:{minute:02}"),
-                ),
-                tail,
-            ));
-        }
+    if let Some(rest) = norm.strip_prefix("每个工作日")
+        && let Some((hour, minute, tail)) = parse_time_hm(rest)
+    {
+        return Some((
+            cron_ps(
+                format!("{minute} {hour} * * 1-5"),
+                format!("工作日 {hour}:{minute:02}"),
+            ),
+            tail,
+        ));
     }
-    if let Some(rest) = norm.strip_prefix("工作日每天") {
-        if let Some((hour, minute, tail)) = parse_time_hm(rest) {
-            return Some((
-                cron_ps(
-                    format!("{minute} {hour} * * 1-5"),
-                    format!("工作日 {hour}:{minute:02}"),
-                ),
-                tail,
-            ));
-        }
+    if let Some(rest) = norm.strip_prefix("工作日每天")
+        && let Some((hour, minute, tail)) = parse_time_hm(rest)
+    {
+        return Some((
+            cron_ps(
+                format!("{minute} {hour} * * 1-5"),
+                format!("工作日 {hour}:{minute:02}"),
+            ),
+            tail,
+        ));
     }
     if let Some(rest) = norm
         .strip_prefix("每天")
         .or_else(|| norm.strip_prefix("每日"))
+        && let Some((hour, minute, tail)) = parse_time_hm(rest)
     {
-        if let Some((hour, minute, tail)) = parse_time_hm(rest) {
-            return Some((
-                cron_ps(
-                    format!("{minute} {hour} * * *"),
-                    format!("每天 {hour}:{minute:02}"),
-                ),
-                tail,
-            ));
-        }
+        return Some((
+            cron_ps(
+                format!("{minute} {hour} * * *"),
+                format!("每天 {hour}:{minute:02}"),
+            ),
+            tail,
+        ));
     }
     if let Some(rest) = norm.strip_prefix("每周") {
         let mut chars = rest.chars();
@@ -185,53 +184,52 @@ fn parse_chinese_schedule(input: &str) -> Option<(ParsedSchedule, String)> {
             }
         }
     }
-    if let Some(rest) = norm.strip_suffix("分钟后") {
-        if let Ok(minutes) = rest.parse::<u64>() {
-            let run_at = (Utc::now() + chrono::Duration::minutes(minutes as i64)).to_rfc3339();
-            return Some((
-                ParsedSchedule {
-                    kind: ParsedScheduleKind::Once,
-                    run_at: Some(run_at),
-                    minutes: None,
-                    expr: None,
-                    display: format!("{minutes} 分钟后"),
-                },
-                String::new(),
-            ));
-        }
+    if let Some(rest) = norm.strip_suffix("分钟后")
+        && let Ok(minutes) = rest.parse::<u64>()
+    {
+        let run_at = (Utc::now() + chrono::Duration::minutes(minutes as i64)).to_rfc3339();
+        return Some((
+            ParsedSchedule {
+                kind: ParsedScheduleKind::Once,
+                run_at: Some(run_at),
+                minutes: None,
+                expr: None,
+                display: format!("{minutes} 分钟后"),
+            },
+            String::new(),
+        ));
     }
-    if let Some(rest) = norm.strip_suffix("小时后") {
-        if let Ok(hours) = rest.parse::<u64>() {
-            let run_at = (Utc::now() + chrono::Duration::hours(hours as i64)).to_rfc3339();
-            return Some((
-                ParsedSchedule {
-                    kind: ParsedScheduleKind::Once,
-                    run_at: Some(run_at),
-                    minutes: None,
-                    expr: None,
-                    display: format!("{hours} 小时后"),
-                },
-                String::new(),
-            ));
-        }
+    if let Some(rest) = norm.strip_suffix("小时后")
+        && let Ok(hours) = rest.parse::<u64>()
+    {
+        let run_at = (Utc::now() + chrono::Duration::hours(hours as i64)).to_rfc3339();
+        return Some((
+            ParsedSchedule {
+                kind: ParsedScheduleKind::Once,
+                run_at: Some(run_at),
+                minutes: None,
+                expr: None,
+                display: format!("{hours} 小时后"),
+            },
+            String::new(),
+        ));
     }
-    if let Some(rest) = norm.strip_prefix("明天") {
-        if let Some((hour, minute, tail)) = parse_time_hm(rest) {
-            let tomorrow = Utc::now().date_naive().succ_opt()?;
-            let naive =
-                NaiveDateTime::new(tomorrow, chrono::NaiveTime::from_hms_opt(hour, minute, 0)?);
-            let run_at = DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc).to_rfc3339();
-            return Some((
-                ParsedSchedule {
-                    kind: ParsedScheduleKind::Once,
-                    run_at: Some(run_at),
-                    minutes: None,
-                    expr: None,
-                    display: format!("明天 {hour}:{minute:02}"),
-                },
-                tail,
-            ));
-        }
+    if let Some(rest) = norm.strip_prefix("明天")
+        && let Some((hour, minute, tail)) = parse_time_hm(rest)
+    {
+        let tomorrow = Utc::now().date_naive().succ_opt()?;
+        let naive = NaiveDateTime::new(tomorrow, chrono::NaiveTime::from_hms_opt(hour, minute, 0)?);
+        let run_at = DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc).to_rfc3339();
+        return Some((
+            ParsedSchedule {
+                kind: ParsedScheduleKind::Once,
+                run_at: Some(run_at),
+                minutes: None,
+                expr: None,
+                display: format!("明天 {hour}:{minute:02}"),
+            },
+            tail,
+        ));
     }
     None
 }

@@ -158,6 +158,7 @@ pub(crate) fn build_card_not_ready_reply() -> &'static str {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use crate::tests::test_helpers::*;
@@ -237,6 +238,7 @@ mod tests {
                 restrict_grant_commands: false,
                 message_quota: None,
                 quota_state: std::collections::HashMap::new(),
+                custom_triggers: Vec::new(),
             };
             let state = make_state(
                 paths.clone(),
@@ -289,6 +291,7 @@ mod tests {
                 restrict_grant_commands: false,
                 message_quota: None,
                 quota_state: std::collections::HashMap::new(),
+                custom_triggers: Vec::new(),
             };
             let state = make_state(
                 paths.clone(),
@@ -369,6 +372,7 @@ mod tests {
                 restrict_grant_commands: false,
                 message_quota: None,
                 quota_state: std::collections::HashMap::new(),
+                custom_triggers: Vec::new(),
             };
             let state = make_state(
                 paths.clone(),

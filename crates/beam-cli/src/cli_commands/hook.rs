@@ -168,14 +168,12 @@ pub(crate) async fn post_ask(
                 .all(|value| value.as_str().unwrap_or("").trim().is_empty())
         })
         .unwrap_or(true);
-    if needs_approver {
-        if let Some(session_id) = body.get("sessionId").and_then(|value| value.as_str()) {
-            if let Some(owner_open_id) = resolve_session_owner_approver(paths, session_id) {
-                if let Some(obj) = body.as_object_mut() {
-                    obj.insert("approvers".to_string(), serde_json::json!([owner_open_id]));
-                }
-            }
-        }
+    if needs_approver
+        && let Some(session_id) = body.get("sessionId").and_then(|value| value.as_str())
+        && let Some(owner_open_id) = resolve_session_owner_approver(paths, session_id)
+        && let Some(obj) = body.as_object_mut()
+    {
+        obj.insert("approvers".to_string(), serde_json::json!([owner_open_id]));
     }
     let resp = api
         .post(format!("{}/api/asks", api.base()))
@@ -221,44 +219,42 @@ pub(crate) fn resolve_ask_context(
         });
 
     let mut session_id = None;
-    if let Ok(raw) = std::fs::read_to_string(paths.session_store_json()) {
-        if let Ok(sessions) =
+    if let Ok(raw) = std::fs::read_to_string(paths.session_store_json())
+        && let Ok(sessions) =
             serde_json::from_str::<std::collections::HashMap<String, Session>>(&raw)
+    {
+        if let Some(cli_session_id) = payload_cli_session_id.as_deref()
+            && let Some((beam_session_id, session)) = sessions
+                .iter()
+                .find(|(_, session)| session.cli_session_id.as_deref() == Some(cli_session_id))
         {
-            if let Some(cli_session_id) = payload_cli_session_id.as_deref() {
-                if let Some((beam_session_id, session)) = sessions
-                    .iter()
-                    .find(|(_, session)| session.cli_session_id.as_deref() == Some(cli_session_id))
-                {
-                    session_id = Some(beam_session_id.clone());
-                    chat_id.get_or_insert_with(|| session.chat_id.clone());
-                    lark_app_id.get_or_insert_with(|| session.lark_app_id.clone());
-                    if root_message_id.is_none() {
-                        let value = session.root_message_id.trim().to_string();
-                        if !value.is_empty() {
-                            root_message_id = Some(value);
-                        }
-                    }
+            session_id = Some(beam_session_id.clone());
+            chat_id.get_or_insert_with(|| session.chat_id.clone());
+            lark_app_id.get_or_insert_with(|| session.lark_app_id.clone());
+            if root_message_id.is_none() {
+                let value = session.root_message_id.trim().to_string();
+                if !value.is_empty() {
+                    root_message_id = Some(value);
                 }
             }
-            if session_id.is_none() {
-                let active_sessions = sessions
-                    .iter()
-                    .filter(|(_, session)| {
-                        session.cli_id.as_deref() == Some("opencode")
-                            && session.status == SessionStatus::Active
-                    })
-                    .collect::<Vec<_>>();
-                if active_sessions.len() == 1 {
-                    let (beam_session_id, session) = active_sessions[0];
-                    session_id = Some(beam_session_id.clone());
-                    chat_id.get_or_insert_with(|| session.chat_id.clone());
-                    lark_app_id.get_or_insert_with(|| session.lark_app_id.clone());
-                    if root_message_id.is_none() {
-                        let value = session.root_message_id.trim().to_string();
-                        if !value.is_empty() {
-                            root_message_id = Some(value);
-                        }
+        }
+        if session_id.is_none() {
+            let active_sessions = sessions
+                .iter()
+                .filter(|(_, session)| {
+                    session.cli_id.as_deref() == Some("opencode")
+                        && session.status == SessionStatus::Active
+                })
+                .collect::<Vec<_>>();
+            if active_sessions.len() == 1 {
+                let (beam_session_id, session) = active_sessions[0];
+                session_id = Some(beam_session_id.clone());
+                chat_id.get_or_insert_with(|| session.chat_id.clone());
+                lark_app_id.get_or_insert_with(|| session.lark_app_id.clone());
+                if root_message_id.is_none() {
+                    let value = session.root_message_id.trim().to_string();
+                    if !value.is_empty() {
+                        root_message_id = Some(value);
                     }
                 }
             }
@@ -269,23 +265,19 @@ pub(crate) fn resolve_ask_context(
         session_id = Some(discover_session_id(paths)?);
     }
 
-    if chat_id.is_none() || lark_app_id.is_none() || root_message_id.is_none() {
-        if let Ok(raw) = std::fs::read_to_string(paths.session_store_json()) {
-            if let Ok(sessions) =
-                serde_json::from_str::<std::collections::HashMap<String, Session>>(&raw)
-            {
-                if let Some(session_key) = session_id.as_deref() {
-                    if let Some(session) = sessions.get(session_key) {
-                        chat_id.get_or_insert_with(|| session.chat_id.clone());
-                        lark_app_id.get_or_insert_with(|| session.lark_app_id.clone());
-                        if root_message_id.is_none() {
-                            let value = session.root_message_id.trim().to_string();
-                            if !value.is_empty() {
-                                root_message_id = Some(value);
-                            }
-                        }
-                    }
-                }
+    if (chat_id.is_none() || lark_app_id.is_none() || root_message_id.is_none())
+        && let Ok(raw) = std::fs::read_to_string(paths.session_store_json())
+        && let Ok(sessions) =
+            serde_json::from_str::<std::collections::HashMap<String, Session>>(&raw)
+        && let Some(session_key) = session_id.as_deref()
+        && let Some(session) = sessions.get(session_key)
+    {
+        chat_id.get_or_insert_with(|| session.chat_id.clone());
+        lark_app_id.get_or_insert_with(|| session.lark_app_id.clone());
+        if root_message_id.is_none() {
+            let value = session.root_message_id.trim().to_string();
+            if !value.is_empty() {
+                root_message_id = Some(value);
             }
         }
     }

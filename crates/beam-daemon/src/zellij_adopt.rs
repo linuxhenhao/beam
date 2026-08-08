@@ -305,19 +305,18 @@ fn parse_dump_layout_body(body: &str) -> Vec<ZellijLayoutPane> {
         if line.starts_with("cwd ") {
             if let Some(rest) = line.strip_prefix("cwd ") {
                 let rest = rest.trim();
-                if rest.starts_with('"') {
-                    let inner = &rest[1..];
-                    if let Some(end) = inner.find('"') {
-                        let cwd_value = inner[..end].to_string();
-                        if let Some(last) = stack.last_mut()
-                            && last.is_pane
-                        {
-                            // cwd node inside a pane block overrides inherited/attribute cwd.
-                            last.cwd = Some(cwd_value);
-                        } else {
-                            // Otherwise it's an ancestor-level cwd (e.g. layout).
-                            layout_cwd = Some(cwd_value);
-                        }
+                if let Some(inner) = rest.strip_prefix('"')
+                    && let Some(end) = inner.find('"')
+                {
+                    let cwd_value = inner[..end].to_string();
+                    if let Some(last) = stack.last_mut()
+                        && last.is_pane
+                    {
+                        // cwd node inside a pane block overrides inherited/attribute cwd.
+                        last.cwd = Some(cwd_value);
+                    } else {
+                        // Otherwise it's an ancestor-level cwd (e.g. layout).
+                        layout_cwd = Some(cwd_value);
                     }
                 }
             }
@@ -341,7 +340,7 @@ pub(crate) fn discover_zellij_adopt_candidates() -> Vec<ZellijAdoptCandidate> {
         let mut candidates = join_zellij_adopt_candidates(&session, layouts, panes);
         if let Some(server_pid) = zellij_find_server_pid(&session) {
             let child_pids = zellij_pane_children(server_pid);
-            for (candidate, pid) in candidates.iter_mut().zip(child_pids.into_iter()) {
+            for (candidate, pid) in candidates.iter_mut().zip(child_pids) {
                 candidate.cli_pid = Some(pid);
             }
         }
@@ -522,7 +521,10 @@ mod tests {
         assert_eq!(cli_id_from_zellij_command("/usr/bin/codex"), "codex");
         assert_eq!(cli_id_from_zellij_command("/usr/bin/traex"), "traex");
         assert_eq!(cli_id_from_zellij_command("claude"), "claude-code");
-        assert_eq!(cli_id_from_zellij_command("/home/u/.kimi-code/bin/kimi"), "kimi");
+        assert_eq!(
+            cli_id_from_zellij_command("/home/u/.kimi-code/bin/kimi"),
+            "kimi"
+        );
         assert_eq!(cli_id_from_zellij_command("custom-tool"), "custom-tool");
     }
 

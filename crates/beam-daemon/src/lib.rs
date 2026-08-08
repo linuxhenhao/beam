@@ -1,8 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
-use std::sync::{Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
 mod api_token;
@@ -117,14 +116,15 @@ use base64::Engine;
 use beam_core::{
     AdoptedFrom, AgentAttention, ApiHealth, AttemptResumeRequest, AttentionRequest, BeamPaths,
     BotConfig, BotSummary, ChatMode, CliUsageLimitState, ColdWorkflowRun, Config,
-    CreateSessionRequest, DaemonOverview, DaemonRuntimeState, DaemonToWorker, DisplayMode,
-    EventDraft, EventLog, EventWindowOpts, FinalOutputKind, FinalOutputRequest, InitConfig,
-    PendingResponseCardState, RestartSessionRequest, ResumeSessionRequest, RunChatBinding,
-    RunStatus, ScheduleChatType, ScreenStatus, Session, SessionGroup, SessionInputRequest,
-    SessionLocateInfo, SessionScope, SessionStatus, SessionSummary, TalkEvaluation, TermActionKey,
-    TranscriptChoice, TuiPromptOption, WaitResolution, WorkerToDaemon, WorkflowActor,
-    WorkflowOutputRef, can_operate, evaluate_talk, parse_workflow_definition, read_event_window,
-    read_run_events_pure, read_run_snapshot, scan_cold_workflow_runs,
+    CreateSessionRequest, CustomTrigger, DaemonOverview, DaemonRuntimeState, DaemonToWorker,
+    DisplayMode, EventDraft, EventLog, EventWindowOpts, FinalOutputKind, FinalOutputRequest,
+    InitConfig, PendingResponseCardState, RestartSessionRequest, ResumeSessionRequest,
+    RunChatBinding, RunStatus, ScheduleChatType, ScreenStatus, Session, SessionGroup,
+    SessionInputRequest, SessionLocateInfo, SessionScope, SessionStatus, SessionSummary,
+    TalkEvaluation, TermActionKey, TranscriptChoice, TuiPromptOption, WaitResolution,
+    WorkerToDaemon, WorkflowActor, WorkflowOutputRef, can_operate, evaluate_talk,
+    parse_workflow_definition, read_event_window, read_run_events_pure, read_run_snapshot,
+    resolve_custom_trigger, resolve_trigger_message, scan_cold_workflow_runs,
 };
 use chrono::Utc;
 use connector_store::{
@@ -140,16 +140,14 @@ use feishu_sdk::{
     },
     ws::{StreamClient, StreamConfig},
 };
-use hmac::KeyInit;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use reqwest::Client;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::Mutex;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tower_http::services::ServeDir;
 use tracing::{debug, error, info, warn};
 use trigger_log::{
@@ -358,7 +356,7 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
                     sessions
                         .get(&marker.session_id)
                         .map(|s| {
-                            marker.turn_id.as_deref().map_or(true, |tid| {
+                            marker.turn_id.as_deref().is_none_or(|tid| {
                                 // Resume if last_final_output_turn_id doesn't match this turn
                                 s.last_final_output_turn_id.as_deref() != Some(tid)
                             })
@@ -914,7 +912,8 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
 
     // Schedule loop: periodically check schedules and trigger due tasks.
     let schedule_paths = paths.clone();
-    let schedule_state = state.clone();    tokio::spawn(async move {
+    let schedule_state = state.clone();
+    tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             let tasks = match beam_core::list_tasks(&schedule_paths) {

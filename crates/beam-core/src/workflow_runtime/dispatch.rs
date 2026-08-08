@@ -101,18 +101,18 @@ pub async fn dispatch_work<H: super::WorkflowExecutionHooks>(
             let input_ref = write_json_blob(
                 &mut rt.log,
                 serde_json::json!({
-                    "kind": match node {
+                    "kind": match node.as_ref() {
                         WorkflowNode::Subagent(_) => "subagent",
                         WorkflowNode::HostExecutor(_) => "hostExecutor",
                         WorkflowNode::Loop(_) => "loop",
                         WorkflowNode::Decision(_) => "decision",
                     },
-                    "bot_or_executor": match node {
+                    "bot_or_executor": match node.as_ref() {
                         WorkflowNode::Subagent(n) => Value::String(n.bot.clone()),
                         WorkflowNode::HostExecutor(n) => Value::String(n.executor.clone()),
                         _ => Value::Null,
                     },
-                    "prompt_or_input": match node {
+                    "prompt_or_input": match node.as_ref() {
                         WorkflowNode::Subagent(n) => n.prompt.clone(),
                         WorkflowNode::HostExecutor(n) => n.input.clone(),
                         _ => Value::Null,
@@ -141,7 +141,7 @@ pub async fn dispatch_work<H: super::WorkflowExecutionHooks>(
                 loop_context: loop_context_from_activity(activity_id),
             };
 
-            match node {
+            match node.as_ref() {
                 WorkflowNode::Subagent(subagent) => {
                     let resolved_prompt = resolve_bound_string(&subagent.prompt, &bind_ctx).await?;
                     rt.log.append(EventDraft {

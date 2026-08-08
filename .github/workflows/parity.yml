@@ -12,6 +12,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Check Rust source file line count (max 1000)
-        run: scripts/check-rust-line-count.sh
-      - run: cargo test --workspace --no-fail-fast
+      - name: Run harness checks (line count, clippy, build, tests)
+        run: scripts/check-all.sh

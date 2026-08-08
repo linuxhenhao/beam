@@ -49,7 +49,12 @@ pub(crate) async fn validate_setup_credentials(app_id: &str, app_secret: &str) -
 
 pub(crate) fn default_cli_args_for_cli_id(cli_id: &str) -> Vec<String> {
     cli_spec(cli_id)
-        .map(|spec| spec.default_cli_args.iter().map(ToString::to_string).collect())
+        .map(|spec| {
+            spec.default_cli_args
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -90,10 +95,10 @@ pub(crate) fn resolve_allowed_users(input: &str, user_open_id: Option<&str>) -> 
         .map(|item| item.trim().to_string())
         .filter(|item| !item.is_empty())
         .collect();
-    if let Some(open_id) = user_open_id {
-        if !allowed.iter().any(|item| item == open_id) {
-            allowed.push(open_id.to_string());
-        }
+    if let Some(open_id) = user_open_id
+        && !allowed.iter().any(|item| item == open_id)
+    {
+        allowed.push(open_id.to_string());
     }
     allowed
 }
@@ -229,6 +234,7 @@ pub(crate) async fn prompt_setup_bot() -> Result<BotConfig> {
         restrict_grant_commands: false,
         message_quota: None,
         quota_state: std::collections::HashMap::new(),
+        custom_triggers: Vec::new(),
     })
 }
 
@@ -309,10 +315,10 @@ pub(crate) async fn cmd_setup(paths: &BeamPaths) -> Result<()> {
     validate_setup_credentials(&next_bot.lark_app_id, &next_bot.lark_app_secret).await?;
     next_bots.push(next_bot);
 
-    if bots.exists() {
-        if let Some(backup) = setup_backup_file(&bots)? {
-            println!("旧配置已备份: {}", backup.display());
-        }
+    if bots.exists()
+        && let Some(backup) = setup_backup_file(&bots)?
+    {
+        println!("旧配置已备份: {}", backup.display());
     }
     std::fs::write(&bots, serde_json::to_string_pretty(&next_bots)? + "\n")?;
     println!("✅ 已写入 {}", bots.display());

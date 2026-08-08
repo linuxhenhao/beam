@@ -66,7 +66,7 @@ pub(crate) fn parse_workflow_text_command(text: &str) -> Option<WorkflowTextComm
             }
             let id_end = sub_rest.find(char::is_whitespace).unwrap_or(sub_rest.len());
             let run_id = &sub_rest[..id_end];
-            if sub_rest[id_end..].trim().len() > 0 {
+            if !sub_rest[id_end..].trim().is_empty() {
                 return Some(WorkflowTextCommand::Invalid {
                     error: "/workflow cancel 只接受 runId".to_string(),
                     usage,
@@ -384,7 +384,7 @@ pub(crate) async fn list_workflow_runs(
         }
         rows.push(project_workflow_run_row(&run_id, &snapshot));
     }
-    rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    rows.sort_by_key(|row| std::cmp::Reverse(row.updated_at));
     Ok(rows)
 }
 

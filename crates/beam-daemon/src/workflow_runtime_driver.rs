@@ -100,14 +100,14 @@ pub(crate) async fn run(state: &AppState, run_id: &str, workflow_json: &str) {
             else {
                 break;
             };
-            if let Some(sn) = snapshot {
-                if matches!(
+            if let Some(sn) = snapshot
+                && matches!(
                     sn.run.status,
                     RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled
-                ) {
-                    send_progress_card(&watch_state, &watch_run_id, &watch_workflow_id).await;
-                    break;
-                }
+                )
+            {
+                send_progress_card(&watch_state, &watch_run_id, &watch_workflow_id).await;
+                break;
             }
         }
     });
@@ -177,15 +177,14 @@ async fn send_progress_card(state: &AppState, run_id: &str, workflow_id: &str) {
                 let is_card_gone = err.to_string().contains("230001")
                     || err.to_string().contains("not found")
                     || err.to_string().contains("message not exist");
-                if is_card_gone {
-                    if let Ok(msg_id) =
+                if is_card_gone
+                    && let Ok(msg_id) =
                         crate::send_lark_card_in_chat(state, &bot, &chat_id, &card_json).await
-                    {
-                        card_map.insert(run_id.to_string(), msg_id);
-                        let snapshot = card_map.clone();
-                        drop(card_map);
-                        save_workflow_progress_cards(&state.paths, &snapshot).await;
-                    }
+                {
+                    card_map.insert(run_id.to_string(), msg_id);
+                    let snapshot = card_map.clone();
+                    drop(card_map);
+                    save_workflow_progress_cards(&state.paths, &snapshot).await;
                 }
             }
         }

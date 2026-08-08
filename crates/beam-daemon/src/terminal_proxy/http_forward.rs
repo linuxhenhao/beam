@@ -46,16 +46,15 @@ pub(crate) fn forward_request_headers(
             continue;
         }
         if let Ok(name_str) = name.as_str().parse::<reqwest_header::HeaderName>() {
-            let _ = out.insert(name_str, value.clone().into());
+            let _ = out.insert(name_str, value.clone());
         }
     }
     // Inject server-side zellij cookie if available
-    if let Some(cookie) = injected_cookie {
-        if let Ok(header_name) = reqwest_header::HeaderName::from_bytes(b"cookie") {
-            if let Ok(header_value) = reqwest_header::HeaderValue::from_str(cookie) {
-                let _ = out.insert(header_name, header_value);
-            }
-        }
+    if let Some(cookie) = injected_cookie
+        && let Ok(header_name) = reqwest_header::HeaderName::from_bytes(b"cookie")
+        && let Ok(header_value) = reqwest_header::HeaderValue::from_str(cookie)
+    {
+        let _ = out.insert(header_name, header_value);
     }
     out
 }
@@ -72,7 +71,7 @@ pub(crate) fn forward_response_headers(dest: &mut HeaderMap, src: &reqwest_heade
             continue;
         }
         if let Ok(hname) = HeaderName::from_bytes(name.as_str().as_bytes()) {
-            let _ = dest.insert(hname, value.clone().into());
+            let _ = dest.insert(hname, value.clone());
         }
     }
 }
@@ -470,11 +469,10 @@ pub(crate) async fn handle_session_path(
     );
 
     if terminal_auth::is_zellij_root_path(&path) {
-        if should_ensure_read_only_anchor(auth.permission, &state.zellij_tokens) {
-            if let Some(zellij_session) = resolve_zellij_session(&state.sessions, &session_id).await
-            {
-                anchor::ensure_read_only_anchor(&state, &session_id, &zellij_session).await;
-            }
+        if should_ensure_read_only_anchor(auth.permission, &state.zellij_tokens)
+            && let Some(zellij_session) = resolve_zellij_session(&state.sessions, &session_id).await
+        {
+            anchor::ensure_read_only_anchor(&state, &session_id, &zellij_session).await;
         }
         // Proxy to zellij web root (e.g. /assets/..., /command/login, /session, /info, /api/...)
         proxy_to_zellij_root(

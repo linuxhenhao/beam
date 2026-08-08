@@ -12,8 +12,8 @@ use beam_core::{FinalOutputKind, InitConfig};
 use serde_json::Value;
 
 use crate::adapter::{
-    Adapter, PendingTurnKind, PollResult, ResolveOutcome, SpawnSpec, SubmitResult, TranscriptCursor,
-    confirm_submit_loop, file_size, normalize_history_text, realpath_cwd,
+    Adapter, PendingTurnKind, PollResult, ResolveOutcome, SpawnSpec, SubmitResult,
+    TranscriptCursor, confirm_submit_loop, file_size, normalize_history_text, realpath_cwd,
 };
 use crate::backend::SessionBackend;
 
@@ -219,24 +219,23 @@ impl Adapter for ClaudeState {
             adopt_preamble: None,
             prompt_ready: false,
         };
-        if let (Some(text), Some(since)) = (&self.pending_final_text, self.pending_final_since) {
-            if since.elapsed() >= Duration::from_millis(1200) {
-                if let Some(emitted) = self.cursor.emit_if_new(text) {
-                    let kind = self.active_turn.take();
-                    result.final_output = Some(emitted);
-                    match kind {
-                        Some(PendingTurnKind::Local { user_text }) => {
-                            result.final_output_kind = Some(FinalOutputKind::LocalTurn);
-                            result.final_output_user_text = Some(user_text);
-                        }
-                        Some(PendingTurnKind::LocalHeadless) => {
-                            result.final_output_kind = Some(FinalOutputKind::LocalTurnHeadless);
-                        }
-                        _ => {}
-                    }
-                    result.prompt_ready = true;
+        if let (Some(text), Some(since)) = (&self.pending_final_text, self.pending_final_since)
+            && since.elapsed() >= Duration::from_millis(1200)
+            && let Some(emitted) = self.cursor.emit_if_new(text)
+        {
+            let kind = self.active_turn.take();
+            result.final_output = Some(emitted);
+            match kind {
+                Some(PendingTurnKind::Local { user_text }) => {
+                    result.final_output_kind = Some(FinalOutputKind::LocalTurn);
+                    result.final_output_user_text = Some(user_text);
                 }
+                Some(PendingTurnKind::LocalHeadless) => {
+                    result.final_output_kind = Some(FinalOutputKind::LocalTurnHeadless);
+                }
+                _ => {}
             }
+            result.prompt_ready = true;
         }
         Ok(result)
     }

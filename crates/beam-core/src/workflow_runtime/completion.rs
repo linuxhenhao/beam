@@ -192,12 +192,11 @@ async fn find_root_cause_event_id(log: &EventLog, node_id: &str) -> Result<Strin
                     node_failed_event_id = Some(e.event_id.clone());
                 }
             }
-            "loopFinished" => {
+            "loopFinished"
                 if e.payload.get("loopId").and_then(Value::as_str) == Some(node_id)
-                    && e.payload.get("resolution").and_then(Value::as_str) != Some("approved")
-                {
-                    loop_finished_event_id = Some(e.event_id.clone());
-                }
+                    && e.payload.get("resolution").and_then(Value::as_str) != Some("approved") =>
+            {
+                loop_finished_event_id = Some(e.event_id.clone());
             }
             _ => {}
         }

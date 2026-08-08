@@ -193,7 +193,7 @@ fn recent_opencode_session_ids(log_dir: &PathBuf) -> Vec<String> {
             Some((modified, path))
         })
         .collect();
-    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
 
     let mut ids = Vec::new();
     let mut seen = HashSet::new();

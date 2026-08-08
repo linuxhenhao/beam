@@ -52,11 +52,11 @@ impl Adapter for KimiState {
         if !init.disable_cli_bypass {
             args.push("--yolo".to_string());
         }
-        if let Some(model) = &init.model {
-            if !model.is_empty() {
-                args.push("--model".to_string());
-                args.push(model.clone());
-            }
+        if let Some(model) = &init.model
+            && !model.is_empty()
+        {
+            args.push("--model".to_string());
+            args.push(model.clone());
         }
         args.extend(init.cli_args.clone());
         SpawnSpec {
@@ -168,12 +168,12 @@ impl Adapter for KimiState {
             }
         }
 
-        if let Some(text) = final_text {
-            if let Some(emitted) = self.cursor.emit_if_new(&text) {
-                result.final_output = Some(emitted);
-                result.final_output_kind = Some(FinalOutputKind::Bridge);
-                result.prompt_ready = true;
-            }
+        if let Some(text) = final_text
+            && let Some(emitted) = self.cursor.emit_if_new(&text)
+        {
+            result.final_output = Some(emitted);
+            result.final_output_kind = Some(FinalOutputKind::Bridge);
+            result.prompt_ready = true;
         }
 
         Ok(result)
@@ -213,10 +213,7 @@ fn latest_kimi_transcript(data_dir: &Path, working_dir: &str) -> Option<PathBuf>
         if !work_dir_matches(&session_work_dir, working_dir) {
             continue;
         }
-        let wire = session_dir
-            .join("agents")
-            .join("main")
-            .join("wire.jsonl");
+        let wire = session_dir.join("agents").join("main").join("wire.jsonl");
         let Ok(meta) = wire.metadata() else {
             continue;
         };
@@ -328,6 +325,7 @@ fn kimi_submit_confirmed(path: &Path, from_byte: u64, expected_text: &str) -> Re
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use crate::adapter::test_support::{home_test_lock, set_home, temp_home, test_init};
@@ -672,7 +670,11 @@ mod tests {
         let old_wire = wire_path(&home, "session_old");
         append_wire(
             &old_wire,
-            &[step_begin_line(), text_part_line("old"), step_end_line("end_turn")],
+            &[
+                step_begin_line(),
+                text_part_line("old"),
+                step_end_line("end_turn"),
+            ],
         );
         // A session from another working directory must be ignored even if newer.
         let other_wire = wire_path(&home, "session_other");
@@ -790,7 +792,11 @@ mod tests {
                         .join("\n");
                     let _ = fs::write(
                         &index,
-                        if kept.is_empty() { kept } else { format!("{kept}\n") },
+                        if kept.is_empty() {
+                            kept
+                        } else {
+                            format!("{kept}\n")
+                        },
                     );
                 }
             }
@@ -853,7 +859,10 @@ mod tests {
                 break;
             }
         }
-        assert!(ready, "kimi TUI did not reach the welcome screen within 60s");
+        assert!(
+            ready,
+            "kimi TUI did not reach the welcome screen within 60s"
+        );
 
         let submit = state
             .write_input(&backend, "reply with exactly: BEAM_KIMI_OK")

@@ -23,6 +23,7 @@ pub(crate) fn next_session_turn_id() -> String {
     Uuid::new_v4().simple().to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_session_create_spec_from_bot(
     bot: &BotConfig,
     title: String,
@@ -59,6 +60,7 @@ pub(crate) fn build_session_create_spec_from_bot(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_session_create_spec_from_pending(
     pending: &dir_select::PendingCreateSession,
     title: String,
@@ -95,13 +97,23 @@ pub(crate) fn build_session_create_spec_from_pending(
     }
 }
 
-fn resolve_direct_create_working_dir(bot: &BotConfig, daemon_working_dirs: &[String]) -> String {
-    dir_select::determine_root_working_dir(bot.working_dir.as_deref(), daemon_working_dirs)
+fn resolve_direct_create_working_dir(
+    bot: &BotConfig,
+    daemon_working_dirs: &[String],
+    working_dir_override: Option<&str>,
+) -> String {
+    working_dir_override
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            dir_select::determine_root_working_dir(bot.working_dir.as_deref(), daemon_working_dirs)
+        })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_direct_create_session_spec_from_bot(
     bot: &BotConfig,
     daemon_working_dirs: &[String],
+    working_dir_override: Option<String>,
     title: String,
     chat_id: String,
     chat_type: Option<String>,
@@ -115,7 +127,11 @@ pub(crate) fn build_direct_create_session_spec_from_bot(
     locale: Option<String>,
     adopted_from: Option<AdoptedFrom>,
 ) -> SessionCreateSpec {
-    let working_dir = resolve_direct_create_working_dir(bot, daemon_working_dirs);
+    let working_dir = resolve_direct_create_working_dir(
+        bot,
+        daemon_working_dirs,
+        working_dir_override.as_deref(),
+    );
     SessionCreateSpec {
         title,
         chat_id,
@@ -312,6 +328,7 @@ mod tests {
         let spec = build_direct_create_session_spec_from_bot(
             &bot,
             &daemon_working_dirs,
+            None,
             "title".to_string(),
             "chat".to_string(),
             Some("group".to_string()),
@@ -345,6 +362,7 @@ mod tests {
         let spec = build_direct_create_session_spec_from_bot(
             &bot,
             &daemon_working_dirs,
+            None,
             "title".to_string(),
             "chat".to_string(),
             Some("group".to_string()),
@@ -550,7 +568,9 @@ mod tests {
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
             pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
-            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(crate::ApiTokenState::for_test())),
+            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::ApiTokenState::for_test(),
+            )),
             external_host: std::sync::Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
         };
         match wait_for_attempt_resume_ready(&state, &key, &entry.sidecar_path).await {
@@ -619,7 +639,9 @@ mod tests {
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
             pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
-            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(crate::ApiTokenState::for_test())),
+            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::ApiTokenState::for_test(),
+            )),
             external_host: std::sync::Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
         };
         let state_for_update = state.clone();
@@ -745,7 +767,9 @@ mod tests {
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
             pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
-            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(crate::ApiTokenState::for_test())),
+            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::ApiTokenState::for_test(),
+            )),
             external_host: std::sync::Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
         };
         match wait_for_attempt_resume_ready(&state, &key, &entry.sidecar_path).await {
@@ -811,7 +835,9 @@ mod tests {
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
             pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
-            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(crate::ApiTokenState::for_test())),
+            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::ApiTokenState::for_test(),
+            )),
             external_host: std::sync::Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
         };
         match wait_for_attempt_resume_ready(&state, &key, &entry.sidecar_path).await {
@@ -880,7 +906,9 @@ mod tests {
             grant_pending: Arc::new(Mutex::new(HashMap::new())),
             pending_creates: Arc::new(Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(Mutex::new(None)),
-            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(crate::ApiTokenState::for_test())),
+            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::ApiTokenState::for_test(),
+            )),
             external_host: std::sync::Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
         };
 

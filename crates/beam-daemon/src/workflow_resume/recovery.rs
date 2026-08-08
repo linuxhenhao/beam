@@ -17,7 +17,6 @@ use beam_core::{
 };
 use chrono::Utc;
 use serde_json::Value;
-use tokio;
 
 use crate::{
     AppState, AttemptResumeEntry, AttemptResumeSidecar, AttemptResumeWaitOutcome,
@@ -32,6 +31,7 @@ use crate::{
 
 /// Append a pair of failure events (`reconcileResult` + `activityFailed`) to
 /// the event log for a Feishu IM resume that could not be completed.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn append_feishu_resume_failure(
     log: &mut EventLog,
     activity_id: &str,
@@ -169,25 +169,25 @@ pub(crate) async fn wait_for_attempt_resume_ready(
         };
         let Some(entry) = entry else {
             let sidecar = tokio::fs::read_to_string(sidecar_path).await;
-            if let Ok(raw) = sidecar {
-                if let Ok(parsed) = serde_json::from_str::<AttemptResumeSidecar>(&raw) {
-                    let close_reason = parsed.close_reason.unwrap_or_else(|| {
-                        if parsed.status == "closed" {
-                            "worker_exited_before_ready".to_string()
-                        } else {
-                            "attempt_resume_closed".to_string()
-                        }
-                    });
-                    let error = if close_reason.contains("worker_error") {
-                        "worker_error"
+            if let Ok(raw) = sidecar
+                && let Ok(parsed) = serde_json::from_str::<AttemptResumeSidecar>(&raw)
+            {
+                let close_reason = parsed.close_reason.unwrap_or_else(|| {
+                    if parsed.status == "closed" {
+                        "worker_exited_before_ready".to_string()
                     } else {
-                        "worker_exited_before_ready"
-                    };
-                    return AttemptResumeWaitOutcome::Failed {
-                        error: error.to_string(),
-                        message: Some(close_reason),
-                    };
-                }
+                        "attempt_resume_closed".to_string()
+                    }
+                });
+                let error = if close_reason.contains("worker_error") {
+                    "worker_error"
+                } else {
+                    "worker_exited_before_ready"
+                };
+                return AttemptResumeWaitOutcome::Failed {
+                    error: error.to_string(),
+                    message: Some(close_reason),
+                };
             }
             return AttemptResumeWaitOutcome::Failed {
                 error: "worker_exited_before_ready".to_string(),
@@ -195,7 +195,7 @@ pub(crate) async fn wait_for_attempt_resume_ready(
             };
         };
         if entry.web_port.is_some() && entry.write_token.is_some() {
-            return AttemptResumeWaitOutcome::Ready(entry);
+            return AttemptResumeWaitOutcome::Ready(Box::new(entry));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -659,24 +659,23 @@ pub(crate) fn append_resume_cancel_recovery(
     };
     let activity_id = activity.activity_id.clone();
     let attempt_id = latest.attempt_id.clone();
-    let reconcile_event = event_index.values().find_map(|event| {
+    let reconcile_event = event_index.values().find(|event| {
         if event.event_type != "reconcileResult" {
-            return None;
+            return false;
         }
         if event.payload.get("activityId").and_then(Value::as_str) != Some(activity_id.as_str()) {
-            return None;
+            return false;
         }
         if event.payload.get("attemptId").and_then(Value::as_str) != Some(attempt_id.as_str()) {
-            return None;
+            return false;
         }
-        if let Some(effect_attempted) = latest.effect_attempted.as_ref() {
-            if event.payload.get("idempotencyKey").and_then(Value::as_str)
+        if let Some(effect_attempted) = latest.effect_attempted.as_ref()
+            && event.payload.get("idempotencyKey").and_then(Value::as_str)
                 != Some(effect_attempted.idempotency_key.as_str())
-            {
-                return None;
-            }
+        {
+            return false;
         }
-        Some(event)
+        true
     });
     let reconcile_decision = reconcile_event
         .as_ref()
@@ -743,7 +742,7 @@ pub(crate) fn append_resume_cancel_recovery(
         Some(event) => event,
         None => return Ok(None),
     };
-    let reconcile_event = reconcile_event.map(|event| crate::workflow_event_json(event));
+    let reconcile_event = reconcile_event.map(crate::workflow_event_json);
     let kind = if terminal_event.event_type == "activityCanceled" {
         "cancelled"
     } else {

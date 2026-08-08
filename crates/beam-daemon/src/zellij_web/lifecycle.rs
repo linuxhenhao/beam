@@ -415,10 +415,9 @@ fn process_owns_listen_inode(proc_path: &Path, inodes: &[String]) -> Result<bool
         if let Some(inode) = target
             .strip_prefix("socket:[")
             .and_then(|value| value.strip_suffix(']'))
+            && inodes.iter().any(|candidate| candidate == inode)
         {
-            if inodes.iter().any(|candidate| candidate == inode) {
-                return Ok(true);
-            }
+            return Ok(true);
         }
     }
 

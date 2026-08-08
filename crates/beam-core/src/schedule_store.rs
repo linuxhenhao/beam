@@ -50,15 +50,11 @@ pub enum ScheduleChatType {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 pub enum ScheduleDeliver {
+    #[default]
     Origin,
     Local,
-}
-
-impl Default for ScheduleDeliver {
-    fn default() -> Self {
-        Self::Origin
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -362,7 +358,7 @@ pub fn append_output_log(
 ) -> Result<PathBuf, ScheduleStoreError> {
     let dir = task_output_dir(paths, task_id);
     fs::create_dir_all(&dir)?;
-    let fname = format!("{}.md", UtcNow::now().replace(':', "-").replace('.', "-"));
+    let fname = format!("{}.md", UtcNow::now().replace([':', '.'], "-"));
     let path = dir.join(fname);
     fs::write(&path, content)?;
     Ok(path)

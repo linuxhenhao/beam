@@ -83,13 +83,13 @@ fn create_state_with_paths(
 impl Adapter for CodexState {
     fn build_spawn_spec(&self, init: &InitConfig) -> SpawnSpec {
         let mut args = Vec::new();
-        if init.resume {
-            if let Some(cli_session_id) = init.cli_session_id.clone().or_else(|| {
+        if init.resume
+            && let Some(cli_session_id) = init.cli_session_id.clone().or_else(|| {
                 latest_codex_session_for_beam_session(&self.history_path, &init.session_id)
-            }) {
-                args.push("resume".to_string());
-                args.push(cli_session_id);
-            }
+            })
+        {
+            args.push("resume".to_string());
+            args.push(cli_session_id);
         }
         args.push("-C".to_string());
         args.push(init.working_dir.clone());
@@ -151,15 +151,13 @@ impl Adapter for CodexState {
                 self.rollout_path =
                     find_codex_rollout_by_session_id(&self.home_dir, &cli_session_id);
             }
-            if self.rollout_path.is_none() {
-                if let Some(pid) = self.cli_pid {
-                    if let ResolveOutcome::Found((path, cli_session_id)) =
-                        find_codex_rollout_by_pid(pid, &self.home_dir)
-                    {
-                        self.rollout_path = Some(path);
-                        self.cli_session_id = Some(cli_session_id);
-                    }
-                }
+            if self.rollout_path.is_none()
+                && let Some(pid) = self.cli_pid
+                && let ResolveOutcome::Found((path, cli_session_id)) =
+                    find_codex_rollout_by_pid(pid, &self.home_dir)
+            {
+                self.rollout_path = Some(path);
+                self.cli_session_id = Some(cli_session_id);
             }
         }
 
@@ -219,7 +217,7 @@ impl Adapter for CodexState {
                     {
                         let text = extract_codex_text(payload.get("content"), "output_text");
                         if let Some(text) = self.cursor.emit_if_new(&text) {
-                            let kind = self.active_turn.take().or_else(|| {
+                            let kind = self.active_turn.take().or({
                                 if self.adopt_mode {
                                     Some(PendingTurnKind::LocalHeadless)
                                 } else {
@@ -470,10 +468,10 @@ fn baseline_codex_adopt_preamble(path: &Path) -> Result<Option<(String, String)>
             }
             "assistant" if payload.get("phase").and_then(Value::as_str) == Some("final_answer") => {
                 let text = extract_codex_text(payload.get("content"), "output_text");
-                if !text.trim().is_empty() {
-                    if let Some(user_text) = pending_user.take() {
-                        latest_pair = Some((user_text, text));
-                    }
+                if !text.trim().is_empty()
+                    && let Some(user_text) = pending_user.take()
+                {
+                    latest_pair = Some((user_text, text));
                 }
             }
             _ => {}

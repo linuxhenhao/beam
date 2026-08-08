@@ -121,20 +121,20 @@ pub fn list_trigger_logs(
         .map(|dt| dt.timestamp_millis());
     let mut out = Vec::new();
     for entry in entries.into_iter().rev() {
-        if let Some(connector_id) = connector_id {
-            if entry.connector_id.as_deref() != Some(connector_id) {
-                continue;
-            }
+        if let Some(connector_id) = connector_id
+            && entry.connector_id.as_deref() != Some(connector_id)
+        {
+            continue;
         }
-        if let Some(status) = status {
-            if entry.status != status {
-                continue;
-            }
+        if let Some(status) = status
+            && entry.status != status
+        {
+            continue;
         }
-        if let Some(error_code) = error_code {
-            if entry.error_code.as_deref() != Some(error_code) {
-                continue;
-            }
+        if let Some(error_code) = error_code
+            && entry.error_code.as_deref() != Some(error_code)
+        {
+            continue;
         }
         if let Some(since_ms) = since_ms {
             let created_ms = chrono::DateTime::parse_from_rfc3339(&entry.created_at)
@@ -163,10 +163,10 @@ pub fn summarize_trigger_logs(
         .map(|dt| dt.timestamp_millis());
     let mut groups: std::collections::BTreeMap<String, TriggerLogStats> = Default::default();
     for entry in entries {
-        if let Some(connector_id) = connector_id {
-            if entry.connector_id.as_deref() != Some(connector_id) {
-                continue;
-            }
+        if let Some(connector_id) = connector_id
+            && entry.connector_id.as_deref() != Some(connector_id)
+        {
+            continue;
         }
         if let Some(since_ms) = since_ms {
             let created_ms = chrono::DateTime::parse_from_rfc3339(&entry.created_at)
@@ -223,10 +223,10 @@ pub fn prune_trigger_logs(
                 .unwrap_or(true)
         });
     }
-    if let Some(max_entries) = max_entries {
-        if kept.len() > max_entries {
-            kept = kept[kept.len() - max_entries..].to_vec();
-        }
+    if let Some(max_entries) = max_entries
+        && kept.len() > max_entries
+    {
+        kept = kept[kept.len() - max_entries..].to_vec();
     }
     let fp = path(paths);
     if let Some(parent) = fp.parent() {

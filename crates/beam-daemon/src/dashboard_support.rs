@@ -150,12 +150,12 @@ pub(crate) fn load_observed_bot_open_ids_for_app(
         if !file_name.starts_with(&prefix) || !file_name.ends_with(".json") {
             continue;
         }
-        if let Ok(raw) = fs::read_to_string(&path) {
-            if let Ok(records) = serde_json::from_str::<Vec<ObservedBotRecord>>(&raw) {
-                for record in records {
-                    if !record.open_id.trim().is_empty() {
-                        out.insert(record.open_id);
-                    }
+        if let Ok(raw) = fs::read_to_string(&path)
+            && let Ok(records) = serde_json::from_str::<Vec<ObservedBotRecord>>(&raw)
+        {
+            for record in records {
+                if !record.open_id.trim().is_empty() {
+                    out.insert(record.open_id);
                 }
             }
         }
@@ -255,7 +255,8 @@ pub(crate) async fn require_dashboard_access(
     };
     // Accept the rotating local api token as well: local clients (beam CLI)
     // cannot complete the dashboard login flow but can read the token file.
-    if dashboard_token_is_valid(state, &token).await || state.api_token.read().await.is_valid(&token)
+    if dashboard_token_is_valid(state, &token).await
+        || state.api_token.read().await.is_valid(&token)
     {
         Ok(())
     } else {
@@ -324,12 +325,14 @@ async fn verify_signed_request(
         .path_and_query()
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| parts.uri.path().to_string());
-    let bytes = axum::body::to_bytes(body, SIG_BODY_LIMIT).await.map_err(|_| {
-        (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "request body too large".to_string(),
-        )
-    })?;
+    let bytes = axum::body::to_bytes(body, SIG_BODY_LIMIT)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request body too large".to_string(),
+            )
+        })?;
     let verified = state.api_token.write().await.verify_signature(
         ts,
         &nonce,

@@ -111,16 +111,16 @@ impl ViewerCounter {
             let handle = tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(800)).await;
                 let mut inner = counter.lock().await;
-                if let Some(state) = inner.get_mut(&zellij_session) {
-                    if state.count == 0 {
-                        let anchors_map = anchors.anchors.lock().await;
-                        if let Some(entry) = anchors_map.get(&zellij_session) {
-                            if !entry.task.is_finished() {
-                                let _ = entry.cmd_tx.send(AnchorCommand::ResizeToDefault);
-                            }
-                        }
-                        state.pending_reset = None;
+                if let Some(state) = inner.get_mut(&zellij_session)
+                    && state.count == 0
+                {
+                    let anchors_map = anchors.anchors.lock().await;
+                    if let Some(entry) = anchors_map.get(&zellij_session)
+                        && !entry.task.is_finished()
+                    {
+                        let _ = entry.cmd_tx.send(AnchorCommand::ResizeToDefault);
                     }
+                    state.pending_reset = None;
                 }
             });
             state.pending_reset = Some(handle);
@@ -227,7 +227,9 @@ pub(crate) async fn ensure_read_only_anchor(
                 outcome = "error",
                 session_id = session_id_for_log,
                 "terminal proxy: zellij read-only anchor ended for session {} zellij={}: {}",
-                session_id_for_log, zellij_session_for_task, err
+                session_id_for_log,
+                zellij_session_for_task,
+                err
             );
         }
     });

@@ -104,10 +104,10 @@ fn lan_ipv4_candidates() -> Vec<Ipv4Addr> {
     let mut ips = Vec::new();
     for interface in interfaces.values() {
         for addr in &interface.ips {
-            if let IpAddr::V4(ipv4) = addr.ip {
-                if is_usable_lan_ipv4(ipv4) {
-                    ips.push(ipv4);
-                }
+            if let IpAddr::V4(ipv4) = addr.ip
+                && is_usable_lan_ipv4(ipv4)
+            {
+                ips.push(ipv4);
             }
         }
     }

@@ -29,18 +29,14 @@ pub struct ZellijWebTokens {
 impl ZellijWebTokens {
     /// Check whether both tokens are present and valid.
     pub fn is_complete(&self) -> bool {
-        self.read_only_token
-            .as_ref()
-            .map_or(false, |t| !t.is_empty())
-            && self.write_token.as_ref().map_or(false, |t| !t.is_empty())
+        self.read_only_token.as_ref().is_some_and(|t| !t.is_empty())
+            && self.write_token.as_ref().is_some_and(|t| !t.is_empty())
     }
 
     /// Check whether at least one usable token exists.
     pub fn has_any_token(&self) -> bool {
-        self.read_only_token
-            .as_ref()
-            .map_or(false, |t| !t.is_empty())
-            || self.write_token.as_ref().map_or(false, |t| !t.is_empty())
+        self.read_only_token.as_ref().is_some_and(|t| !t.is_empty())
+            || self.write_token.as_ref().is_some_and(|t| !t.is_empty())
     }
 }
 
@@ -308,7 +304,7 @@ fn fill_missing_tokens(existing: ZellijWebTokens, port: u16) -> Result<ZellijWeb
     tokens.port = port;
 
     // Try to create missing write token
-    if tokens.write_token.as_ref().map_or(true, |t| t.is_empty()) {
+    if tokens.write_token.as_ref().is_none_or(|t| t.is_empty()) {
         match try_create_token(true, false) {
             Ok(tok) => {
                 info!("filled missing write token");
@@ -319,11 +315,7 @@ fn fill_missing_tokens(existing: ZellijWebTokens, port: u16) -> Result<ZellijWeb
     }
 
     // Try to create missing read-only token
-    if tokens
-        .read_only_token
-        .as_ref()
-        .map_or(true, |t| t.is_empty())
-    {
+    if tokens.read_only_token.as_ref().is_none_or(|t| t.is_empty()) {
         match try_create_token(false, true) {
             Ok(tok) => {
                 info!("filled missing read-only token");
@@ -465,5 +457,5 @@ fn try_create_token(want_write: bool, is_read_only: bool) -> Result<String> {
         return Err(err_bare_name_conflict(&diag));
     }
 
-    return Err(err_bare_generic_failure(&diag));
+    Err(err_bare_generic_failure(&diag))
 }

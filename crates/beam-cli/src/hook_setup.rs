@@ -14,10 +14,10 @@ fn home_dir() -> PathBuf {
 }
 
 fn write_if_changed(path: &Path, content: &str) -> Result<bool> {
-    if let Ok(existing) = fs::read_to_string(path) {
-        if existing == content {
-            return Ok(false);
-        }
+    if let Ok(existing) = fs::read_to_string(path)
+        && existing == content
+    {
+        return Ok(false);
     }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;

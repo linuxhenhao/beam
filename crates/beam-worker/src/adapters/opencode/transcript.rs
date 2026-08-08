@@ -219,10 +219,7 @@ print(row[0] or 0)
         .output()
         .context("failed to query opencode session offset")?;
     if !proc.status.success() {
-        bail!(
-            "{}",
-            String::from_utf8_lossy(&proc.stderr).trim().to_string()
-        );
+        bail!("{}", String::from_utf8_lossy(&proc.stderr).trim());
     }
     Ok(String::from_utf8_lossy(&proc.stdout)
         .trim()
@@ -394,10 +391,8 @@ fn number_value(value: &Value) -> Option<u64> {
 
 fn message_timestamp_ms(message: &GroupedMessage, assistant_final: bool) -> u64 {
     if let Some(time) = message.data.get("time").and_then(Value::as_object) {
-        if assistant_final {
-            if let Some(completed) = time.get("completed").and_then(number_value) {
-                return completed;
-            }
+        if assistant_final && let Some(completed) = time.get("completed").and_then(number_value) {
+            return completed;
         }
         if let Some(created) = time.get("created").and_then(number_value) {
             return created;
@@ -420,10 +415,7 @@ pub(crate) fn run_python_json<T: DeserializeOwned>(script: &str) -> Result<T> {
         .output()
         .context("failed to run python3")?;
     if !proc.status.success() {
-        bail!(
-            "{}",
-            String::from_utf8_lossy(&proc.stderr).trim().to_string()
-        );
+        bail!("{}", String::from_utf8_lossy(&proc.stderr).trim());
     }
     let stdout = String::from_utf8_lossy(&proc.stdout).trim().to_string();
     if stdout.is_empty() {

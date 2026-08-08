@@ -316,7 +316,7 @@ fn auto_inject_no_mention_flag_disables_auto_inject() {
     // While --no-mention is enforced at the handler level,
     // the helper also respects it by not being called.
     // Test that NO auto-injection happens when not called.
-    let _bots = vec![make_observed_bot("ou_reviewer", "ReviewerBot")];
+    let _bots = [make_observed_bot("ou_reviewer", "ReviewerBot")];
     // Without auto_inject, content stays as-is
     let content = "请 @ReviewerBot 看一下";
     // The helper is simply not called; this test documents the

@@ -171,7 +171,7 @@ fn recent_opencode_session_ids(log_dir: &Path) -> Vec<String> {
             Some((modified, path))
         })
         .collect();
-    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
 
     let mut ids = Vec::new();
     let mut seen = HashSet::new();
@@ -255,6 +255,7 @@ mod tests {
         std::env::temp_dir().join(format!("beam-opencode-adopt-{name}-{nonce}"))
     }
 
+    #[allow(clippy::type_complexity)]
     fn create_db_with_session_rows(
         db_path: &Path,
         sessions: &[(&str, &str, u64, Option<u64>, Option<&str>)],

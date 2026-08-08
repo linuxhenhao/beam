@@ -109,14 +109,15 @@ impl HostExecutorRegistry {
     /// Returns `Ok(&dyn HostExecutor)` if found, or a `Failed` outcome
     /// with `UnknownProviderError / manual` if not registered.
     #[allow(dead_code)]
-    pub fn resolve(&self, name: &str) -> Result<&dyn HostExecutor, WorkflowDispatchOutcome> {
-        self.get(name)
-            .ok_or_else(|| WorkflowDispatchOutcome::Failed {
+    pub fn resolve(&self, name: &str) -> Result<&dyn HostExecutor, Box<WorkflowDispatchOutcome>> {
+        self.get(name).ok_or_else(|| {
+            Box::new(WorkflowDispatchOutcome::Failed {
                 error_code: "UnknownProviderError".to_string(),
                 error_class: "manual".to_string(),
                 error_message: format!("hostExecutor '{}' is not registered.", name),
                 session: None,
             })
+        })
     }
 
     /// Returns an iterator over all registered executor names.
@@ -463,7 +464,9 @@ mod tests {
             grant_pending: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             pending_creates: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             dashboard_token: Arc::new(tokio::sync::Mutex::new(None)),
-            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(crate::ApiTokenState::for_test())),
+            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::ApiTokenState::for_test(),
+            )),
             external_host: std::sync::Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
         }
     }
@@ -515,19 +518,22 @@ mod tests {
         let result = reg.resolve("nonexistent");
         assert!(result.is_err(), "expected Err for unknown executor");
         match result {
-            Err(WorkflowDispatchOutcome::Failed {
-                error_code,
-                error_class,
-                error_message,
-                ..
-            }) => {
-                assert_eq!(error_code, "UnknownProviderError");
-                assert_eq!(error_class, "manual");
-                assert!(
-                    error_message.contains("not registered"),
-                    "expected 'not registered' in message, got: {error_message}"
-                );
-            }
+            Err(boxed) => match *boxed {
+                WorkflowDispatchOutcome::Failed {
+                    error_code,
+                    error_class,
+                    error_message,
+                    ..
+                } => {
+                    assert_eq!(error_code, "UnknownProviderError");
+                    assert_eq!(error_class, "manual");
+                    assert!(
+                        error_message.contains("not registered"),
+                        "expected 'not registered' in message, got: {error_message}"
+                    );
+                }
+                _ => panic!("expected Err(Failed)"),
+            },
             other => panic!("expected Err(Failed), got unexpected: {:?}", other.err()),
         }
     }

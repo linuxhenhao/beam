@@ -279,7 +279,10 @@ async fn explicit_send_marks_current_turn_as_answered() {
 
     let stored = {
         let sessions = state.sessions.lock().await;
-        sessions.get("sess-explicit-turn").cloned().expect("session")
+        sessions
+            .get("sess-explicit-turn")
+            .cloned()
+            .expect("session")
     };
     assert_eq!(
         stored.last_final_output_turn_id.as_deref(),

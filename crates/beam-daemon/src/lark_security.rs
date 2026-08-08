@@ -218,10 +218,9 @@ pub(crate) async fn lark_tenant_token(state: &AppState, bot: &BotConfig) -> Resu
         .await
         .get(&bot.lark_app_id)
         .cloned()
+        && cached.expires_at > Instant::now() + Duration::from_secs(30)
     {
-        if cached.expires_at > Instant::now() + Duration::from_secs(30) {
-            return Ok(cached.token);
-        }
+        return Ok(cached.token);
     }
 
     let resp = state
@@ -294,6 +293,7 @@ mod tests {
             restrict_grant_commands: false,
             message_quota: None,
             quota_state: std::collections::HashMap::new(),
+            custom_triggers: Vec::new(),
         };
         assert!(can_operate_bot(&bot, None));
         assert!(can_operate_bot(&bot, Some("ou_123")));
@@ -322,6 +322,7 @@ mod tests {
             restrict_grant_commands: false,
             message_quota: None,
             quota_state: std::collections::HashMap::new(),
+            custom_triggers: Vec::new(),
         };
         assert!(can_operate_bot(&bot, Some("ou_owner")));
         assert!(!can_operate_bot(&bot, Some("ou_other")));

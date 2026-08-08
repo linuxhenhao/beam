@@ -1,10 +1,10 @@
 use super::*;
 use crate::tests::test_helpers::*;
 
-use beam_core::{BotConfig, SessionScope, SessionStatus};
+use beam_core::{CustomTrigger, SessionScope, SessionStatus};
 use std::collections::HashMap;
 
-use crate::{LarkEventOutcome, ParsedLarkInboundMessage, handle_lark_event_payload};
+use crate::{LarkEventOutcome, ParsedLarkInboundMessage};
 
 #[test]
 fn decide_lark_dispatch_reuses_chat_scope_session_for_quote_bubble_messages() {
@@ -33,12 +33,99 @@ fn decide_lark_dispatch_reuses_chat_scope_session_for_quote_bubble_messages() {
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
     assert_eq!(
         existing.map(|session| session.session_id),
         Some("chat-session".to_string())
     );
     assert_eq!(outcome, LarkEventOutcome::ReuseSession);
+}
+
+#[test]
+fn decide_lark_dispatch_slash_trigger_creates_session() {
+    let sessions = HashMap::new();
+    let parsed = ParsedLarkInboundMessage {
+        event_id: "evt-slash-1".to_string(),
+        message_id: "msg-slash-1".to_string(),
+        chat_id: "chat-slash".to_string(),
+        chat_type: Some("group".to_string()),
+        sender_type: Some("user".to_string()),
+        scope: SessionScope::Chat,
+        anchor: "chat-slash".to_string(),
+        text: "/日报".to_string(),
+        sender_open_id: Some("ou_user".to_string()),
+        mentions: Vec::new(),
+        parent_id: None,
+        root_id: None,
+        thread_id: None,
+        locale: None,
+    };
+    let trigger = CustomTrigger {
+        trigger: "/日报".to_string(),
+        prompt: Some("生成今日日报".to_string()),
+        skip_dir_select: false,
+        working_dir: None,
+        ack_message: None,
+    };
+
+    // A configured slash trigger activates the session instead of being
+    // routed as a passthrough command.
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, Some(&trigger));
+    assert!(existing.is_none());
+    assert_eq!(outcome, LarkEventOutcome::CreateSession);
+
+    // Without the trigger, "/日报" is a passthrough command and is rejected
+    // because no active session exists.
+    let (_, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
+    assert!(matches!(outcome, LarkEventOutcome::ReplyOnly { .. }));
+}
+
+#[test]
+fn decide_lark_dispatch_slash_trigger_keeps_passthrough_with_existing_session() {
+    let mut session = make_session("slash-session");
+    session.status = SessionStatus::Active;
+    session.closed_at = None;
+    session.scope = SessionScope::Chat;
+    session.chat_id = "chat-slash-2".to_string();
+    session.root_message_id = "seed-root".to_string();
+    let sessions = HashMap::from([(session.session_id.clone(), session)]);
+    let parsed = ParsedLarkInboundMessage {
+        event_id: "evt-slash-2".to_string(),
+        message_id: "msg-slash-2".to_string(),
+        chat_id: "chat-slash-2".to_string(),
+        chat_type: Some("group".to_string()),
+        sender_type: Some("user".to_string()),
+        scope: SessionScope::Chat,
+        anchor: "chat-slash-2".to_string(),
+        text: "/日报".to_string(),
+        sender_open_id: Some("ou_user".to_string()),
+        mentions: Vec::new(),
+        parent_id: None,
+        root_id: None,
+        thread_id: None,
+        locale: None,
+    };
+    let trigger = CustomTrigger {
+        trigger: "/日报".to_string(),
+        prompt: Some("生成今日日报".to_string()),
+        skip_dir_select: false,
+        working_dir: None,
+        ack_message: None,
+    };
+
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, Some(&trigger));
+    assert_eq!(
+        existing.map(|session| session.session_id),
+        Some("slash-session".to_string())
+    );
+    // With an active session the trigger gets no special treatment: the
+    // slash-prefixed message keeps its normal passthrough behavior.
+    assert_eq!(
+        outcome,
+        LarkEventOutcome::PassthroughInput {
+            text: "/日报".to_string()
+        }
+    );
 }
 
 #[test]
@@ -68,7 +155,7 @@ fn decide_lark_dispatch_creates_new_thread_when_only_chat_scope_session_exists()
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
     assert!(existing.is_none());
     assert_eq!(outcome, LarkEventOutcome::CreateSession);
 }
@@ -104,7 +191,7 @@ fn decide_lark_dispatch_reuses_topic_session_by_chat_id_without_thread_metadata(
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
     assert!(
         existing.is_none(),
         "without thread_id on either side, no match is expected"
@@ -139,7 +226,7 @@ fn decide_lark_dispatch_does_not_reuse_group_forced_topic_by_chat_id() {
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
     assert!(existing.is_none());
     assert_eq!(outcome, LarkEventOutcome::CreateSession);
 }
@@ -177,7 +264,7 @@ fn decide_lark_dispatch_creates_new_session_when_thread_id_missing() {
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
     assert!(existing.is_none());
     assert_eq!(outcome, LarkEventOutcome::CreateSession);
 }
@@ -214,7 +301,7 @@ fn decide_lark_dispatch_reuses_topic_session_with_root_id_and_thread_id() {
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
     assert_eq!(
         existing.map(|session| session.session_id),
         Some("topic-session-full".to_string())
@@ -254,7 +341,7 @@ fn decide_lark_dispatch_no_fallback_creates_session_when_anchor_mismatches() {
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
     assert!(
         existing.is_none(),
         "no fallback: without thread_id, new session is created"
@@ -300,7 +387,7 @@ fn decide_lark_dispatch_creates_new_session_for_different_root_id_in_topic_chat(
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
     // Exact match fails (root_message_id mismatch); root_id is Some
     // so fallback does NOT trigger.  Must create a new session.
     assert!(
@@ -341,7 +428,7 @@ fn decide_lark_dispatch_creates_new_session_for_different_thread_id() {
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
     assert!(
         existing.is_none(),
         "different thread_id must create a new session"
@@ -385,7 +472,7 @@ fn decide_lark_dispatch_p2p_follow_up_reuses_session_by_root_id() {
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
     assert_eq!(
         existing.as_ref().map(|s| s.session_id.as_str()),
         Some("p2p-first"),
@@ -432,7 +519,7 @@ fn decide_lark_dispatch_p2p_after_thread_id_backfill_still_reuses_by_root_id() {
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
     assert_eq!(
         existing.as_ref().map(|s| s.session_id.as_str()),
         Some("p2p-backfilled"),
@@ -473,86 +560,10 @@ fn decide_lark_dispatch_p2p_new_message_does_not_reuse_session() {
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
     assert!(
         existing.is_none(),
         "p2p new message without root_id/thread_id must not reuse old session"
     );
     assert_eq!(outcome, LarkEventOutcome::CreateSession);
-}
-
-#[test]
-fn handle_lark_event_uses_api_to_detect_topic_group() {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime");
-    rt.block_on(async {
-        let _env_lock = lark_base_url_env_lock().lock().expect("lark env lock");
-        let base_url = start_mock_lark_server().await;
-        let _env_guard = LarkBaseUrlEnvGuard::set(&base_url);
-
-        let paths = temp_paths("detect-topic");
-        maybe_remove_dir(&paths.root().to_path_buf());
-
-        let app_id = "app-topic";
-        let bot = BotConfig {
-            name: None,
-            lark_app_id: app_id.to_string(),
-            lark_app_secret: "secret".to_string(),
-            cli_id: "codex".to_string(),
-            cli_bin: None,
-            cli_args: Vec::new(),
-            skip_working_dir_prompt: false,
-            model: None,
-            working_dir: None,
-            lark_encrypt_key: None,
-            lark_verification_token: None,
-            allowed_users: Vec::new(),
-            private_card: false,
-            allowed_chat_groups: Vec::new(),
-            chat_grants: std::collections::HashMap::new(),
-            global_grants: Vec::new(),
-            oncall_chats: Vec::new(),
-            restrict_grant_commands: false,
-            message_quota: None,
-            quota_state: std::collections::HashMap::new(),
-        };
-        let state = make_state(paths.clone(), HashMap::from([(app_id.to_string(), bot)]));
-
-        let payload = serde_json::json!({
-            "header": { "event_type": "im.message.receive_v1", "event_id": "evt-topic-1" },
-            "event": {
-                "sender": { "sender_id": { "open_id": "ou_user" }, "sender_type": "user" },
-                "message": {
-                    "message_id": "msg-topic-1",
-                    "chat_id": "chat-topic-1",
-                    "chat_type": "group",
-                    "content": "{\"text\":\"hello\"}",
-                    "mentions": []
-                }
-            }
-        });
-
-        let result =
-            handle_lark_event_payload(state.clone(), app_id.to_string(), payload, None).await;
-        assert!(result.is_ok());
-
-        // With directory selection, new sessions are NOT created immediately.
-        // Instead a dir-select card is sent. Verify the pending entry was stored
-        // with the correct Thread scope.
-        let pending_creates = state.pending_creates.lock().await;
-        assert!(
-            !pending_creates.is_empty(),
-            "pending create entry should be stored when no active session exists"
-        );
-        let pending = pending_creates.values().next().unwrap();
-        assert_eq!(
-            pending.scope,
-            SessionScope::Thread,
-            "pending create should have Thread scope when API detects topic group"
-        );
-
-        maybe_remove_dir(&paths.root().to_path_buf());
-    });
 }

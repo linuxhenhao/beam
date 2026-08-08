@@ -7,6 +7,7 @@ use super::*;
 /// active without any card or error.
 pub(crate) const WORKER_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_schedule_task(
     state: &AppState,
     task_id: &str,
@@ -179,7 +180,7 @@ pub(crate) async fn spawn_worker(
     let session_id = session.session_id.clone();
     let session_id_for_task = session_id.clone();
     let watchdog_state = state.clone();
-    let _ = tokio::spawn(async move {
+    tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             match serde_json::from_str::<WorkerToDaemon>(&line) {
@@ -209,7 +210,7 @@ pub(crate) async fn spawn_worker(
                         // Mark any attempt resume entries as ready (signal via web_port=1)
                         {
                             let mut resumes = state.attempt_resumes.lock().await;
-                            for (_, entry) in resumes.iter_mut() {
+                            for entry in resumes.values_mut() {
                                 if entry.session_id == session_id_for_task
                                     && entry.web_port.is_none()
                                 {
@@ -363,50 +364,46 @@ pub(crate) async fn spawn_worker(
                         let sessions = state.sessions.lock().await;
                         sessions.get(&session_id_for_task).cloned()
                     };
-                    if let Some(session) = snapshot {
-                        if session.lark_app_id != "local"
-                            && session.tui_prompt_card_id.is_none()
-                            && !session.root_message_id.is_empty()
+                    if let Some(session) = snapshot
+                        && session.lark_app_id != "local"
+                        && session.tui_prompt_card_id.is_none()
+                        && !session.root_message_id.is_empty()
+                        && let Some(bot) = state.bots.get(&session.lark_app_id)
+                    {
+                        match lark_reply_card_with_opts(
+                            &state,
+                            bot,
+                            &session.root_message_id,
+                            &build_tui_prompt_card(
+                                &session.root_message_id,
+                                &session.session_id,
+                                &description,
+                                &options,
+                                multi_select,
+                                &[],
+                                session.locale.as_deref(),
+                            ),
+                            session.scope == SessionScope::Thread,
+                        )
+                        .await
                         {
-                            if let Some(bot) = state.bots.get(&session.lark_app_id) {
-                                match lark_reply_card_with_opts(
-                                    &state,
-                                    bot,
-                                    &session.root_message_id,
-                                    &build_tui_prompt_card(
-                                        &session.root_message_id,
-                                        &session.session_id,
-                                        &description,
-                                        &options,
-                                        multi_select,
-                                        &[],
-                                        session.locale.as_deref(),
-                                    ),
-                                    session.scope == SessionScope::Thread,
-                                )
-                                .await
-                                {
-                                    Ok(card_id) => {
-                                        let snapshot = {
-                                            let mut sessions = state.sessions.lock().await;
-                                            if let Some(entry) =
-                                                sessions.get_mut(&session_id_for_task)
-                                            {
-                                                entry.tui_prompt_card_id = Some(card_id);
-                                                entry.tui_prompt_options = options.clone();
-                                                entry.tui_prompt_multi_select = Some(multi_select);
-                                                entry.tui_toggled_indices.clear();
-                                            }
-                                            sessions.clone()
-                                        };
-                                        let _ = persist_sessions(&state.paths, &snapshot).await;
+                            Ok(card_id) => {
+                                let snapshot = {
+                                    let mut sessions = state.sessions.lock().await;
+                                    if let Some(entry) = sessions.get_mut(&session_id_for_task) {
+                                        entry.tui_prompt_card_id = Some(card_id);
+                                        entry.tui_prompt_options = options.clone();
+                                        entry.tui_prompt_multi_select = Some(multi_select);
+                                        entry.tui_toggled_indices.clear();
                                     }
-                                    Err(err) => warn!(
-                                        "failed to deliver tui prompt card for {}: {}",
-                                        session_id_for_task, err
-                                    ),
-                                }
+                                    sessions.clone()
+                                };
+                                let _ = persist_sessions(&state.paths, &snapshot).await;
                             }
+                            Err(err) => warn!(
+                                "failed to deliver tui prompt card for {}: {}",
+                                session_id_for_task, err
+                            ),
                         }
                     }
                 }
@@ -416,21 +413,20 @@ pub(crate) async fn spawn_worker(
                         sessions.get(&session_id_for_task).cloned()
                     };
                     if let Some(session) = snapshot {
-                        if let Some(card_id) = session.tui_prompt_card_id.as_deref() {
-                            if session.lark_app_id != "local" {
-                                if let Some(bot) = state.bots.get(&session.lark_app_id) {
-                                    let _ = lark_update_card(
-                                        &state,
-                                        bot,
-                                        card_id,
-                                        &build_tui_prompt_resolved_card(
-                                            selected_text.as_deref(),
-                                            session.locale.as_deref(),
-                                        ),
-                                    )
-                                    .await;
-                                }
-                            }
+                        if let Some(card_id) = session.tui_prompt_card_id.as_deref()
+                            && session.lark_app_id != "local"
+                            && let Some(bot) = state.bots.get(&session.lark_app_id)
+                        {
+                            let _ = lark_update_card(
+                                &state,
+                                bot,
+                                card_id,
+                                &build_tui_prompt_resolved_card(
+                                    selected_text.as_deref(),
+                                    session.locale.as_deref(),
+                                ),
+                            )
+                            .await;
                         }
                         let snapshot = {
                             let mut sessions = state.sessions.lock().await;
@@ -507,32 +503,26 @@ pub(crate) async fn spawn_worker(
                         let sessions = state.sessions.lock().await;
                         sessions.get(&session_id_for_task).cloned()
                     };
-                    if let Some(session) = snapshot {
-                        if session.lark_app_id != "local" {
-                            if let Some(bot) = state.bots.get(&session.lark_app_id) {
-                                let _ = match session.scope {
-                                    SessionScope::Thread if !session.root_message_id.is_empty() => {
-                                        lark_reply_message_with_opts(
-                                            &state,
-                                            bot,
-                                            &session.root_message_id,
-                                            &message,
-                                            true,
-                                        )
-                                        .await
-                                    }
-                                    _ => {
-                                        lark_send_chat_message(
-                                            &state,
-                                            bot,
-                                            &session.chat_id,
-                                            &message,
-                                        )
-                                        .await
-                                    }
-                                };
+                    if let Some(session) = snapshot
+                        && session.lark_app_id != "local"
+                        && let Some(bot) = state.bots.get(&session.lark_app_id)
+                    {
+                        let _ = match session.scope {
+                            SessionScope::Thread if !session.root_message_id.is_empty() => {
+                                lark_reply_message_with_opts(
+                                    &state,
+                                    bot,
+                                    &session.root_message_id,
+                                    &message,
+                                    true,
+                                )
+                                .await
                             }
-                        }
+                            _ => {
+                                lark_send_chat_message(&state, bot, &session.chat_id, &message)
+                                    .await
+                            }
+                        };
                     }
                 }
                 Ok(WorkerToDaemon::TranscriptChoices { candidates, .. }) => {
@@ -541,37 +531,37 @@ pub(crate) async fn spawn_worker(
                         sessions.get(&session_id_for_task).cloned()
                     };
                     let mut card_sent = false;
-                    if let Some(ref session) = snapshot {
-                        if session.lark_app_id != "local" && !session.root_message_id.is_empty() {
-                            if let Some(bot) = state.bots.get(&session.lark_app_id) {
-                                info!(
-                                    "sending transcript select card for session {} with {} candidates",
-                                    session_id_for_task,
-                                    candidates.len()
-                                );
-                                let card = build_transcript_select_card(
-                                    &session.root_message_id,
-                                    &session.session_id,
-                                    &candidates,
-                                    session.locale.as_deref(),
-                                );
-                                if let Err(err) = lark_reply_card_with_opts(
-                                    &state,
-                                    bot,
-                                    &session.root_message_id,
-                                    &card,
-                                    session.scope == SessionScope::Thread,
-                                )
-                                .await
-                                {
-                                    warn!(
-                                        "failed to send transcript select card for {}: {}",
-                                        session_id_for_task, err
-                                    );
-                                }
-                                card_sent = true;
-                            }
+                    if let Some(ref session) = snapshot
+                        && session.lark_app_id != "local"
+                        && !session.root_message_id.is_empty()
+                        && let Some(bot) = state.bots.get(&session.lark_app_id)
+                    {
+                        info!(
+                            "sending transcript select card for session {} with {} candidates",
+                            session_id_for_task,
+                            candidates.len()
+                        );
+                        let card = build_transcript_select_card(
+                            &session.root_message_id,
+                            &session.session_id,
+                            &candidates,
+                            session.locale.as_deref(),
+                        );
+                        if let Err(err) = lark_reply_card_with_opts(
+                            &state,
+                            bot,
+                            &session.root_message_id,
+                            &card,
+                            session.scope == SessionScope::Thread,
+                        )
+                        .await
+                        {
+                            warn!(
+                                "failed to send transcript select card for {}: {}",
+                                session_id_for_task, err
+                            );
                         }
+                        card_sent = true;
                     }
                     if !card_sent {
                         debug!(
@@ -600,35 +590,34 @@ pub(crate) async fn spawn_worker(
                         let sessions = state.sessions.lock().await;
                         sessions.get(&session_id_for_task).cloned()
                     };
-                    if let Some(session) = snapshot {
-                        if session.lark_app_id != "local" {
-                            if let Some(bot) = state.bots.get(&session.lark_app_id) {
-                                let recipient_open_id =
-                                    final_output_footer_recipient_open_id(&state.paths, &session);
-                                let card = build_contextual_reply_card(
-                                    "📜 /adopt 前最后一轮",
-                                    "📜 Last turn before /adopt",
-                                    Some(&user_text),
-                                    &assistant_text,
-                                    session.cli_id.as_deref().unwrap_or("助手"),
-                                    session.cli_id.as_deref().unwrap_or("Assistant"),
-                                    recipient_open_id.as_deref(),
-                                );
-                                if let Err(err) = lark_reply_card_with_opts(
-                                    &state,
-                                    bot,
-                                    &session.root_message_id,
-                                    &card,
-                                    session.scope == SessionScope::Thread,
-                                )
-                                .await
-                                {
-                                    warn!(
-                                        "failed to deliver adopt preamble for {}: {}",
-                                        session_id_for_task, err
-                                    );
-                                }
-                            }
+                    if let Some(session) = snapshot
+                        && session.lark_app_id != "local"
+                        && let Some(bot) = state.bots.get(&session.lark_app_id)
+                    {
+                        let recipient_open_id =
+                            final_output_footer_recipient_open_id(&state.paths, &session);
+                        let card = build_contextual_reply_card(
+                            "📜 /adopt 前最后一轮",
+                            "📜 Last turn before /adopt",
+                            Some(&user_text),
+                            &assistant_text,
+                            session.cli_id.as_deref().unwrap_or("助手"),
+                            session.cli_id.as_deref().unwrap_or("Assistant"),
+                            recipient_open_id.as_deref(),
+                        );
+                        if let Err(err) = lark_reply_card_with_opts(
+                            &state,
+                            bot,
+                            &session.root_message_id,
+                            &card,
+                            session.scope == SessionScope::Thread,
+                        )
+                        .await
+                        {
+                            warn!(
+                                "failed to deliver adopt preamble for {}: {}",
+                                session_id_for_task, err
+                            );
                         }
                     }
                 }
@@ -656,14 +645,13 @@ pub(crate) async fn spawn_worker(
                 }) => {
                     let was_unresponsive = {
                         let mut health = state.worker_health.lock().await;
-                        let entry =
-                            health
-                                .entry(session_id_for_task.clone())
-                                .or_insert(WorkerHealthEntry {
-                                    last_heartbeat: Instant::now(),
-                                    processing_since_ms: None,
-                                    unresponsive: false,
-                                });
+                        let entry = health.entry(session_id_for_task.clone()).or_insert(
+                            WorkerHealthEntry {
+                                last_heartbeat: Instant::now(),
+                                processing_since_ms: None,
+                                unresponsive: false,
+                            },
+                        );
                         let was_unresponsive = entry.unresponsive;
                         entry.last_heartbeat = Instant::now();
                         entry.processing_since_ms = processing_since_ms;
@@ -762,8 +750,7 @@ async fn notify_worker_ready_timeout(state: &AppState, session: &Session) {
     };
     let result = match session.scope {
         SessionScope::Thread if !session.root_message_id.is_empty() => {
-            lark_reply_message_with_opts(state, bot, &session.root_message_id, &message, true)
-                .await
+            lark_reply_message_with_opts(state, bot, &session.root_message_id, &message, true).await
         }
         _ => lark_send_chat_message(state, bot, &session.chat_id, &message).await,
     };
@@ -809,8 +796,8 @@ pub(crate) fn spawn_worker_health_watchdog(state: AppState) {
             for (session_id, processing_since_ms) in stale_sessions {
                 match processing_since_ms {
                     Some(start_ms) => {
-                        let stuck_ms = (Utc::now().timestamp_millis().max(0) as u64)
-                            .saturating_sub(start_ms);
+                        let stuck_ms =
+                            (Utc::now().timestamp_millis().max(0) as u64).saturating_sub(start_ms);
                         warn!(
                             "worker for session {} is unresponsive: no heartbeat for >{}s; message loop stuck processing for {}ms",
                             session_id,

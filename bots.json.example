@@ -7,6 +7,18 @@
     "disableCliBypass": true,
     "allowedUsers": ["alice@company.com"],
     "allowedChatGroups": ["oc_xxx_team"],
+    "customTriggers": [
+      {
+        "trigger": "日报",
+        "prompt": "请以日报格式输出：今日完成、明日计划、阻塞问题。",
+        "skipDirSelect": true,
+        "workingDir": "~/daily-reports",
+        "ackMessage": "收到，正在生成日报，请稍候"
+      },
+      {
+        "trigger": "总结"
+      }
+    ],
     "workingDir": "~/projects"
   },
   {

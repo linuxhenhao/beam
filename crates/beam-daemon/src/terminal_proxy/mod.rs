@@ -110,7 +110,7 @@ async fn resolve_zellij_session(
     session_id: &str,
 ) -> Option<String> {
     let sessions = sessions.lock().await;
-    sessions.get(session_id).map(|s| zellij_session_for_beam(s))
+    sessions.get(session_id).map(zellij_session_for_beam)
 }
 
 // ── URL builders ─────────────────────────────────────────────────────────

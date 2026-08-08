@@ -54,7 +54,10 @@ pub const CLI_SPECS: &[CliSpec] = &[
         cli_id: "codex",
         label: "Codex",
         bin_candidates: &["codex"],
-        default_cli_args: &["--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen"],
+        default_cli_args: &[
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--no-alt-screen",
+        ],
         adopt_command_patterns: &["codex"],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
@@ -243,7 +246,10 @@ mod tests {
     fn default_args_match_legacy_values() {
         assert_eq!(
             cli_spec("codex").unwrap().default_cli_args,
-            &["--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen"]
+            &[
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--no-alt-screen"
+            ]
         );
         assert_eq!(cli_spec("traex").unwrap().default_cli_args, &["-y"]);
         for spec in CLI_SPECS {

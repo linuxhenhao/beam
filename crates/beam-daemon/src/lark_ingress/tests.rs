@@ -1,3 +1,5 @@
+#![allow(clippy::await_holding_lock)]
+
 use super::*;
 use crate::tests::test_helpers::*;
 
@@ -68,6 +70,7 @@ fn ws_card_action_handler_routes_toggle_display() {
             restrict_grant_commands: false,
             message_quota: None,
             quota_state: std::collections::HashMap::new(),
+            custom_triggers: Vec::new(),
         };
         let state = make_state(temp_paths("toggle-ws"), HashMap::from([(app_id.to_string(), bot)]));
         let mut session = make_session("sess-toggle-ws");
@@ -141,6 +144,7 @@ fn ws_card_action_handler_routes_ask_toggle_and_submit() {
             restrict_grant_commands: false,
             message_quota: None,
             quota_state: std::collections::HashMap::new(),
+            custom_triggers: Vec::new(),
         };
         let paths = temp_paths("ask-ws");
         let state = make_state(paths.clone(), HashMap::from([(app_id.to_string(), bot)]));
@@ -174,11 +178,9 @@ fn ws_card_action_handler_routes_ask_toggle_and_submit() {
                 if let Ok(Some(snaps)) = beam_core::persist::read_json::<
                     Vec<ask::AskPendingSnapshot>,
                 >(&paths.ask_pending_json())
-                {
-                    if let Some(snap) = snaps.into_iter().next() {
+                    && let Some(snap) = snaps.into_iter().next() {
                         break snap;
                     }
-                }
                 assert!(
                     std::time::Instant::now() < deadline,
                     "ask pending snapshot was not persisted"

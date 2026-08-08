@@ -181,18 +181,17 @@ pub(super) fn replay_events(events: &[WorkflowEventEnvelope]) -> Result<ReplaySn
                         snap.outputs
                             .insert(format!("{}::work::{}", ev.run_id, loop_id), output_ref);
                     }
-                    if loop_state.status != LoopStatus::Succeeded {
-                        if let Some(inflight) = loop_state
+                    if loop_state.status != LoopStatus::Succeeded
+                        && let Some(inflight) = loop_state
                             .iterations
                             .iter_mut()
                             .find(|it| matches!(it.status, LoopIterationStatus::Running))
-                        {
-                            inflight.status = if loop_state.status == LoopStatus::Cancelled {
-                                LoopIterationStatus::Cancelled
-                            } else {
-                                LoopIterationStatus::Failed
-                            };
-                        }
+                    {
+                        inflight.status = if loop_state.status == LoopStatus::Cancelled {
+                            LoopIterationStatus::Cancelled
+                        } else {
+                            LoopIterationStatus::Failed
+                        };
                     }
                 }
             }
@@ -240,12 +239,12 @@ pub(super) fn replay_events(events: &[WorkflowEventEnvelope]) -> Result<ReplaySn
                     if attempt_number == 1 && matches!(node.status, NodeStatus::Idle) {
                         node.status = NodeStatus::Triggered;
                     }
-                    if let Some((loop_id, iteration)) = parse_loop_activity_id(&activity_id) {
-                        if let Some(loop_state) = snap.loops.get_mut(&loop_id) {
-                            let it = get_loop_iteration(loop_state, iteration);
-                            if !it.body_activity_ids.contains(&activity_id) {
-                                it.body_activity_ids.push(activity_id.clone());
-                            }
+                    if let Some((loop_id, iteration)) = parse_loop_activity_id(&activity_id)
+                        && let Some(loop_state) = snap.loops.get_mut(&loop_id)
+                    {
+                        let it = get_loop_iteration(loop_state, iteration);
+                        if !it.body_activity_ids.contains(&activity_id) {
+                            it.body_activity_ids.push(activity_id.clone());
                         }
                     }
                 }
@@ -254,14 +253,12 @@ pub(super) fn replay_events(events: &[WorkflowEventEnvelope]) -> Result<ReplaySn
                 if let (Some(activity_id), Some(attempt_id)) = (
                     payload_str(payload, "activityId"),
                     payload_str(payload, "attemptId"),
-                ) {
-                    if let Some(attempt) =
-                        get_attempt_mut(&mut snap.activities, &activity_id, &attempt_id)
-                    {
-                        attempt.lease_id = payload_str(payload, "leaseId");
-                        attempt.timeout_ms = payload_u64(payload, "timeoutMs");
-                        attempt.max_output_bytes = payload_u64(payload, "maxOutputBytes");
-                    }
+                ) && let Some(attempt) =
+                    get_attempt_mut(&mut snap.activities, &activity_id, &attempt_id)
+                {
+                    attempt.lease_id = payload_str(payload, "leaseId");
+                    attempt.timeout_ms = payload_u64(payload, "timeoutMs");
+                    attempt.max_output_bytes = payload_u64(payload, "maxOutputBytes");
                 }
             }
             "backoffScheduled" => {
@@ -279,24 +276,21 @@ pub(super) fn replay_events(events: &[WorkflowEventEnvelope]) -> Result<ReplaySn
                 if let (Some(activity_id), Some(attempt_id)) = (
                     payload_str(payload, "activityId"),
                     payload_str(payload, "attemptId"),
-                ) {
-                    if let Some(attempt) =
-                        get_attempt_mut(&mut snap.activities, &activity_id, &attempt_id)
-                    {
-                        attempt.effect_attempted = Some(EffectAttemptedState {
-                            idempotency_key: payload_str(payload, "idempotencyKey")
-                                .unwrap_or_default(),
-                            input_hash: payload_str(payload, "inputHash").unwrap_or_default(),
-                            idempotency_ttl_ms: payload_u64(payload, "idempotencyTtlMs")
-                                .unwrap_or_default(),
-                            provider: payload_str(payload, "provider").unwrap_or_default(),
-                            attempted_at_event_id: ev.event_id.clone(),
-                            attempted_at_ms: ev.timestamp,
-                        });
-                        attempt.status = ActivityStatus::EffectAttempting;
-                        if let Some(activity) = snap.activities.get_mut(&activity_id) {
-                            activity.status = ActivityStatus::EffectAttempting;
-                        }
+                ) && let Some(attempt) =
+                    get_attempt_mut(&mut snap.activities, &activity_id, &attempt_id)
+                {
+                    attempt.effect_attempted = Some(EffectAttemptedState {
+                        idempotency_key: payload_str(payload, "idempotencyKey").unwrap_or_default(),
+                        input_hash: payload_str(payload, "inputHash").unwrap_or_default(),
+                        idempotency_ttl_ms: payload_u64(payload, "idempotencyTtlMs")
+                            .unwrap_or_default(),
+                        provider: payload_str(payload, "provider").unwrap_or_default(),
+                        attempted_at_event_id: ev.event_id.clone(),
+                        attempted_at_ms: ev.timestamp,
+                    });
+                    attempt.status = ActivityStatus::EffectAttempting;
+                    if let Some(activity) = snap.activities.get_mut(&activity_id) {
+                        activity.status = ActivityStatus::EffectAttempting;
                     }
                 }
             }
@@ -328,34 +322,30 @@ pub(super) fn replay_events(events: &[WorkflowEventEnvelope]) -> Result<ReplaySn
                 if let (Some(activity_id), Some(attempt_id)) = (
                     payload_str(payload, "activityId"),
                     payload_str(payload, "attemptId"),
-                ) {
-                    if let Some(attempt) =
-                        get_attempt_mut(&mut snap.activities, &activity_id, &attempt_id)
-                    {
-                        attempt.status = ActivityStatus::Failed;
-                        attempt.error = payload.get("error").cloned();
-                        if let Some(activity) = snap.activities.get_mut(&activity_id) {
-                            activity.status = ActivityStatus::Failed;
-                        }
-                        waits_open.remove(&activity_id);
+                ) && let Some(attempt) =
+                    get_attempt_mut(&mut snap.activities, &activity_id, &attempt_id)
+                {
+                    attempt.status = ActivityStatus::Failed;
+                    attempt.error = payload.get("error").cloned();
+                    if let Some(activity) = snap.activities.get_mut(&activity_id) {
+                        activity.status = ActivityStatus::Failed;
                     }
+                    waits_open.remove(&activity_id);
                 }
             }
             "activityTimedOut" => {
                 if let (Some(activity_id), Some(attempt_id)) = (
                     payload_str(payload, "activityId"),
                     payload_str(payload, "attemptId"),
-                ) {
-                    if let Some(attempt) =
-                        get_attempt_mut(&mut snap.activities, &activity_id, &attempt_id)
-                    {
-                        attempt.status = ActivityStatus::TimedOut;
-                        attempt.running_ms = payload_u64(payload, "runningMs");
-                        if let Some(activity) = snap.activities.get_mut(&activity_id) {
-                            activity.status = ActivityStatus::TimedOut;
-                        }
-                        waits_open.remove(&activity_id);
+                ) && let Some(attempt) =
+                    get_attempt_mut(&mut snap.activities, &activity_id, &attempt_id)
+                {
+                    attempt.status = ActivityStatus::TimedOut;
+                    attempt.running_ms = payload_u64(payload, "runningMs");
+                    if let Some(activity) = snap.activities.get_mut(&activity_id) {
+                        activity.status = ActivityStatus::TimedOut;
                     }
+                    waits_open.remove(&activity_id);
                 }
             }
             "activityRunning" => {
@@ -405,18 +395,15 @@ pub(super) fn replay_events(events: &[WorkflowEventEnvelope]) -> Result<ReplaySn
                 if let (Some(activity_id), Some(attempt_id)) = (
                     payload_str(payload, "activityId"),
                     payload_str(payload, "attemptId"),
-                ) {
-                    if let Some(attempt) =
-                        get_attempt_mut(&mut snap.activities, &activity_id, &attempt_id)
-                    {
-                        attempt.status = ActivityStatus::Cancelled;
-                        attempt.cancel_origin_event_id =
-                            payload_str(payload, "cancelOriginEventId");
-                        if let Some(activity) = snap.activities.get_mut(&activity_id) {
-                            activity.status = ActivityStatus::Cancelled;
-                        }
-                        waits_open.remove(&activity_id);
+                ) && let Some(attempt) =
+                    get_attempt_mut(&mut snap.activities, &activity_id, &attempt_id)
+                {
+                    attempt.status = ActivityStatus::Cancelled;
+                    attempt.cancel_origin_event_id = payload_str(payload, "cancelOriginEventId");
+                    if let Some(activity) = snap.activities.get_mut(&activity_id) {
+                        activity.status = ActivityStatus::Cancelled;
                     }
+                    waits_open.remove(&activity_id);
                 }
             }
             "waitCreated" => {
@@ -426,21 +413,20 @@ pub(super) fn replay_events(events: &[WorkflowEventEnvelope]) -> Result<ReplaySn
                         .activities
                         .get(&activity_id)
                         .and_then(|activity| activity.current_attempt_id.clone());
-                    if let Some(attempt_id) = attempt_id {
-                        if let Some(attempt) =
+                    if let Some(attempt_id) = attempt_id
+                        && let Some(attempt) =
                             get_attempt_mut(&mut snap.activities, &activity_id, &attempt_id)
-                        {
-                            attempt.wait = Some(WaitState {
-                                wait_kind: payload_str(payload, "waitKind").unwrap_or_default(),
-                                deadline_at: payload_u64(payload, "deadlineAt"),
-                                prompt: payload_str(payload, "prompt"),
-                                prompt_ref: payload_workflow_output_ref(payload, "promptRef"),
-                                prompt_preview: payload_str(payload, "promptPreview"),
-                                approvers: payload_string_array(payload, "approvers"),
-                                on_timeout: payload_str(payload, "onTimeout"),
-                                resolution: None,
-                            });
-                        }
+                    {
+                        attempt.wait = Some(WaitState {
+                            wait_kind: payload_str(payload, "waitKind").unwrap_or_default(),
+                            deadline_at: payload_u64(payload, "deadlineAt"),
+                            prompt: payload_str(payload, "prompt"),
+                            prompt_ref: payload_workflow_output_ref(payload, "promptRef"),
+                            prompt_preview: payload_str(payload, "promptPreview"),
+                            approvers: payload_string_array(payload, "approvers"),
+                            on_timeout: payload_str(payload, "onTimeout"),
+                            resolution: None,
+                        });
                     }
                 }
             }
@@ -451,22 +437,20 @@ pub(super) fn replay_events(events: &[WorkflowEventEnvelope]) -> Result<ReplaySn
                         .activities
                         .get(&activity_id)
                         .and_then(|activity| activity.current_attempt_id.clone());
-                    if let Some(attempt_id) = attempt_id {
-                        if let Some(attempt) =
+                    if let Some(attempt_id) = attempt_id
+                        && let Some(attempt) =
                             get_attempt_mut(&mut snap.activities, &activity_id, &attempt_id)
-                        {
-                            if let Some(wait) = attempt.wait.as_mut() {
-                                wait.resolution = Some(WaitResolutionState {
-                                    kind: "resolved".to_string(),
-                                    resolution: payload_str(payload, "resolution"),
-                                    by: payload_str(payload, "by"),
-                                    comment: payload_str(payload, "comment"),
-                                    event_id: Some(ev.event_id.clone()),
-                                    deadline_at: None,
-                                    exceeded_at_ms: None,
-                                });
-                            }
-                        }
+                        && let Some(wait) = attempt.wait.as_mut()
+                    {
+                        wait.resolution = Some(WaitResolutionState {
+                            kind: "resolved".to_string(),
+                            resolution: payload_str(payload, "resolution"),
+                            by: payload_str(payload, "by"),
+                            comment: payload_str(payload, "comment"),
+                            event_id: Some(ev.event_id.clone()),
+                            deadline_at: None,
+                            exceeded_at_ms: None,
+                        });
                     }
                 }
             }
@@ -477,77 +461,72 @@ pub(super) fn replay_events(events: &[WorkflowEventEnvelope]) -> Result<ReplaySn
                         .activities
                         .get(&activity_id)
                         .and_then(|activity| activity.current_attempt_id.clone());
-                    if let Some(attempt_id) = attempt_id {
-                        if let Some(attempt) =
+                    if let Some(attempt_id) = attempt_id
+                        && let Some(attempt) =
                             get_attempt_mut(&mut snap.activities, &activity_id, &attempt_id)
-                        {
-                            if let Some(wait) = attempt.wait.as_mut() {
-                                wait.resolution = Some(WaitResolutionState {
-                                    kind: "deadlineExceeded".to_string(),
-                                    resolution: None,
-                                    by: None,
-                                    comment: None,
-                                    event_id: Some(ev.event_id.clone()),
-                                    deadline_at: payload_u64(payload, "deadlineAt"),
-                                    exceeded_at_ms: payload_u64(payload, "exceededAtMs"),
-                                });
-                            }
-                        }
+                        && let Some(wait) = attempt.wait.as_mut()
+                    {
+                        wait.resolution = Some(WaitResolutionState {
+                            kind: "deadlineExceeded".to_string(),
+                            resolution: None,
+                            by: None,
+                            comment: None,
+                            event_id: Some(ev.event_id.clone()),
+                            deadline_at: payload_u64(payload, "deadlineAt"),
+                            exceeded_at_ms: payload_u64(payload, "exceededAtMs"),
+                        });
                     }
                 }
             }
             "cancelRequested" => {
-                if let Some(target) = payload.get("target") {
-                    if let Some(kind) = target.get("kind").and_then(Value::as_str) {
-                        match kind {
-                            "activity" => {
-                                if let Some(activity_id) =
-                                    target.get("activityId").and_then(Value::as_str)
-                                {
-                                    mark_activity_cancel(
-                                        &mut snap.activities,
-                                        activity_id,
-                                        &ev,
-                                        payload,
-                                    );
-                                }
+                if let Some(target) = payload.get("target")
+                    && let Some(kind) = target.get("kind").and_then(Value::as_str)
+                {
+                    match kind {
+                        "activity" => {
+                            if let Some(activity_id) =
+                                target.get("activityId").and_then(Value::as_str)
+                            {
+                                mark_activity_cancel(
+                                    &mut snap.activities,
+                                    activity_id,
+                                    ev,
+                                    payload,
+                                );
                             }
-                            "node" => {
-                                if let Some(node_id) = target.get("nodeId").and_then(Value::as_str)
-                                {
-                                    let node_id = node_id.to_string();
-                                    node_cancel_intents.entry(node_id.clone()).or_insert_with(
-                                        || {
-                                            (
-                                                ev.event_id.clone(),
-                                                payload_str(payload, "by").unwrap_or_default(),
-                                                payload_str(payload, "reason").unwrap_or_default(),
-                                            )
-                                        },
-                                    );
-                                    for activity in snap.activities.values_mut() {
-                                        if activity.owner_node_id.as_deref()
-                                            == Some(node_id.as_str())
-                                        {
-                                            mark_attempt_cancel(activity, &ev, payload);
-                                        }
+                        }
+                        "node" => {
+                            if let Some(node_id) = target.get("nodeId").and_then(Value::as_str) {
+                                let node_id = node_id.to_string();
+                                node_cancel_intents
+                                    .entry(node_id.clone())
+                                    .or_insert_with(|| {
+                                        (
+                                            ev.event_id.clone(),
+                                            payload_str(payload, "by").unwrap_or_default(),
+                                            payload_str(payload, "reason").unwrap_or_default(),
+                                        )
+                                    });
+                                for activity in snap.activities.values_mut() {
+                                    if activity.owner_node_id.as_deref() == Some(node_id.as_str()) {
+                                        mark_attempt_cancel(activity, ev, payload);
                                     }
                                 }
                             }
-                            "run" => {
-                                if run_cancel_intent.is_none() {
-                                    run_cancel_intent = Some((
-                                        ev.event_id.clone(),
-                                        payload_str(payload, "by").unwrap_or_default(),
-                                        payload_str(payload, "reason").unwrap_or_default(),
-                                    ));
-                                }
-                                for activity in snap.activities.values_mut() {
-                                    mark_attempt_cancel(activity, &ev, payload);
-                                }
-                            }
-                            _ => {}
                         }
+                        "run" => {
+                            if run_cancel_intent.is_none() {
+                                run_cancel_intent = Some((
+                                    ev.event_id.clone(),
+                                    payload_str(payload, "by").unwrap_or_default(),
+                                    payload_str(payload, "reason").unwrap_or_default(),
+                                ));
+                            }
+                            for activity in snap.activities.values_mut() {
+                                mark_attempt_cancel(activity, ev, payload);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -557,14 +536,12 @@ pub(super) fn replay_events(events: &[WorkflowEventEnvelope]) -> Result<ReplaySn
                         .activities
                         .get(&activity_id)
                         .and_then(|activity| activity.current_attempt_id.clone());
-                    if let Some(attempt_id) = attempt_id {
-                        if let Some(attempt) =
+                    if let Some(attempt_id) = attempt_id
+                        && let Some(attempt) =
                             get_attempt_mut(&mut snap.activities, &activity_id, &attempt_id)
-                        {
-                            if let Some(cancel) = attempt.cancel_request.as_mut() {
-                                cancel.delivered = true;
-                            }
-                        }
+                        && let Some(cancel) = attempt.cancel_request.as_mut()
+                    {
+                        cancel.delivered = true;
                     }
                 }
             }
@@ -632,14 +609,14 @@ pub(super) fn replay_events(events: &[WorkflowEventEnvelope]) -> Result<ReplaySn
     dangling_wait_resolutions.sort();
     dangling_cancels.sort();
 
-    if !matches!(snap.run.status, RunStatus::Cancelled) {
-        if let Some((cancel_origin_event_id, requested_by, reason)) = run_cancel_intent {
-            snap.run.cancelled_run_intent = Some(CancelIntent {
-                cancel_origin_event_id,
-                requested_by,
-                reason,
-            });
-        }
+    if !matches!(snap.run.status, RunStatus::Cancelled)
+        && let Some((cancel_origin_event_id, requested_by, reason)) = run_cancel_intent
+    {
+        snap.run.cancelled_run_intent = Some(CancelIntent {
+            cancel_origin_event_id,
+            requested_by,
+            reason,
+        });
     }
     for (node_id, intent) in node_cancel_intents {
         if matches!(
@@ -733,10 +710,7 @@ fn get_loop<'a>(
         })
 }
 
-fn get_loop_iteration<'a>(
-    loop_state: &'a mut LoopSnapshotDTO,
-    iteration: u64,
-) -> &'a mut LoopIterationState {
+fn get_loop_iteration(loop_state: &mut LoopSnapshotDTO, iteration: u64) -> &mut LoopIterationState {
     if let Some(idx) = loop_state
         .iterations
         .iter()

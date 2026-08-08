@@ -172,15 +172,14 @@ pub(crate) fn dynamic_chat_id(
         {
             return Some(chat_id);
         }
-        if let Some(target) = obj.get("target").and_then(Value::as_object) {
-            if let Some(chat_id) = target
+        if let Some(target) = obj.get("target").and_then(Value::as_object)
+            && let Some(chat_id) = target
                 .get("chatId")
                 .and_then(Value::as_str)
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
-            {
-                return Some(chat_id);
-            }
+        {
+            return Some(chat_id);
         }
     }
     None
@@ -291,7 +290,7 @@ pub(crate) fn extract_webhook_lifecycle(
 
 fn parse_signature(sig: &str) -> Option<Vec<u8>> {
     let raw = sig.trim().strip_prefix("sha256=").unwrap_or(sig.trim());
-    if raw.len() % 2 == 0 && raw.chars().all(|ch| ch.is_ascii_hexdigit()) {
+    if raw.len().is_multiple_of(2) && raw.chars().all(|ch| ch.is_ascii_hexdigit()) {
         let mut out = Vec::with_capacity(raw.len() / 2);
         for chunk in raw.as_bytes().chunks_exact(2) {
             let hi = (chunk[0] as char).to_digit(16)?;

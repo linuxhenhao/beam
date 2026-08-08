@@ -62,11 +62,11 @@ struct ApprovalCardSentMarker {
 }
 
 impl ApprovalCardSentMarker {
-    fn path(run_dir: &PathBuf) -> PathBuf {
+    fn path(run_dir: &std::path::Path) -> PathBuf {
         run_dir.join("approval-card-sent.json")
     }
 
-    async fn load(run_dir: &PathBuf) -> Result<Self> {
+    async fn load(run_dir: &std::path::Path) -> Result<Self> {
         let path = Self::path(run_dir);
         match tokio::fs::read_to_string(&path).await {
             Ok(raw) => {
@@ -79,7 +79,7 @@ impl ApprovalCardSentMarker {
         }
     }
 
-    async fn save(&self, run_dir: &PathBuf) -> Result<()> {
+    async fn save(&self, run_dir: &std::path::Path) -> Result<()> {
         let path = Self::path(run_dir);
         let tmp = path.with_extension("json.tmp");
         let body = serde_json::to_string_pretty(self)?;
@@ -135,6 +135,7 @@ async fn fanout_lock(run_dir: &PathBuf) -> Arc<FanoutLock> {
 ///
 /// When `dashboard_url` is provided, a "📊 Open Dashboard" url-button is
 /// inserted above the footer note.
+#[allow(clippy::too_many_arguments)]
 fn build_approval_card(
     run_id: &str,
     workflow_id: &str,
@@ -371,7 +372,7 @@ pub(crate) async fn fanout_approval_cards_if_needed<S: ApprovalCardSender>(
 
         let dashboard_url = format!(
             "http://{}/dashboard/workflows/{}",
-            host_for_url(&current_external_host(&state).await),
+            host_for_url(&current_external_host(state).await),
             run_id
         );
 
@@ -408,13 +409,13 @@ pub(crate) async fn fanout_approval_cards_if_needed<S: ApprovalCardSender>(
     }
 
     // 5. Persist marker if we sent any cards.
-    if sent > 0 {
-        if let Err(err) = marker.save(&run_dir).await {
-            warn!(
-                "fanout: failed to save approval-card-sent marker for {}: {}",
-                run_id, err
-            );
-        }
+    if sent > 0
+        && let Err(err) = marker.save(&run_dir).await
+    {
+        warn!(
+            "fanout: failed to save approval-card-sent marker for {}: {}",
+            run_id, err
+        );
     }
 
     sent
@@ -509,7 +510,9 @@ mod tests {
             grant_pending: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             pending_creates: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             dashboard_token: Arc::new(tokio::sync::Mutex::new(None)),
-            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(crate::ApiTokenState::for_test())),
+            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::ApiTokenState::for_test(),
+            )),
             external_host: Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
         }
     }

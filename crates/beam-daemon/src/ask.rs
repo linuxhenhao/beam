@@ -319,245 +319,6 @@ async fn resolve_ask_approvers(state: &AppState, req: &AskRequestBody) -> HashSe
     resolved
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use std::collections::HashMap;
-    use std::path::PathBuf;
-    use std::sync::Arc;
-
-    use beam_core::{AskResult, BeamPaths, BotConfig, Session, SessionScope, SessionStatus};
-    use chrono::Utc;
-    use tokio::sync::Mutex;
-
-    // Bring in test helpers for integration-style tests (mock Lark server).
-    use crate::tests::test_helpers;
-
-    fn make_state(session_owner: Option<&str>, allowed_users: Vec<&str>) -> AppState {
-        let paths = BeamPaths::from_root(
-            std::env::temp_dir().join(format!("beam-ask-approvers-{}", std::process::id())),
-        );
-        let mut sessions = HashMap::new();
-        if let Some(owner_open_id) = session_owner {
-            sessions.insert(
-                "sess-1".to_string(),
-                Session {
-                    session_id: "sess-1".to_string(),
-                    title: "test".to_string(),
-                    chat_id: "chat-1".to_string(),
-                    root_message_id: "root-1".to_string(),
-                    chat_type: Some("p2p".to_string()),
-                    quote_target_id: None,
-                    scope: SessionScope::Thread,
-                    status: SessionStatus::Active,
-                    created_at: Utc::now(),
-                    closed_at: None,
-                    working_dir: Some("/tmp".to_string()),
-                    lark_app_id: "app-1".to_string(),
-                    owner_open_id: Some(owner_open_id.to_string()),
-                    quote_target_sender_open_id: None,
-                    worker_pid: None,
-                    cli_id: Some("opencode".to_string()),
-                    cli_bin: Some("opencode-cli".to_string()),
-                    cli_args: Vec::new(),
-                    cli_session_id: None,
-                    last_cli_input: None,
-                    stream_card_id: None,
-                    stream_card_nonce: None,
-                    display_mode: None,
-                    current_screen: None,
-                    last_screen_status: None,
-                    usage_limit: None,
-                    current_image_key: None,
-                    tui_prompt_card_id: None,
-                    tui_prompt_options: Vec::new(),
-                    tui_prompt_multi_select: None,
-                    tui_toggled_indices: Vec::new(),
-                    pending_response_card_id: None,
-                    pending_response_card_state: None,
-                    last_patched_response_card_id: None,
-                    terminal_url: None,
-                    last_final_output_turn_id: None,
-                    last_final_output: None,
-                    last_explicit_send_at: None,
-                    adopted_from: None,
-                    model: None,
-                    locale: None,
-                    bot_name: None,
-                    bot_open_id: None,
-                    resume_session_id: None,
-                    disable_cli_bypass: false,
-                    initial_prompt: None,
-                    thread_id: Some("omt_1".to_string()),
-                    agent_attention: None,
-                    current_turn_id: None,
-                },
-            );
-        }
-
-        let bot = BotConfig {
-            name: None,
-            lark_app_id: "app-1".to_string(),
-            lark_app_secret: "secret".to_string(),
-            cli_id: "opencode".to_string(),
-            cli_bin: Some("opencode-cli".to_string()),
-            cli_args: Vec::new(),
-            skip_working_dir_prompt: false,
-            model: None,
-            working_dir: Some("~".to_string()),
-            lark_encrypt_key: None,
-            lark_verification_token: None,
-            allowed_users: allowed_users.into_iter().map(String::from).collect(),
-            private_card: false,
-            allowed_chat_groups: Vec::new(),
-            chat_grants: HashMap::new(),
-            global_grants: Vec::new(),
-            oncall_chats: Vec::new(),
-            restrict_grant_commands: false,
-            message_quota: None,
-            quota_state: HashMap::new(),
-        };
-
-        let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel();
-        AppState {
-            paths,
-            started_at: Utc::now(),
-            sessions: Arc::new(Mutex::new(sessions)),
-            workers: Arc::new(Mutex::new(HashMap::new())),
-            worker_health: Arc::new(Mutex::new(HashMap::new())),
-            attempt_resumes: Arc::new(Mutex::new(HashMap::new())),
-            shutdown: Arc::new(Mutex::new(Some(shutdown_tx))),
-            options: crate::RunOptions {
-                worker_exe: PathBuf::from("/bin/true"),
-            },
-            http: reqwest::Client::new(),
-            config: beam_core::Config::default(),
-            bots: Arc::new(HashMap::from([(bot.lark_app_id.clone(), bot)])),
-            lark_tokens: Arc::new(Mutex::new(HashMap::new())),
-            chat_mode_cache: Arc::new(Mutex::new(HashMap::new())),
-            recent_lark_events: Arc::new(Mutex::new(HashMap::new())),
-            inflight_final_output_turns: Arc::new(Mutex::new(HashSet::new())),
-            workflow_progress_cards: Arc::new(Mutex::new(HashMap::new())),
-            ask_pending: Arc::new(Mutex::new(HashMap::new())),
-            grant_pending: Arc::new(Mutex::new(HashMap::new())),
-            pending_creates: Arc::new(Mutex::new(HashMap::new())),
-            dashboard_token: Arc::new(Mutex::new(None)),
-            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(crate::ApiTokenState::for_test())),
-            external_host: std::sync::Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
-        }
-    }
-
-    #[tokio::test]
-    async fn resolve_ask_approvers_defaults_to_session_owner_when_allowlist_empty() {
-        let state = make_state(Some("ou_owner"), vec![]);
-        let req = AskRequestBody {
-            session_id: "sess-1".to_string(),
-            chat_id: "chat-1".to_string(),
-            lark_app_id: "app-1".to_string(),
-            root_message_id: None,
-            questions: vec![AskQuestion {
-                prompt: "pick one".to_string(),
-                options: vec![],
-                multi_select: false,
-            }],
-            timeout_ms: 10_000,
-            approvers: vec![],
-        };
-
-        let approvers = resolve_ask_approvers(&state, &req).await;
-        assert_eq!(approvers, HashSet::from(["ou_owner".to_string()]));
-    }
-
-    #[test]
-    fn build_ask_card_localizes_pending_header() {
-        let card: serde_json::Value = serde_json::from_str(&build_ask_card(
-            "ask-1",
-            "nonce-1",
-            &[],
-            &[],
-            false,
-            None,
-            None,
-        ))
-        .expect("valid card json");
-
-        assert_eq!(
-            card.pointer("/header/title/i18n_content/zh_cn")
-                .and_then(serde_json::Value::as_str),
-            Some("提问")
-        );
-        assert_eq!(
-            card.pointer("/header/title/i18n_content/en_us")
-                .and_then(serde_json::Value::as_str),
-            Some("Ask question")
-        );
-    }
-
-    #[tokio::test]
-    async fn resolve_ask_approvers_uses_explicit_approvers_first() {
-        let state = make_state(Some("ou_owner"), vec!["ou_allowed"]);
-        let req = AskRequestBody {
-            session_id: "sess-1".to_string(),
-            chat_id: "chat-1".to_string(),
-            lark_app_id: "app-1".to_string(),
-            root_message_id: None,
-            questions: vec![AskQuestion {
-                prompt: "pick one".to_string(),
-                options: vec![],
-                multi_select: false,
-            }],
-            timeout_ms: 10_000,
-            approvers: vec!["ou_explicit".to_string()],
-        };
-
-        let approvers = resolve_ask_approvers(&state, &req).await;
-        assert_eq!(approvers, HashSet::from(["ou_explicit".to_string()]));
-    }
-
-    #[tokio::test]
-    async fn create_ask_timeout_returns_timed_out_result() {
-        let _env_lock = test_helpers::lark_base_url_env_lock().lock().expect("lark env lock");
-        let base_url = test_helpers::start_mock_lark_server().await;
-        let _env_guard = test_helpers::LarkBaseUrlEnvGuard::set(&base_url);
-        let app_id = "app-ask-timeout";
-        let mut bot = test_helpers::make_bot(app_id);
-        bot.allowed_users = vec!["ou_approver".to_string()];
-        let state = test_helpers::make_state(
-            test_helpers::temp_paths("ask-timeout"),
-            HashMap::from([(app_id.to_string(), bot)]),
-        );
-
-        let body = serde_json::json!({
-            "sessionId": "sess-to-1",
-            "chatId": "chat-1",
-            "larkAppId": app_id,
-            "questions": [{
-                "prompt": "pick one",
-                "options": [{"key": "a", "label": "A"}],
-                "multiSelect": false,
-            }],
-            "timeoutMs": 1000,
-            "approvers": ["ou_approver"],
-        });
-
-        let result = create_ask(axum::extract::State(state), axum::Json(body)).await;
-
-        assert!(
-            result.is_ok(),
-            "expected Ok for ask timeout, got {:?}",
-            result
-        );
-        let ask_result: AskResult =
-            serde_json::from_value(result.unwrap().0).expect("valid AskResult JSON");
-        assert!(
-            matches!(ask_result, AskResult::TimedOut { timed_out: true, .. }),
-            "expected TimedOut, got {:?}",
-            ask_result
-        );
-    }
-}
-
 fn build_ask_card(
     ask_id: &str,
     nonce: &str,
@@ -802,4 +563,255 @@ pub async fn handle_ask_card_action(
         "toast": { "type": "success", "content": "selection updated" },
         "card": { "type": "raw", "data": card_json }
     })))
+}
+
+#[cfg(test)]
+#[allow(clippy::await_holding_lock)]
+mod tests {
+    use super::*;
+
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use beam_core::{AskResult, BeamPaths, BotConfig, Session, SessionScope, SessionStatus};
+    use chrono::Utc;
+    use tokio::sync::Mutex;
+
+    // Bring in test helpers for integration-style tests (mock Lark server).
+    use crate::tests::test_helpers;
+
+    fn make_state(session_owner: Option<&str>, allowed_users: Vec<&str>) -> AppState {
+        let paths = BeamPaths::from_root(
+            std::env::temp_dir().join(format!("beam-ask-approvers-{}", std::process::id())),
+        );
+        let mut sessions = HashMap::new();
+        if let Some(owner_open_id) = session_owner {
+            sessions.insert(
+                "sess-1".to_string(),
+                Session {
+                    session_id: "sess-1".to_string(),
+                    title: "test".to_string(),
+                    chat_id: "chat-1".to_string(),
+                    root_message_id: "root-1".to_string(),
+                    chat_type: Some("p2p".to_string()),
+                    quote_target_id: None,
+                    scope: SessionScope::Thread,
+                    status: SessionStatus::Active,
+                    created_at: Utc::now(),
+                    closed_at: None,
+                    working_dir: Some("/tmp".to_string()),
+                    lark_app_id: "app-1".to_string(),
+                    owner_open_id: Some(owner_open_id.to_string()),
+                    quote_target_sender_open_id: None,
+                    worker_pid: None,
+                    cli_id: Some("opencode".to_string()),
+                    cli_bin: Some("opencode-cli".to_string()),
+                    cli_args: Vec::new(),
+                    cli_session_id: None,
+                    last_cli_input: None,
+                    stream_card_id: None,
+                    stream_card_nonce: None,
+                    display_mode: None,
+                    current_screen: None,
+                    last_screen_status: None,
+                    usage_limit: None,
+                    current_image_key: None,
+                    tui_prompt_card_id: None,
+                    tui_prompt_options: Vec::new(),
+                    tui_prompt_multi_select: None,
+                    tui_toggled_indices: Vec::new(),
+                    pending_response_card_id: None,
+                    pending_response_card_state: None,
+                    last_patched_response_card_id: None,
+                    terminal_url: None,
+                    last_final_output_turn_id: None,
+                    last_final_output: None,
+                    last_explicit_send_at: None,
+                    adopted_from: None,
+                    model: None,
+                    locale: None,
+                    bot_name: None,
+                    bot_open_id: None,
+                    resume_session_id: None,
+                    disable_cli_bypass: false,
+                    initial_prompt: None,
+                    thread_id: Some("omt_1".to_string()),
+                    agent_attention: None,
+                    current_turn_id: None,
+                },
+            );
+        }
+
+        let bot = BotConfig {
+            name: None,
+            lark_app_id: "app-1".to_string(),
+            lark_app_secret: "secret".to_string(),
+            cli_id: "opencode".to_string(),
+            cli_bin: Some("opencode-cli".to_string()),
+            cli_args: Vec::new(),
+            skip_working_dir_prompt: false,
+            model: None,
+            working_dir: Some("~".to_string()),
+            lark_encrypt_key: None,
+            lark_verification_token: None,
+            allowed_users: allowed_users.into_iter().map(String::from).collect(),
+            private_card: false,
+            allowed_chat_groups: Vec::new(),
+            chat_grants: HashMap::new(),
+            global_grants: Vec::new(),
+            oncall_chats: Vec::new(),
+            restrict_grant_commands: false,
+            message_quota: None,
+            quota_state: HashMap::new(),
+            custom_triggers: Vec::new(),
+        };
+
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel();
+        AppState {
+            paths,
+            started_at: Utc::now(),
+            sessions: Arc::new(Mutex::new(sessions)),
+            workers: Arc::new(Mutex::new(HashMap::new())),
+            worker_health: Arc::new(Mutex::new(HashMap::new())),
+            attempt_resumes: Arc::new(Mutex::new(HashMap::new())),
+            shutdown: Arc::new(Mutex::new(Some(shutdown_tx))),
+            options: crate::RunOptions {
+                worker_exe: PathBuf::from("/bin/true"),
+            },
+            http: reqwest::Client::new(),
+            config: beam_core::Config::default(),
+            bots: Arc::new(HashMap::from([(bot.lark_app_id.clone(), bot)])),
+            lark_tokens: Arc::new(Mutex::new(HashMap::new())),
+            chat_mode_cache: Arc::new(Mutex::new(HashMap::new())),
+            recent_lark_events: Arc::new(Mutex::new(HashMap::new())),
+            inflight_final_output_turns: Arc::new(Mutex::new(HashSet::new())),
+            workflow_progress_cards: Arc::new(Mutex::new(HashMap::new())),
+            ask_pending: Arc::new(Mutex::new(HashMap::new())),
+            grant_pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_creates: Arc::new(Mutex::new(HashMap::new())),
+            dashboard_token: Arc::new(Mutex::new(None)),
+            api_token: std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::ApiTokenState::for_test(),
+            )),
+            external_host: std::sync::Arc::new(tokio::sync::RwLock::new("localhost".to_string())),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_ask_approvers_defaults_to_session_owner_when_allowlist_empty() {
+        let state = make_state(Some("ou_owner"), vec![]);
+        let req = AskRequestBody {
+            session_id: "sess-1".to_string(),
+            chat_id: "chat-1".to_string(),
+            lark_app_id: "app-1".to_string(),
+            root_message_id: None,
+            questions: vec![AskQuestion {
+                prompt: "pick one".to_string(),
+                options: vec![],
+                multi_select: false,
+            }],
+            timeout_ms: 10_000,
+            approvers: vec![],
+        };
+
+        let approvers = resolve_ask_approvers(&state, &req).await;
+        assert_eq!(approvers, HashSet::from(["ou_owner".to_string()]));
+    }
+
+    #[test]
+    fn build_ask_card_localizes_pending_header() {
+        let card: serde_json::Value = serde_json::from_str(&build_ask_card(
+            "ask-1",
+            "nonce-1",
+            &[],
+            &[],
+            false,
+            None,
+            None,
+        ))
+        .expect("valid card json");
+
+        assert_eq!(
+            card.pointer("/header/title/i18n_content/zh_cn")
+                .and_then(serde_json::Value::as_str),
+            Some("提问")
+        );
+        assert_eq!(
+            card.pointer("/header/title/i18n_content/en_us")
+                .and_then(serde_json::Value::as_str),
+            Some("Ask question")
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_ask_approvers_uses_explicit_approvers_first() {
+        let state = make_state(Some("ou_owner"), vec!["ou_allowed"]);
+        let req = AskRequestBody {
+            session_id: "sess-1".to_string(),
+            chat_id: "chat-1".to_string(),
+            lark_app_id: "app-1".to_string(),
+            root_message_id: None,
+            questions: vec![AskQuestion {
+                prompt: "pick one".to_string(),
+                options: vec![],
+                multi_select: false,
+            }],
+            timeout_ms: 10_000,
+            approvers: vec!["ou_explicit".to_string()],
+        };
+
+        let approvers = resolve_ask_approvers(&state, &req).await;
+        assert_eq!(approvers, HashSet::from(["ou_explicit".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn create_ask_timeout_returns_timed_out_result() {
+        let _env_lock = test_helpers::lark_base_url_env_lock()
+            .lock()
+            .expect("lark env lock");
+        let base_url = test_helpers::start_mock_lark_server().await;
+        let _env_guard = test_helpers::LarkBaseUrlEnvGuard::set(&base_url);
+        let app_id = "app-ask-timeout";
+        let mut bot = test_helpers::make_bot(app_id);
+        bot.allowed_users = vec!["ou_approver".to_string()];
+        let state = test_helpers::make_state(
+            test_helpers::temp_paths("ask-timeout"),
+            HashMap::from([(app_id.to_string(), bot)]),
+        );
+
+        let body = serde_json::json!({
+            "sessionId": "sess-to-1",
+            "chatId": "chat-1",
+            "larkAppId": app_id,
+            "questions": [{
+                "prompt": "pick one",
+                "options": [{"key": "a", "label": "A"}],
+                "multiSelect": false,
+            }],
+            "timeoutMs": 1000,
+            "approvers": ["ou_approver"],
+        });
+
+        let result = create_ask(axum::extract::State(state), axum::Json(body)).await;
+
+        assert!(
+            result.is_ok(),
+            "expected Ok for ask timeout, got {:?}",
+            result
+        );
+        let ask_result: AskResult =
+            serde_json::from_value(result.unwrap().0).expect("valid AskResult JSON");
+        assert!(
+            matches!(
+                ask_result,
+                AskResult::TimedOut {
+                    timed_out: true,
+                    ..
+                }
+            ),
+            "expected TimedOut, got {:?}",
+            ask_result
+        );
+    }
 }

@@ -136,6 +136,7 @@ async fn drain_upload_joins(upload_joins: &mut tokio::task::JoinSet<()>) {
 ///
 /// The caller **must** set `state.upload_in_flight = true` before calling
 /// this function, so that concurrent triggers see the in-flight guard.
+#[allow(clippy::too_many_arguments)]
 fn spawn_upload(
     stdout: &Arc<Mutex<tokio::io::Stdout>>,
     session_id: &str,
@@ -215,6 +216,7 @@ fn spawn_upload(
 ///
 /// Uploads are spawned via [`tokio::spawn`] (tracked by a local `JoinSet`).
 /// On loop exit all in-flight uploads are aborted.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn coordinator_loop(
     backend: Arc<dyn SessionBackend>,
     stdout: Arc<Mutex<tokio::io::Stdout>>,
@@ -228,8 +230,10 @@ pub(crate) async fn coordinator_loop(
     latest_raw_screen: Arc<RwLock<String>>,
     mut rx: mpsc::Receiver<Trigger>,
 ) {
-    let mut state = CoordinatorState::default();
-    state.current_turn_id = String::new();
+    let mut state = CoordinatorState {
+        current_turn_id: String::new(),
+        ..Default::default()
+    };
     let mut interval = tokio::time::interval(Duration::from_millis(5000));
     interval.tick().await;
 

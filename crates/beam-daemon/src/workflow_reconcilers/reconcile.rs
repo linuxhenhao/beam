@@ -130,33 +130,32 @@ pub async fn reconcile_activity(
         .activities
         .iter()
         .find(|a| a.activity_id == activity_id);
-    if let Some(latest) = activity.and_then(|a| a.attempts.last()) {
-        if let Some(recovery) =
+    if let Some(latest) = activity.and_then(|a| a.attempts.last())
+        && let Some(recovery) =
             beam_core::recover_prior_reconcile_result(log, activity_id, latest).await?
-        {
-            match recovery {
-                beam_core::PriorReconcileRecoveryOutcome::Recovered {
+    {
+        match recovery {
+            beam_core::PriorReconcileRecoveryOutcome::Recovered {
+                activity_id,
+                attempt_id,
+                decision,
+            } => {
+                outcomes.push(ReconcileActivityOutcome::Reconciled {
                     activity_id,
                     attempt_id,
                     decision,
-                } => {
-                    outcomes.push(ReconcileActivityOutcome::Reconciled {
-                        activity_id,
-                        attempt_id,
-                        decision,
-                    });
-                    return Ok(outcomes);
-                }
-                beam_core::PriorReconcileRecoveryOutcome::FreshRetry {
+                });
+                return Ok(outcomes);
+            }
+            beam_core::PriorReconcileRecoveryOutcome::FreshRetry {
+                activity_id,
+                attempt_id,
+            } => {
+                outcomes.push(ReconcileActivityOutcome::FreshRetry {
                     activity_id,
                     attempt_id,
-                } => {
-                    outcomes.push(ReconcileActivityOutcome::FreshRetry {
-                        activity_id,
-                        attempt_id,
-                    });
-                    return Ok(outcomes);
-                }
+                });
+                return Ok(outcomes);
             }
         }
     }
@@ -258,31 +257,32 @@ pub async fn reconcile_activity(
         match reconciler.canonical_input(raw) {
             Ok(ci) => {
                 // --- Validate input hash against the original effectAttempted.inputHash ---
-                if let Some(expected) = expected_input_hash {
-                    if !expected.is_empty() {
-                        let actual_bytes = serde_json::to_vec(&ci)?;
-                        let actual_hash = crate::sha256_hex(&actual_bytes);
-                        if actual_hash != expected {
-                            let _ = log.append(EventDraft {
-                                event_type: "reconcileResult".to_string(),
-                                actor: WorkflowActor::System,
-                                payload: serde_json::json!({
-                                    "activityId": activity_id,
-                                    "attemptId": attempt_id,
-                                    "idempotencyKey": idempotency_key,
-                                    "capability": "idempotentSubmit",
-                                    "decision": "manual",
-                                    "evidence": {
-                                        "source": "effectInputSidecar",
-                                        "returned": "hashMismatch",
-                                        "expectedHash": expected,
-                                        "actualHash": actual_hash,
-                                    },
-                                }),
-                                timestamp: None,
-                                payload_hash: None,
-                            })?;
-                            let _ = log.append(EventDraft {
+                if let Some(expected) = expected_input_hash
+                    && !expected.is_empty()
+                {
+                    let actual_bytes = serde_json::to_vec(&ci)?;
+                    let actual_hash = crate::sha256_hex(&actual_bytes);
+                    if actual_hash != expected {
+                        let _ = log.append(EventDraft {
+                            event_type: "reconcileResult".to_string(),
+                            actor: WorkflowActor::System,
+                            payload: serde_json::json!({
+                                "activityId": activity_id,
+                                "attemptId": attempt_id,
+                                "idempotencyKey": idempotency_key,
+                                "capability": "idempotentSubmit",
+                                "decision": "manual",
+                                "evidence": {
+                                    "source": "effectInputSidecar",
+                                    "returned": "hashMismatch",
+                                    "expectedHash": expected,
+                                    "actualHash": actual_hash,
+                                },
+                            }),
+                            timestamp: None,
+                            payload_hash: None,
+                        })?;
+                        let _ = log.append(EventDraft {
                                 event_type: "activityFailed".to_string(),
                                 actor: WorkflowActor::System,
                                 payload: serde_json::json!({
@@ -299,15 +299,14 @@ pub async fn reconcile_activity(
                                 timestamp: None,
                                 payload_hash: None,
                             })?;
-                            outcomes.push(ReconcileActivityOutcome::ManualRecovery {
-                                activity_id: activity_id.to_string(),
-                                attempt_id: attempt_id.to_string(),
-                                reason: format!(
-                                    "effect input hash mismatch: expected {expected}, got {actual_hash}"
-                                ),
-                            });
-                            return Ok(outcomes);
-                        }
+                        outcomes.push(ReconcileActivityOutcome::ManualRecovery {
+                            activity_id: activity_id.to_string(),
+                            attempt_id: attempt_id.to_string(),
+                            reason: format!(
+                                "effect input hash mismatch: expected {expected}, got {actual_hash}"
+                            ),
+                        });
+                        return Ok(outcomes);
                     }
                 }
                 Some(ci)

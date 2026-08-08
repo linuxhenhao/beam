@@ -70,7 +70,10 @@ fn normalize_type_validation_success() {
     let input: BTreeMap<String, Value> = BTreeMap::from([
         (String::from("name"), Value::String("test".to_string())),
         (String::from("count"), serde_json::json!(42)),
-        (String::from("ratio"), serde_json::json!(3.14)),
+        (
+            String::from("ratio"),
+            serde_json::json!(std::f64::consts::PI),
+        ),
         (String::from("enabled"), Value::Bool(true)),
         (String::from("tags"), serde_json::json!(["a", "b"])),
         (String::from("meta"), serde_json::json!({"key": "val"})),

@@ -193,7 +193,7 @@ pub(crate) fn auto_inject_bot_mentions(
     }
 
     // Sort by name length descending so longer names match first
-    bots.sort_by(|a, b| b.name.len().cmp(&a.name.len()));
+    bots.sort_by_key(|bot| std::cmp::Reverse(bot.name.len()));
 
     let mut result = String::with_capacity(content.len());
     let mut pos = 0;
@@ -478,7 +478,10 @@ pub(crate) async fn commit_delivered_final_output(
 /// Snapshot the session's current turn id for an explicit send. On success the
 /// send marks that turn as answered, so the worker's final output for the same
 /// turn is skipped by turn-id dedupe regardless of content differences.
-pub(crate) async fn current_turn_id_for_explicit_send(state: &AppState, session_id: &str) -> Option<String> {
+pub(crate) async fn current_turn_id_for_explicit_send(
+    state: &AppState,
+    session_id: &str,
+) -> Option<String> {
     let sessions = state.sessions.lock().await;
     sessions
         .get(session_id)
@@ -503,14 +506,14 @@ pub(crate) async fn handle_final_output_request(
     }
 
     // ---- validate attention kind ----
-    if let Some(ref kind) = req.attention {
-        if !super::attention::VALID_ATTENTION_KINDS.contains(&kind.as_str()) {
-            anyhow::bail!(
-                "invalid attention kind \"{}\": must be one of {}",
-                kind,
-                super::attention::VALID_ATTENTION_KINDS.join("|")
-            );
-        }
+    if let Some(ref kind) = req.attention
+        && !super::attention::VALID_ATTENTION_KINDS.contains(&kind.as_str())
+    {
+        anyhow::bail!(
+            "invalid attention kind \"{}\": must be one of {}",
+            kind,
+            super::attention::VALID_ATTENTION_KINDS.join("|")
+        );
     }
 
     // ---- validate attention usage constraints (botmux parity) ----
@@ -858,29 +861,23 @@ pub(crate) async fn deliver_final_output_once(
                     super::pending::clear_pending_response_patch_marker(&state.paths, session_id)
                         .await?;
                     commit_delivered_final_output(state, session_id, content, turn_id).await?;
-                    if let Some(updated_session) = updated_session {
-                        if updated_session.quote_target_id.as_deref().is_some()
-                            && updated_session.last_patched_response_card_id.as_deref()
-                                == Some(pending_card_id)
-                        {
-                            if let Some(quote_target_id) =
-                                updated_session.quote_target_id.as_deref()
-                            {
-                                if let Err(err) = lark_add_reaction(
-                                    state,
-                                    bot,
-                                    quote_target_id,
-                                    COMPLETED_REACTION_EMOJI_TYPE,
-                                )
-                                .await
-                                {
-                                    warn!(
-                                        "failed to add completion reaction to {}: {}",
-                                        quote_target_id, err
-                                    );
-                                }
-                            }
-                        }
+                    if let Some(updated_session) = updated_session
+                        && updated_session.quote_target_id.as_deref().is_some()
+                        && updated_session.last_patched_response_card_id.as_deref()
+                            == Some(pending_card_id)
+                        && let Some(quote_target_id) = updated_session.quote_target_id.as_deref()
+                        && let Err(err) = lark_add_reaction(
+                            state,
+                            bot,
+                            quote_target_id,
+                            COMPLETED_REACTION_EMOJI_TYPE,
+                        )
+                        .await
+                    {
+                        warn!(
+                            "failed to add completion reaction to {}: {}",
+                            quote_target_id, err
+                        );
                     }
                     return Ok(());
                 }

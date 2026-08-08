@@ -101,29 +101,29 @@ pub(crate) fn build_streaming_card(session: &Session, status: &str) -> String {
         }),
         serde_json::json!({ "tag": "hr" }),
     ];
-    if status == "limited" {
-        if let Some(usage_limit) = session.usage_limit.as_ref() {
-            let retry_label = &usage_limit.retry_label;
-            let usage_zh = if usage_limit.retry_ready {
-                format!("限制已解除。{} 后可重试。", retry_label)
-            } else {
-                format!("用量受限。请在 {} 后重试。", retry_label)
-            };
-            let usage_en = if usage_limit.retry_ready {
-                format!("limit cleared. Retry is ready after {}.", retry_label)
-            } else {
-                format!("usage limited. Try again at {}.", retry_label)
-            };
-            elements.push(serde_json::json!({
-                "tag": "markdown",
-                "content": usage_en,
-                "i18n_content": {
-                    "zh_cn": usage_zh,
-                    "en_us": usage_en,
-                }
-            }));
-            elements.push(serde_json::json!({ "tag": "hr" }));
-        }
+    if status == "limited"
+        && let Some(usage_limit) = session.usage_limit.as_ref()
+    {
+        let retry_label = &usage_limit.retry_label;
+        let usage_zh = if usage_limit.retry_ready {
+            format!("限制已解除。{} 后可重试。", retry_label)
+        } else {
+            format!("用量受限。请在 {} 后重试。", retry_label)
+        };
+        let usage_en = if usage_limit.retry_ready {
+            format!("limit cleared. Retry is ready after {}.", retry_label)
+        } else {
+            format!("usage limited. Try again at {}.", retry_label)
+        };
+        elements.push(serde_json::json!({
+            "tag": "markdown",
+            "content": usage_en,
+            "i18n_content": {
+                "zh_cn": usage_zh,
+                "en_us": usage_en,
+            }
+        }));
+        elements.push(serde_json::json!({ "tag": "hr" }));
     }
     if display_mode == DisplayMode::Screenshot {
         if let Some(image_key) = session.current_image_key.as_deref() {

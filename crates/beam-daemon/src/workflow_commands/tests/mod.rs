@@ -30,7 +30,9 @@ fn make_state(paths: &BeamPaths) -> crate::AppState {
         started_at: chrono::Utc::now(),
         sessions: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         workers: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        worker_health: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        worker_health: std::sync::Arc::new(tokio::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         attempt_resumes: std::sync::Arc::new(tokio::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),

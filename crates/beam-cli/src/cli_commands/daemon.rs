@@ -3,7 +3,7 @@ use crate::*;
 use anyhow::{Context, Result, bail};
 
 pub(crate) fn current_exe() -> Result<PathBuf> {
-    Ok(std::env::current_exe().context("failed to locate current executable")?)
+    std::env::current_exe().context("failed to locate current executable")
 }
 
 pub(crate) fn daemon_state_is_live(paths: &BeamPaths) -> bool {
@@ -56,10 +56,10 @@ pub(crate) async fn wait_for_health(paths: &BeamPaths) -> Result<ApiHealth> {
     for _ in 0..40 {
         if let Ok(runtime) = find_runtime(paths) {
             let url = format!("http://{}/health", runtime.api_addr);
-            if let Ok(resp) = client.get(&url).send().await {
-                if resp.status().is_success() {
-                    return Ok(resp.json::<ApiHealth>().await?);
-                }
+            if let Ok(resp) = client.get(&url).send().await
+                && resp.status().is_success()
+            {
+                return Ok(resp.json::<ApiHealth>().await?);
             }
         }
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -90,7 +90,7 @@ pub(crate) fn active_sessions(items: &[SessionSummary]) -> Vec<SessionSummary> {
         .filter(|s| s.status == SessionStatus::Active)
         .cloned()
         .collect();
-    v.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    v.sort_by_key(|item| std::cmp::Reverse(item.created_at));
     v
 }
 
@@ -103,10 +103,10 @@ pub(crate) fn truncate(s: &str, max: usize) -> &str {
 }
 
 pub(crate) fn shorten_home(path: &str) -> String {
-    if let Ok(home) = std::env::var("HOME") {
-        if path.starts_with(&home) {
-            return path.replacen(&home, "~", 1);
-        }
+    if let Ok(home) = std::env::var("HOME")
+        && path.starts_with(&home)
+    {
+        return path.replacen(&home, "~", 1);
     }
     path.to_string()
 }
