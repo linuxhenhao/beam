@@ -33,7 +33,7 @@ fn decide_lark_dispatch_reuses_chat_scope_session_for_quote_bubble_messages() {
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None, false);
     assert_eq!(
         existing.map(|session| session.session_id),
         Some("chat-session".to_string())
@@ -70,13 +70,14 @@ fn decide_lark_dispatch_slash_trigger_creates_session() {
 
     // A configured slash trigger activates the session instead of being
     // routed as a passthrough command.
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, Some(&trigger));
+    let (existing, outcome) =
+        decide_lark_dispatch(&sessions, "app-1", &parsed, Some(&trigger), true);
     assert!(existing.is_none());
     assert_eq!(outcome, LarkEventOutcome::CreateSession);
 
     // Without the trigger, "/日报" is a passthrough command and is rejected
     // because no active session exists.
-    let (_, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
+    let (_, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None, false);
     assert!(matches!(outcome, LarkEventOutcome::ReplyOnly { .. }));
 }
 
@@ -113,7 +114,8 @@ fn decide_lark_dispatch_slash_trigger_keeps_passthrough_with_existing_session() 
         ack_message: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, Some(&trigger));
+    let (existing, outcome) =
+        decide_lark_dispatch(&sessions, "app-1", &parsed, Some(&trigger), true);
     assert_eq!(
         existing.map(|session| session.session_id),
         Some("slash-session".to_string())
@@ -126,6 +128,85 @@ fn decide_lark_dispatch_slash_trigger_keeps_passthrough_with_existing_session() 
             text: "/日报".to_string()
         }
     );
+}
+
+#[test]
+fn decide_lark_dispatch_slash_trigger_activates_in_new_topic_when_chat_session_elsewhere() {
+    // The chat owns an active Chat-scope session elsewhere, but the new topic
+    // is its own Thread anchor with no session: per-anchor activation still
+    // fires the trigger.
+    let mut chat_session = make_session("chat-session");
+    chat_session.status = SessionStatus::Active;
+    chat_session.closed_at = None;
+    chat_session.scope = SessionScope::Chat;
+    chat_session.chat_id = "chat-slash-3".to_string();
+    chat_session.root_message_id = "seed-root".to_string();
+    let sessions = HashMap::from([(chat_session.session_id.clone(), chat_session)]);
+    let parsed = ParsedLarkInboundMessage {
+        event_id: "evt-slash-3".to_string(),
+        message_id: "msg-slash-3".to_string(),
+        chat_id: "chat-slash-3".to_string(),
+        chat_type: Some("group".to_string()),
+        sender_type: Some("user".to_string()),
+        scope: SessionScope::Thread,
+        anchor: "topic-3".to_string(),
+        text: "/日报".to_string(),
+        sender_open_id: Some("ou_user".to_string()),
+        mentions: Vec::new(),
+        parent_id: None,
+        root_id: None,
+        thread_id: None,
+        locale: None,
+    };
+    let trigger = CustomTrigger {
+        trigger: "/日报".to_string(),
+        prompt: Some("生成今日日报".to_string()),
+        skip_dir_select: false,
+        working_dir: None,
+        ack_message: None,
+    };
+
+    // trigger_activation is true because the message's own anchor (the new
+    // topic) has no active session, even though the chat owns one elsewhere.
+    let (existing, outcome) =
+        decide_lark_dispatch(&sessions, "app-1", &parsed, Some(&trigger), true);
+    assert!(existing.is_none());
+    assert_eq!(outcome, LarkEventOutcome::CreateSession);
+}
+
+#[test]
+fn decide_lark_dispatch_slash_trigger_activates_in_new_topic_without_chat_session() {
+    // No session exists anywhere in the chat, so the same new-topic message
+    // still activates the trigger.
+    let sessions = HashMap::new();
+    let parsed = ParsedLarkInboundMessage {
+        event_id: "evt-slash-4".to_string(),
+        message_id: "msg-slash-4".to_string(),
+        chat_id: "chat-slash-4".to_string(),
+        chat_type: Some("group".to_string()),
+        sender_type: Some("user".to_string()),
+        scope: SessionScope::Thread,
+        anchor: "topic-4".to_string(),
+        text: "/日报".to_string(),
+        sender_open_id: Some("ou_user".to_string()),
+        mentions: Vec::new(),
+        parent_id: None,
+        root_id: None,
+        thread_id: None,
+        locale: None,
+    };
+    let trigger = CustomTrigger {
+        trigger: "/日报".to_string(),
+        prompt: Some("生成今日日报".to_string()),
+        skip_dir_select: false,
+        working_dir: None,
+        ack_message: None,
+    };
+
+    let (existing, outcome) =
+        decide_lark_dispatch(&sessions, "app-1", &parsed, Some(&trigger), true);
+    assert!(existing.is_none());
+    assert_eq!(outcome, LarkEventOutcome::CreateSession);
 }
 
 #[test]
@@ -155,7 +236,7 @@ fn decide_lark_dispatch_creates_new_thread_when_only_chat_scope_session_exists()
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None, false);
     assert!(existing.is_none());
     assert_eq!(outcome, LarkEventOutcome::CreateSession);
 }
@@ -191,7 +272,7 @@ fn decide_lark_dispatch_reuses_topic_session_by_chat_id_without_thread_metadata(
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None, false);
     assert!(
         existing.is_none(),
         "without thread_id on either side, no match is expected"
@@ -226,7 +307,7 @@ fn decide_lark_dispatch_does_not_reuse_group_forced_topic_by_chat_id() {
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None, false);
     assert!(existing.is_none());
     assert_eq!(outcome, LarkEventOutcome::CreateSession);
 }
@@ -264,7 +345,7 @@ fn decide_lark_dispatch_creates_new_session_when_thread_id_missing() {
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None, false);
     assert!(existing.is_none());
     assert_eq!(outcome, LarkEventOutcome::CreateSession);
 }
@@ -301,7 +382,7 @@ fn decide_lark_dispatch_reuses_topic_session_with_root_id_and_thread_id() {
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None, false);
     assert_eq!(
         existing.map(|session| session.session_id),
         Some("topic-session-full".to_string())
@@ -341,7 +422,7 @@ fn decide_lark_dispatch_no_fallback_creates_session_when_anchor_mismatches() {
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None, false);
     assert!(
         existing.is_none(),
         "no fallback: without thread_id, new session is created"
@@ -387,7 +468,7 @@ fn decide_lark_dispatch_creates_new_session_for_different_root_id_in_topic_chat(
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None, false);
     // Exact match fails (root_message_id mismatch); root_id is Some
     // so fallback does NOT trigger.  Must create a new session.
     assert!(
@@ -428,7 +509,7 @@ fn decide_lark_dispatch_creates_new_session_for_different_thread_id() {
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None, false);
     assert!(
         existing.is_none(),
         "different thread_id must create a new session"
@@ -472,7 +553,7 @@ fn decide_lark_dispatch_p2p_follow_up_reuses_session_by_root_id() {
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None, false);
     assert_eq!(
         existing.as_ref().map(|s| s.session_id.as_str()),
         Some("p2p-first"),
@@ -519,7 +600,7 @@ fn decide_lark_dispatch_p2p_after_thread_id_backfill_still_reuses_by_root_id() {
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None, false);
     assert_eq!(
         existing.as_ref().map(|s| s.session_id.as_str()),
         Some("p2p-backfilled"),
@@ -560,7 +641,7 @@ fn decide_lark_dispatch_p2p_new_message_does_not_reuse_session() {
         locale: None,
     };
 
-    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None);
+    let (existing, outcome) = decide_lark_dispatch(&sessions, "app-1", &parsed, None, false);
     assert!(
         existing.is_none(),
         "p2p new message without root_id/thread_id must not reuse old session"

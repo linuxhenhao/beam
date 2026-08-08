@@ -481,6 +481,7 @@ pub(crate) async fn dispatch_event_outcome(
     parsed: &ParsedLarkInboundMessage,
     text: &str,
     custom_trigger: Option<&CustomTrigger>,
+    trigger_activation: bool,
     inferred_locale: &str,
     scope: &SessionScope,
     anchor: &str,
@@ -491,6 +492,15 @@ pub(crate) async fn dispatch_event_outcome(
     existing: Option<Session>,
     outcome: LarkEventOutcome,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    // A trigger only special-cases session creation when it actually
+    // activated (no active session anywhere in the chat). If the chat
+    // already owns a session, the keyword keeps its normal handling even
+    // when the message text matches a configured trigger.
+    let custom_trigger = if trigger_activation {
+        custom_trigger
+    } else {
+        None
+    };
     match outcome {
         LarkEventOutcome::ReplyOnly { reply } => {
             let _ = lark_reply_message(state, bot, message_id, &reply).await;

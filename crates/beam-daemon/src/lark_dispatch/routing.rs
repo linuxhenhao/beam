@@ -90,7 +90,7 @@ pub(crate) fn decide_lark_event_outcome(
     }
 }
 
-fn resolve_existing_lark_session(
+pub(crate) fn resolve_existing_lark_session(
     sessions: &HashMap<String, Session>,
     lark_app_id: &str,
     parsed: &ParsedLarkInboundMessage,
@@ -109,17 +109,21 @@ pub(crate) fn decide_lark_dispatch(
     lark_app_id: &str,
     parsed: &ParsedLarkInboundMessage,
     custom_trigger: Option<&CustomTrigger>,
+    trigger_activation: bool,
 ) -> (Option<Session>, LarkEventOutcome) {
     let existing = resolve_existing_lark_session(sessions, lark_app_id, parsed);
     let mut action = classify_lark_text_action(&parsed.text, existing.is_some());
     if custom_trigger.is_some()
+        && trigger_activation
         && existing.is_none()
         && matches!(action, LarkTextAction::PassthroughInput(_))
     {
-        // A configured trigger that starts with "/" would otherwise be
-        // routed as a passthrough command; on first activation treat it
-        // as session creation. With an existing session the message keeps
-        // its normal slash-command behavior.
+        // A configured trigger only activates when the message's own anchor
+        // has no active session (a regular group is one Chat anchor; each
+        // topic is its own Thread anchor). On activation a "/" trigger would
+        // otherwise be routed as a passthrough command; treat it as session
+        // creation instead. Inside an existing session (or when the trigger
+        // is not activating) the message keeps its normal behavior.
         action = LarkTextAction::CreateSession;
     }
     let outcome = decide_lark_event_outcome(action, existing.as_ref());

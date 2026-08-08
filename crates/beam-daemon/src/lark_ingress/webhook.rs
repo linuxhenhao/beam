@@ -8,6 +8,7 @@ pub(crate) struct WebhookEventContext {
     pub(crate) parsed: ParsedLarkInboundMessage,
     pub(crate) text: String,
     pub(crate) custom_trigger: Option<CustomTrigger>,
+    pub(crate) trigger_activation: bool,
     pub(crate) inferred_locale: &'static str,
     pub(crate) scope: SessionScope,
     pub(crate) anchor: String,
@@ -127,9 +128,16 @@ pub(crate) async fn process_webhook_event_maybe_response(
                 && s.status == SessionStatus::Active
         })
     };
-    // A custom trigger only activates the bot when no session exists yet;
-    // follow-up interactions must obey the normal group rules.
-    let trigger_activation = custom_trigger.is_some() && !owns_session;
+    let anchor_has_session = {
+        let sessions = state.sessions.lock().await;
+        crate::lark_dispatch::resolve_existing_lark_session(&sessions, app_id, &parsed).is_some()
+    };
+    // A custom trigger activates only when the message's own anchor has no
+    // active session: a regular group is one Chat anchor (one session per
+    // group), while each topic in a topic group is its own Thread anchor, so
+    // a new topic can still trigger even when another topic owns a session.
+    // Inside an existing session the keyword obeys the normal group rules.
+    let trigger_activation = custom_trigger.is_some() && !anchor_has_session;
     let is_oncall_chat = bot
         .oncall_chats
         .iter()
@@ -180,6 +188,7 @@ pub(crate) async fn process_webhook_event_maybe_response(
             parsed,
             text,
             custom_trigger: custom_trigger.clone(),
+            trigger_activation,
             inferred_locale,
             scope,
             anchor,
@@ -209,6 +218,7 @@ pub(crate) async fn process_webhook_event_maybe_response(
                 parsed,
                 text,
                 custom_trigger: custom_trigger.clone(),
+                trigger_activation,
                 inferred_locale,
                 scope,
                 anchor,
@@ -225,6 +235,7 @@ pub(crate) async fn process_webhook_event_maybe_response(
                 parsed,
                 text,
                 custom_trigger: custom_trigger.clone(),
+                trigger_activation,
                 inferred_locale,
                 scope,
                 anchor,
@@ -244,6 +255,7 @@ pub(crate) async fn process_webhook_event_maybe_response(
                 parsed,
                 text,
                 custom_trigger: custom_trigger.clone(),
+                trigger_activation,
                 inferred_locale,
                 scope,
                 anchor,
@@ -264,6 +276,7 @@ pub(crate) async fn process_webhook_event_maybe_response(
             parsed,
             text,
             custom_trigger: custom_trigger.clone(),
+            trigger_activation,
             inferred_locale,
             scope,
             anchor,
@@ -285,6 +298,7 @@ pub(crate) async fn process_webhook_event_maybe_response(
         parsed,
         text,
         custom_trigger: custom_trigger.clone(),
+        trigger_activation,
         inferred_locale,
         scope,
         anchor,
