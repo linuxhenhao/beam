@@ -573,4 +573,3 @@ fn decide_lark_dispatch_p2p_new_message_does_not_reuse_session() {
     );
     assert_eq!(outcome, LarkEventOutcome::CreateSession);
 }
-

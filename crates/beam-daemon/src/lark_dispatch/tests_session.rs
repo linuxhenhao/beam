@@ -2,7 +2,9 @@ use super::*;
 use crate::tests::test_helpers::*;
 
 use axum::http::StatusCode;
-use beam_core::{AdoptedFrom, AgentAttention, BotConfig, CustomTrigger, SessionScope, SessionStatus};
+use beam_core::{
+    AdoptedFrom, AgentAttention, BotConfig, CustomTrigger, SessionScope, SessionStatus,
+};
 use chrono::Utc;
 use std::collections::HashMap;
 
@@ -290,7 +292,15 @@ fn evaluate_lark_preflight_handles_dedupe_empty_and_permission_gate() {
         HashMap::from([(bot.lark_app_id.clone(), bot.clone())]),
     );
     assert_eq!(
-        evaluate_lark_preflight(&state, &bot, "hello", "chat-1", Some("ou_owner"), true, false),
+        evaluate_lark_preflight(
+            &state,
+            &bot,
+            "hello",
+            "chat-1",
+            Some("ou_owner"),
+            true,
+            false
+        ),
         LarkPreflight::Deduped
     );
     assert_eq!(
@@ -298,13 +308,29 @@ fn evaluate_lark_preflight_handles_dedupe_empty_and_permission_gate() {
         LarkPreflight::IgnoredEmptyText
     );
     assert_eq!(
-        evaluate_lark_preflight(&state, &bot, "/close", "chat-1", Some("ou_other"), false, false),
+        evaluate_lark_preflight(
+            &state,
+            &bot,
+            "/close",
+            "chat-1",
+            Some("ou_other"),
+            false,
+            false
+        ),
         LarkPreflight::Denied {
             reply: "permission denied"
         }
     );
     assert_eq!(
-        evaluate_lark_preflight(&state, &bot, "hello", "chat-1", Some("ou_other"), false, false),
+        evaluate_lark_preflight(
+            &state,
+            &bot,
+            "hello",
+            "chat-1",
+            Some("ou_other"),
+            false,
+            false
+        ),
         LarkPreflight::Denied {
             reply: "permission denied: you are not authorized to talk to this bot"
         }

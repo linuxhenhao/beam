@@ -30,11 +30,7 @@ pub fn custom_trigger_rest<'a>(text: &'a str, trigger: &str) -> Option<&'a str> 
     let rest = rest.trim_start_matches(|c: char| {
         c.is_whitespace() || "，。：:；;、,．.！!？?）)]}>》」』】".contains(c)
     });
-    if rest.is_empty() {
-        None
-    } else {
-        Some(rest)
-    }
+    if rest.is_empty() { None } else { Some(rest) }
 }
 
 /// The effective initial message for a session created by a trigger:
@@ -118,7 +114,10 @@ mod tests {
     fn trigger_without_prompt_keeps_raw_text() {
         let triggers = vec![trigger("开会", None)];
         let hit = resolve_custom_trigger("开会 讲讲方案", &triggers).expect("match");
-        assert_eq!(resolve_trigger_message("开会 讲讲方案", hit), "开会 讲讲方案");
+        assert_eq!(
+            resolve_trigger_message("开会 讲讲方案", hit),
+            "开会 讲讲方案"
+        );
     }
 
     #[test]

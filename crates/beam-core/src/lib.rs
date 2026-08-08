@@ -62,11 +62,11 @@ pub use schedule_store::{
     ScheduleRepeat, ScheduleStoreError, ScheduleTaskUpdate, ScheduledTask, append_output_log,
     create_task, get_task, list_tasks, mark_run, remove_task, update_task,
 };
-pub use triggers::{custom_trigger_rest, resolve_custom_trigger, resolve_trigger_message};
 pub use session::{
     AdoptedFrom, AgentAttention, ChatMode, PendingResponseCardState, Session, SessionScope,
     SessionStatus,
 };
+pub use triggers::{custom_trigger_rest, resolve_custom_trigger, resolve_trigger_message};
 pub use workflow::{EventDraft, EventLog, WorkflowActor, WorkflowEventEnvelope};
 pub use workflow_actions::{
     CompleteActivityCancelInput, CompleteNodeCancelInput, CompleteRunCancelInput, CreateWaitInput,
