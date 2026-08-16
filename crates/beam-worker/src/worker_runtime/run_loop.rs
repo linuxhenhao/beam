@@ -302,11 +302,55 @@ pub async fn run(init: InitConfig) -> Result<()> {
         let _ = screen_capture_task.await;
     });
 
+    if init.cli_id == "grok" {
+        let grok_raw_screen = latest_raw_screen.clone();
+        let grok_runtime_state = analyzer_runtime.clone();
+        let grok_stdout = stdout.clone();
+        worker_joins.spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(800)).await;
+                let snapshot = grok_raw_screen.read().await.clone();
+                if snapshot.is_empty() {
+                    continue;
+                }
+                let options =
+                    crate::worker_runtime::grok_prompts::detect_grok_plan_approval(&snapshot);
+                let mut runtime = grok_runtime_state.write().await;
+                match options {
+                    Some(options) if !runtime.prompt_active => {
+                        runtime.prompt_active = true;
+                        let _ = send_message(
+                            &grok_stdout,
+                            &WorkerToDaemon::TuiPrompt {
+                                description: "Grok plan approval".to_string(),
+                                options,
+                                multi_select: false,
+                            },
+                        )
+                        .await;
+                    }
+                    None if runtime.prompt_active => {
+                        runtime.prompt_active = false;
+                        let _ = send_message(
+                            &grok_stdout,
+                            &WorkerToDaemon::TuiPromptResolved {
+                                selected_text: None,
+                            },
+                        )
+                        .await;
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+
     if screen_analyzer_enabled(&init.screen_analyzer) {
         let analyzer_cfg = init.screen_analyzer.clone();
         let analyzer_raw_screen = latest_raw_screen.clone();
         let analyzer_runtime_state = analyzer_runtime.clone();
         let analyzer_stdout = stdout.clone();
+        let analyzer_cli_id = init.cli_id.clone();
         let analyzer_task = tokio::spawn(async move {
             let client = Client::new();
             loop {
@@ -345,6 +389,15 @@ pub async fn run(init: InitConfig) -> Result<()> {
                     }
                     runtime.is_analyzing = true;
                     runtime.last_analyzed_snapshot = truncated.clone();
+                }
+
+                if analyzer_cli_id == "grok"
+                    && crate::worker_runtime::grok_prompts::detect_grok_plan_approval(&truncated)
+                        .is_some()
+                {
+                    let mut runtime = analyzer_runtime_state.write().await;
+                    runtime.is_analyzing = false;
+                    continue;
                 }
 
                 let result = call_screen_analyzer(&client, &analyzer_cfg, &truncated).await;

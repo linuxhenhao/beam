@@ -3,6 +3,7 @@ pub mod claude;
 pub mod coco;
 pub mod codex;
 pub mod gemini;
+pub mod grok;
 pub mod hermes;
 pub mod kimi;
 pub mod opencode;
@@ -30,6 +31,7 @@ static REGISTRY: &[(&str, AdapterFactory)] = &[
     ("hermes", hermes::create),
     ("antigravity", antigravity::create),
     ("kimi", kimi::create),
+    ("grok", grok::create),
 ];
 
 pub fn create_adapter(init: &InitConfig) -> Result<CliAdapter> {
@@ -84,6 +86,7 @@ mod tests {
         assert_eq!(tui_ready_marker("coco"), Some("Welcome"));
         assert_eq!(tui_ready_marker("hermes"), Some("Welcome"));
         assert_eq!(tui_ready_marker("antigravity"), Some("Welcome"));
+        assert_eq!(tui_ready_marker("grok"), Some("Grok"));
         assert_eq!(tui_ready_marker("codex"), None);
         assert_eq!(tui_ready_marker("gemini"), None);
         assert_eq!(tui_ready_marker("unknown-cli"), None);

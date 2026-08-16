@@ -30,6 +30,7 @@ pub(crate) use crate::backend::{SessionBackend, SpawnOpts, ZellijBackend, Zellij
 mod analyzer;
 mod coordinator;
 mod coordinator_runtime;
+mod grok_prompts;
 mod launch;
 #[cfg(test)]
 mod launch_live;

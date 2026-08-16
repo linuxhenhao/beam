@@ -141,6 +141,17 @@ pub const CLI_SPECS: &[CliSpec] = &[
         tui_ready_marker: Some("Welcome to Kimi Code"),
         inject_term_xterm: false,
     },
+    CliSpec {
+        cli_id: "grok",
+        label: "Grok Build",
+        bin_candidates: &["grok"],
+        default_cli_args: &[],
+        adopt_command_patterns: &["grok"],
+        supports_resume: true,
+        passes_initial_prompt_via_args: false,
+        tui_ready_marker: Some("Grok"),
+        inject_term_xterm: false,
+    },
 ];
 
 /// Look up the spec for a CLI id. Returns `None` for unknown ids.
@@ -199,7 +210,8 @@ mod tests {
                 "coco",
                 "hermes",
                 "antigravity",
-                "kimi"
+                "kimi",
+                "grok"
             ]
         );
     }
@@ -228,6 +240,7 @@ mod tests {
                 ("hermes", "Welcome"),
                 ("antigravity", "Welcome"),
                 ("kimi", "Welcome to Kimi Code"),
+                ("grok", "Grok"),
             ]
         );
     }
@@ -279,7 +292,8 @@ mod tests {
                 "gemini",
                 "opencode",
                 "hermes",
-                "kimi"
+                "kimi",
+                "grok"
             ]
         );
     }

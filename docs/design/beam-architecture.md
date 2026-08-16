@@ -168,6 +168,7 @@ Adapter trait（crates/beam-worker/src/adapter.rs）
     ├── hermes      → structured bridge
     ├── antigravity → structured bridge
     ├── kimi        → structured bridge (wire.jsonl)
+    ├── grok        → structured bridge (updates.jsonl)
     └── generic     → passthrough
 ```
 
