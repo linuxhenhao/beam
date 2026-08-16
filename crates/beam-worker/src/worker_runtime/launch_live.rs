@@ -107,10 +107,10 @@ fn start_zellij(session: &str, cwd: &Path, bin: &str, args: &[String]) {
 fn wait_probe_out(path: &Path) -> String {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Ok(text) = fs::read_to_string(path) {
-            if text.contains("BEAM_SESSION_ID=") {
-                return text;
-            }
+        if let Ok(text) = fs::read_to_string(path)
+            && text.contains("BEAM_SESSION_ID=")
+        {
+            return text;
         }
         if Instant::now() > deadline {
             panic!("probe.out not ready within 10s (path={})", path.display());
