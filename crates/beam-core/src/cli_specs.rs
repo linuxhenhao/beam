@@ -149,7 +149,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         adopt_command_patterns: &["grok"],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
-        tui_ready_marker: Some("always-approve"),
+        tui_ready_marker: Some("Grok"),
         inject_term_xterm: false,
     },
 ];
@@ -240,7 +240,7 @@ mod tests {
                 ("hermes", "Welcome"),
                 ("antigravity", "Welcome"),
                 ("kimi", "Welcome to Kimi Code"),
-                ("grok", "always-approve"),
+                ("grok", "Grok"),
             ]
         );
     }

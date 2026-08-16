@@ -86,7 +86,7 @@ mod tests {
         assert_eq!(tui_ready_marker("coco"), Some("Welcome"));
         assert_eq!(tui_ready_marker("hermes"), Some("Welcome"));
         assert_eq!(tui_ready_marker("antigravity"), Some("Welcome"));
-        assert_eq!(tui_ready_marker("grok"), Some("always-approve"));
+        assert_eq!(tui_ready_marker("grok"), Some("Grok"));
         assert_eq!(tui_ready_marker("codex"), None);
         assert_eq!(tui_ready_marker("gemini"), None);
         assert_eq!(tui_ready_marker("unknown-cli"), None);
