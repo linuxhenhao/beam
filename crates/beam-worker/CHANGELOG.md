@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.10.0...beam-worker-v0.10.1) - 2026-08-16
+
+### Added
+
+- *(worker)* 静态启动参数改为 cliArgs 显式默认项
+
 ## [0.10.0](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.9.0...beam-worker-v0.10.0) - 2026-08-16
 
 ### Added
