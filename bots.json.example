@@ -4,7 +4,13 @@
     "larkAppSecret": "your_secret_1",
     "cliId": "claude-code",
     "model": "sonnet",
-    "disableCliBypass": true,
+    "cliArgs": [
+      "--dangerously-skip-permissions",
+      "--settings",
+      "{\"skipDangerousModePermissionPrompt\":true,\"permissions\":{\"defaultMode\":\"bypassPermissions\"}}",
+      "--disallowed-tools",
+      "EnterPlanMode,ExitPlanMode"
+    ],
     "allowedUsers": ["alice@company.com"],
     "allowedChatGroups": ["oc_xxx_team"],
     "customTriggers": [
@@ -32,6 +38,7 @@
     "larkAppId": "cli_xxx_bot3",
     "larkAppSecret": "your_secret_3",
     "cliId": "gemini",
+    "cliArgs": ["--yolo"],
     "model": "gemini-2.5-pro",
     "allowedUsers": ["charlie@company.com"],
     "workingDir": "~/projects"
@@ -48,6 +55,14 @@
     "larkAppSecret": "your_secret_5",
     "cliId": "mira",
     "allowedUsers": ["erin@company.com"],
+    "workingDir": "~/projects"
+  },
+  {
+    "larkAppId": "cli_xxx_bot6",
+    "larkAppSecret": "your_secret_6",
+    "cliId": "grok",
+    "cliArgs": ["--always-approve", "--no-alt-screen"],
+    "allowedUsers": ["frank@company.com"],
     "workingDir": "~/projects"
   }
 ]

@@ -228,12 +228,12 @@ fn encode_cwd_matches_grok_session_group_names() {
 }
 
 #[test]
-fn build_spawn_spec_defaults_to_always_approve_and_session_id() {
+fn build_spawn_spec_adds_session_id_and_does_not_inject_static_flags() {
     let init = init_for("/tmp");
     let spec = GrokState::default().build_spawn_spec(&init);
     assert_eq!(spec.bin, "grok");
-    assert!(spec.args.iter().any(|arg| arg == "--always-approve"));
-    assert!(spec.args.iter().any(|arg| arg == "--no-alt-screen"));
+    assert!(!spec.args.iter().any(|arg| arg == "--always-approve"));
+    assert!(!spec.args.iter().any(|arg| arg == "--no-alt-screen"));
     let session_pos = spec
         .args
         .iter()
@@ -244,17 +244,37 @@ fn build_spawn_spec_defaults_to_always_approve_and_session_id() {
 }
 
 #[test]
-fn build_spawn_spec_respects_disable_bypass_model_and_resume() {
+fn build_spawn_spec_passes_cli_args_through() {
+    let init = InitConfig {
+        cli_args: vec![
+            "--always-approve".to_string(),
+            "--no-alt-screen".to_string(),
+        ],
+        ..init_for("/tmp")
+    };
+    let spec = GrokState::default().build_spawn_spec(&init);
+    assert_eq!(
+        spec.args,
+        vec![
+            "--session-id",
+            SAMPLE_SESSION,
+            "--always-approve",
+            "--no-alt-screen",
+        ]
+    );
+}
+
+#[test]
+fn build_spawn_spec_respects_model_and_resume() {
     let init = InitConfig {
         resume: true,
         cli_session_id: Some("01aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee".to_string()),
         model: Some("grok-4".to_string()),
-        disable_cli_bypass: true,
+        cli_args: vec!["--no-alt-screen".to_string()],
         ..init_for("/tmp")
     };
     let spec = GrokState::default().build_spawn_spec(&init);
     assert!(!spec.args.iter().any(|arg| arg == "--always-approve"));
-    assert!(spec.args.iter().any(|arg| arg == "--no-alt-screen"));
     assert!(!spec.args.iter().any(|arg| arg == "--session-id"));
     let resume_pos = spec.args.iter().position(|arg| arg == "--resume").unwrap();
     assert_eq!(
@@ -263,6 +283,7 @@ fn build_spawn_spec_respects_disable_bypass_model_and_resume() {
     );
     let model_pos = spec.args.iter().position(|arg| arg == "--model").unwrap();
     assert_eq!(spec.args[model_pos + 1], "grok-4");
+    assert!(spec.args.iter().any(|arg| arg == "--no-alt-screen"));
 }
 
 #[test]
@@ -570,7 +591,7 @@ async fn live_grok_submit_and_poll_final_output() {
     };
     let mut state = state_from_init(&init);
     let spec = state.build_spawn_spec(&init);
-    assert!(spec.args.iter().any(|arg| arg == "--always-approve"));
+    assert!(spec.args.iter().any(|arg| arg == "--session-id"));
 
     let backend = crate::backend::ZellijBackend::new(zellij_session);
     backend

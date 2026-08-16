@@ -27,7 +27,7 @@ beam 的最终输出依赖「读 CLI 落盘的会话记录」，而不是解析�
 
 ### 1.2 启动参数
 
-- 自动批准 flag：kimi `--yolo`、claude `--dangerously-skip-permissions`、codex `--dangerously-bypass-approvals-and-sandbox`。统一受 `init.disable_cli_bypass` 控制（true 时不加）。
+- 静态启动参数（自动批准、`--no-alt-screen`、disallowed-tools 等）只放在 `CLI_SPECS.default_cli_args`，由 setup 写入 `bots.json` 的 `cliArgs`。适配器禁止暗挂这些 flag；`cliArgs` 为空就按空启动。会话级参数（`--session-id` / `--resume` / `--model` / 初始 prompt）仍由适配器按 `init` 生成。
 - model：`init.model` → kimi `--model <model>`、gemini `--model <model>`。
 - resume：`init.resume` 时用 `init.cli_session_id`（fallback `resume_session_id` / `session_id`），kimi 对应 `--session <id>`。
 - 初始 prompt：只有支持「交互模式 + 命令行传入初始 prompt」的 CLI 才能在 `CLI_SPECS` 里设 `passes_initial_prompt_via_args: true`（gemini `-i`、opencode）。kimi 的 `-p` 是一次性非交互模式，**不能**算——它的初始 prompt 由 worker 经 `write_input` 在 TUI 里输入。
@@ -95,7 +95,7 @@ pub mod mynewcli;
 - 用 `crate::adapter::test_support`：`test_init(cli_id)` 构造 25 字段 `InitConfig`（需要覆盖字段时用结构体更新语法 `..test_init("...")`）；`temp_home` + `set_home`（`HomeGuard`）+ `home_test_lock` 串行化对 HOME 的依赖。**不要**再在测试里自定义这四件套。
 - 写一个 `RecordingBackend` mock `SessionBackend`：`send_enter` 时把缓冲的输入写进假 transcript，模拟 CLI 记录用户输入。
 - 至少覆盖：
-  - spawn 参数：默认 bypass flag、`disable_cli_bypass`、model、resume。
+  - spawn 参数：`cliArgs` 原样透传、不暗挂静态 flag；动态项覆盖 model / resume / session-id。
   - `poll` 产出 final output + 同文去重；中间步骤文本不产出。
   - 文件截断后能恢复并重新产出。
   - `write_input` 确认提交 / 未确认返回失败两条路径。

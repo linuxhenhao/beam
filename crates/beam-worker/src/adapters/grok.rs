@@ -67,10 +67,6 @@ pub fn create(init: &InitConfig) -> Box<dyn Adapter> {
 impl Adapter for GrokState {
     fn build_spawn_spec(&self, init: &InitConfig) -> SpawnSpec {
         let mut args = Vec::new();
-        if !init.disable_cli_bypass {
-            args.push("--always-approve".to_string());
-        }
-        args.push("--no-alt-screen".to_string());
         if let Some(model) = &init.model
             && !model.is_empty()
         {

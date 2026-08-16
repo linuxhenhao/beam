@@ -28,7 +28,7 @@ You must answer three questions:
 
 ### 1.2 Spawn arguments
 
-- Auto-approve flag: kimi `--yolo`, claude `--dangerously-skip-permissions`, codex `--dangerously-bypass-approvals-and-sandbox`. Uniformly gated by `init.disable_cli_bypass` (omit the flag when true).
+- Static launch flags (auto-approve, `--no-alt-screen`, disallowed-tools, and similar) belong only in `CLI_SPECS.default_cli_args` and are written to `bots.json` `cliArgs` by setup. Adapters must not inject those flags; an empty `cliArgs` means the CLI starts with no static flags. Session-scoped args (`--session-id` / `--resume` / `--model` / initial prompt) are still generated from `init`.
 - Model: `init.model` → kimi `--model <model>`, gemini `--model <model>`.
 - Resume: when `init.resume` is set, use `init.cli_session_id` (falling back to `resume_session_id` / `session_id`); kimi maps to `--session <id>`.
 - Initial prompt: only CLIs that support "interactive mode with an initial prompt passed via argv" may set `passes_initial_prompt_via_args: true` in `CLI_SPECS` (gemini `-i`, opencode). kimi's `-p` is a one-shot non-interactive mode and does **not** qualify — its initial prompt is typed into the TUI by the worker via `write_input`.
@@ -96,7 +96,7 @@ pub mod mynewcli;
 - Use `crate::adapter::test_support`: `test_init(cli_id)` builds the 25-field `InitConfig` (override fields with struct-update syntax, `..test_init("...")`); `temp_home` + `set_home` (`HomeGuard`) + `home_test_lock` serialize HOME-dependent tests. **Do not** re-declare these four per adapter.
 - Write a `RecordingBackend` mocking `SessionBackend`: on `send_enter`, flush the buffered input into the fake transcript to simulate the CLI recording user input.
 - Cover at least:
-  - Spawn args: default bypass flag, `disable_cli_bypass`, model, resume.
+  - Spawn args: pass `cliArgs` through unchanged (no implicit static flags); cover dynamic model / resume / session-id.
   - `poll` emitting the final output + same-text dedup; intermediate-step text not emitted.
   - Recovery after file truncation (re-emit works).
   - `write_input` submit-confirmed and not-confirmed paths.

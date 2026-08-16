@@ -40,9 +40,6 @@ pub fn create(init: &InitConfig) -> Box<dyn Adapter> {
 impl Adapter for AntigravityState {
     fn build_spawn_spec(&self, init: &InitConfig) -> SpawnSpec {
         let mut args = Vec::new();
-        if !init.disable_cli_bypass {
-            args.push("--dangerously-skip-permissions".to_string());
-        }
         if let Some(rsid) = &init.resume_session_id {
             args.push("--conversation".to_string());
             args.push(rsid.clone());
