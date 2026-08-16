@@ -72,6 +72,19 @@ pub(crate) fn parse_cli_args_input(input: &str, defaults: &[String]) -> Vec<Stri
         .collect()
 }
 
+pub(crate) fn setup_prompts_cgroup_slice() -> bool {
+    cfg!(target_os = "linux")
+}
+
+pub(crate) fn parse_cgroup_slice_input(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || matches!(trimmed.to_ascii_lowercase().as_str(), "clear" | "none") {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 pub(crate) fn detect_installed_clis() -> Vec<&'static beam_core::cli_specs::CliSpec> {
     CLI_SPECS
         .iter()
@@ -179,6 +192,13 @@ pub(crate) async fn prompt_setup_bot() -> Result<BotConfig> {
         default_cli_args_display
     ))?;
     let cli_args = parse_cli_args_input(&cli_args_input, &default_cli_args);
+    let cgroup_slice = if setup_prompts_cgroup_slice() {
+        let value =
+            ask_line("cgroup slice cgroupSlice [空]（回车跳过，例如 cgtproxy-gateway.slice）: ")?;
+        parse_cgroup_slice_input(&value)
+    } else {
+        None
+    };
     let cli_bin = probe_cli_bin(&cli_id).filter(|bin| bin != &cli_id);
     let working_dir = {
         let value = ask_line("默认工作目录 [~]: ")?;
@@ -219,6 +239,7 @@ pub(crate) async fn prompt_setup_bot() -> Result<BotConfig> {
         lark_app_secret: credentials.app_secret,
         cli_id,
         cli_bin,
+        cgroup_slice,
         cli_args,
         model: None,
         working_dir,

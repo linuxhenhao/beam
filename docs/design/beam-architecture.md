@@ -81,7 +81,7 @@ Config
 │   └── screen_analyzer
 ├── BotConfig         # 每个机器人的配置
 │   ├── lark_app_id / lark_app_secret
-│   ├── cli_id / cli_bin / cli_args
+│   ├── cli_id / cli_bin / cli_args / cgroup_slice
 │   ├── backend_type
 │   ├── allowed_users / allowed_chat_groups
 │   └── chat_grants / global_grants
@@ -102,7 +102,7 @@ Session
 ├── scope: Thread | Chat
 ├── status: Active | Closed
 ├── lark_app_id / owner_open_id
-├── cli_id / cli_bin / cli_args
+├── cli_id / cli_bin / cli_args / cgroup_slice
 ├── backend_type
 ├── display_mode: Hidden | Screenshot
 ├── stream_card_id / stream_card_nonce   ← 飞书流式卡片
@@ -121,7 +121,7 @@ Session
 ```
 InitConfig              # 启动 Worker 时的初始化参数
 ├── session_id / title / chat_id / root_message_id
-├── working_dir / cli_id / cli_bin / cli_args
+├── working_dir / cli_id / cli_bin / cli_args / cgroup_slice
 ├── backend_type / prompt / initial_prompt
 ├── lark_app_id / lark_app_secret
 ├── model / locale

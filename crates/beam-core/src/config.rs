@@ -75,6 +75,13 @@ pub struct BotConfig {
     pub cli_bin: Option<String>,
     #[serde(rename = "cliArgs", default)]
     pub cli_args: Vec<String>,
+    /// Linux-only user systemd slice for the CLI process. Empty/omitted is unset.
+    #[serde(
+        rename = "cgroupSlice",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cgroup_slice: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(rename = "workingDir", default)]
@@ -228,7 +235,32 @@ mod tests {
         }"#;
         let bot: BotConfig = serde_json::from_str(raw).expect("deserialize bot");
         assert!(bot.cli_args.is_empty());
+        assert!(bot.cgroup_slice.is_none());
         assert!(!bot.skip_working_dir_prompt);
+    }
+
+    #[test]
+    fn bot_config_deserializes_cgroup_slice() {
+        let raw = r#"{
+            "larkAppId":"app-1",
+            "larkAppSecret":"secret",
+            "cliId":"grok",
+            "cgroupSlice":"cgtproxy-gateway.slice"
+        }"#;
+        let bot: BotConfig = serde_json::from_str(raw).expect("deserialize bot");
+        assert_eq!(bot.cgroup_slice.as_deref(), Some("cgtproxy-gateway.slice"));
+    }
+
+    #[test]
+    fn bot_config_ignores_legacy_cli_prefix_field() {
+        let raw = r#"{
+            "larkAppId":"app-1",
+            "larkAppSecret":"secret",
+            "cliId":"grok",
+            "cliPrefix":["systemd-run","--user"]
+        }"#;
+        let bot: BotConfig = serde_json::from_str(raw).expect("deserialize bot");
+        assert!(bot.cgroup_slice.is_none());
     }
 
     #[test]

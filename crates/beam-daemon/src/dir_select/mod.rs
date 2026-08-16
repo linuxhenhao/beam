@@ -109,6 +109,8 @@ pub struct PendingCreateSession {
     // Bot info for session creation
     pub cli_id: String,
     pub cli_bin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroup_slice: Option<String>,
     #[serde(default)]
     pub cli_args: Vec<String>,
     pub root_working_dir: String,

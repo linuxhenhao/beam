@@ -25,55 +25,6 @@ pub(crate) fn maybe_inject_term(
     }
 }
 
-/// Whether to generate the env-injecting wrapper script for the CLI spawn.
-///
-/// The wrapper pins `BEAM_SESSION_ID` / `BEAM_HOME` / `BEAM_BIN` for the CLI
-/// process. Without it the CLI inherits whatever ambient env the daemon (and
-/// in turn the worker and zellij server) was started with — which may carry a
-/// *different* session's `BEAM_SESSION_ID` (e.g. when the daemon was started
-/// from inside another session via `beam restart`), misrouting `beam send`
-/// deliveries to that session's (possibly closed) topic.
-///
-/// Adopted sessions attach to an already-running external CLI, so there is no
-/// spawn to wrap. Every other session — including resumed ones — must get the
-/// wrapper.
-pub(crate) fn should_prepare_wrapper(init: &InitConfig) -> bool {
-    init.adopted_from.is_none()
-}
-
-pub(crate) async fn prepare_wrapper(
-    init: &InitConfig,
-    paths: &BeamPaths,
-) -> Result<std::path::PathBuf> {
-    tokio::fs::create_dir_all(paths.run_dir()).await?;
-    let wrapper = paths.worker_wrapper_sh(&init.session_id);
-    let exe_path = std::env::current_exe()
-        .ok()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "beam".to_string());
-    let content = format!(
-        "#!/bin/sh\ncd {cwd}\nexport BEAM_SESSION_ID={sid}\nexport BEAM_HOME={home}\nexport BEAM_BIN={exe}\nif [ -n \"$PATH\" ]; then\n  export PATH={bindir}:$PATH\nelse\n  export PATH={bindir}\nfi\nexec \"$@\"\n",
-        cwd = shell_quote(&init.working_dir),
-        sid = shell_quote(&init.session_id),
-        home = shell_quote(&paths.root().display().to_string()),
-        exe = shell_quote(&exe_path),
-        bindir = shell_quote(
-            &std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|v| v.display().to_string()))
-                .unwrap_or_default()
-        ),
-    );
-    tokio::fs::write(&wrapper, content).await?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o755);
-        tokio::fs::set_permissions(&wrapper, perms).await?;
-    }
-    Ok(wrapper)
-}
-
 pub(crate) async fn send_message(
     stdout: &Arc<Mutex<tokio::io::Stdout>>,
     msg: &WorkerToDaemon,
@@ -91,11 +42,6 @@ pub async fn run(init: InitConfig) -> Result<()> {
     let session_name = format!("beam-{}", &init.session_id[..8.min(init.session_id.len())]);
     let paths = BeamPaths::discover()?;
     let adapter = Arc::new(Mutex::new(CliAdapter::from_init(&init)?));
-    let wrapper = if should_prepare_wrapper(&init) {
-        Some(prepare_wrapper(&init, &paths).await?)
-    } else {
-        None
-    };
     let (backend_impl, attach_context): (Box<dyn SessionBackend>, &'static str) =
         if let Some(adopted) = init.adopted_from.as_ref() {
             if let Some(pane_id) = adopted.zellij_pane_id.clone() {
@@ -117,24 +63,46 @@ pub async fn run(init: InitConfig) -> Result<()> {
             (Box::new(zellij), "spawn")
         };
     let spawn_spec = adapter.lock().await.build_spawn_spec(&init);
-    let args = if let Some(wrapper) = wrapper {
-        let mut args = Vec::with_capacity(2 + init.cli_args.len());
-        args.push(wrapper.display().to_string());
-        args.push(spawn_spec.bin.clone());
-        args.extend(spawn_spec.args.clone());
-        ("/bin/sh".to_string(), args)
-    } else {
+    let extra_env = maybe_inject_term(&init.cli_id, std::env::var("TERM").ok().as_deref())
+        .into_iter()
+        .collect();
+    let exe_path = std::env::current_exe()
+        .ok()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "beam".to_string());
+    let bindir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|v| v.display().to_string()))
+        .unwrap_or_default();
+    let args = if init.adopted_from.is_some() {
         (spawn_spec.bin, spawn_spec.args)
+    } else {
+        if super::launch::normalize_cgroup_slice(init.cgroup_slice.as_deref()).is_some()
+            && super::launch::current_launch_platform() == super::launch::LaunchPlatform::Linux
+            && !super::launch::systemd_run_available()
+        {
+            anyhow::bail!(
+                "cgroupSlice requires systemd-run on Linux (user systemd); install systemd or unset cgroupSlice"
+            );
+        }
+        super::launch::build_launch_spec(
+            super::launch::current_launch_platform(),
+            super::launch::LaunchInput {
+                cgroup_slice: init.cgroup_slice.clone(),
+                session_id: init.session_id.clone(),
+                beam_home: paths.root().display().to_string(),
+                beam_bin: exe_path,
+                path_prepend: bindir,
+                extra_env,
+                spec: spawn_spec,
+            },
+        )?
     };
-    let mut env = Vec::new();
-    if let Some((k, v)) = maybe_inject_term(&init.cli_id, std::env::var("TERM").ok().as_deref()) {
-        env.push((k, v));
-    }
     let spawn_opts = SpawnOpts {
         cwd: init.working_dir.clone(),
         cols: DEFAULT_TERMINAL_COLS,
         rows: DEFAULT_TERMINAL_ROWS,
-        env,
+        env: Vec::new(),
     };
     backend_impl
         .spawn(&args.0, &args.1, spawn_opts)
@@ -921,19 +889,6 @@ fn daemon_message_desc(msg: &DaemonToWorker) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::test_support::test_init;
-
-    /// Regression: resumed sessions must still get the env-injecting wrapper.
-    /// Otherwise the CLI inherits the daemon's ambient `BEAM_SESSION_ID`
-    /// (which may belong to a different, possibly closed session) and
-    /// `beam send` deliveries are misrouted to that session's topic.
-    #[test]
-    fn should_prepare_wrapper_covers_new_and_resumed_sessions() {
-        let mut init = test_init("kimi");
-        assert!(should_prepare_wrapper(&init));
-        init.resume = true;
-        assert!(should_prepare_wrapper(&init));
-    }
 
     #[test]
     fn daemon_message_desc_labels_variants_without_content() {
@@ -950,22 +905,5 @@ mod tests {
             daemon_message_desc(&DaemonToWorker::RefreshScreen),
             "RefreshScreen"
         );
-    }
-
-    #[test]
-    fn should_prepare_wrapper_skips_adopted_sessions() {
-        let mut init = test_init("kimi");
-        init.adopted_from = Some(beam_core::AdoptedFrom {
-            tmux_target: None,
-            zellij_session: Some("ext".to_string()),
-            zellij_pane_id: Some("terminal_0".to_string()),
-            original_cli_pid: 1234,
-            session_id: None,
-            cli_id: Some("kimi".to_string()),
-            cwd: "/tmp".to_string(),
-            pane_cols: None,
-            pane_rows: None,
-        });
-        assert!(!should_prepare_wrapper(&init));
     }
 }

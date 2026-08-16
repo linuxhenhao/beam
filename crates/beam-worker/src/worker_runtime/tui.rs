@@ -16,42 +16,6 @@ pub(crate) fn term_action_keys(key: TermActionKey) -> Vec<String> {
     }
 }
 
-pub(crate) fn shell_quote(input: &str) -> String {
-    if input.is_empty() {
-        return "''".to_string();
-    }
-    if !input.bytes().any(|b| {
-        matches!(
-            b,
-            b' ' | b'\t'
-                | b'\n'
-                | b'\''
-                | b'"'
-                | b'\\'
-                | b'$'
-                | b'`'
-                | b'!'
-                | b'&'
-                | b'|'
-                | b';'
-                | b'<'
-                | b'>'
-                | b'('
-                | b')'
-                | b'['
-                | b']'
-                | b'{'
-                | b'}'
-                | b'*'
-                | b'?'
-                | b'#'
-        )
-    }) {
-        return input.to_string();
-    }
-    format!("'{}'", input.replace('\'', "'\"'\"'"))
-}
-
 pub(crate) async fn handle_tui_keys(
     backend: &Arc<dyn SessionBackend>,
     analyzer_runtime: &Arc<RwLock<AnalyzerRuntime>>,

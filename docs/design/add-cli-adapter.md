@@ -92,7 +92,7 @@ pub mod mynewcli;
 
 ### 3.1 单元测试（`adapters/<name>.rs` 的 `#[cfg(test)]`）
 
-- 用 `crate::adapter::test_support`：`test_init(cli_id)` 构造 24 字段 `InitConfig`（需要覆盖字段时用结构体更新语法 `..test_init("...")`）；`temp_home` + `set_home`（`HomeGuard`）+ `home_test_lock` 串行化对 HOME 的依赖。**不要**再在测试里自定义这四件套。
+- 用 `crate::adapter::test_support`：`test_init(cli_id)` 构造 25 字段 `InitConfig`（需要覆盖字段时用结构体更新语法 `..test_init("...")`）；`temp_home` + `set_home`（`HomeGuard`）+ `home_test_lock` 串行化对 HOME 的依赖。**不要**再在测试里自定义这四件套。
 - 写一个 `RecordingBackend` mock `SessionBackend`：`send_enter` 时把缓冲的输入写进假 transcript，模拟 CLI 记录用户输入。
 - 至少覆盖：
   - spawn 参数：默认 bypass flag、`disable_cli_bypass`、model、resume。

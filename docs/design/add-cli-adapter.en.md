@@ -93,7 +93,7 @@ pub mod mynewcli;
 
 ### 3.1 Unit tests (`#[cfg(test)]` inside `adapters/<name>.rs`)
 
-- Use `crate::adapter::test_support`: `test_init(cli_id)` builds the 24-field `InitConfig` (override fields with struct-update syntax, `..test_init("...")`); `temp_home` + `set_home` (`HomeGuard`) + `home_test_lock` serialize HOME-dependent tests. **Do not** re-declare these four per adapter.
+- Use `crate::adapter::test_support`: `test_init(cli_id)` builds the 25-field `InitConfig` (override fields with struct-update syntax, `..test_init("...")`); `temp_home` + `set_home` (`HomeGuard`) + `home_test_lock` serialize HOME-dependent tests. **Do not** re-declare these four per adapter.
 - Write a `RecordingBackend` mocking `SessionBackend`: on `send_enter`, flush the buffered input into the fake transcript to simulate the CLI recording user input.
 - Cover at least:
   - Spawn args: default bypass flag, `disable_cli_bypass`, model, resume.

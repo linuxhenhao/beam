@@ -165,11 +165,6 @@ impl BeamPaths {
             .join(format!("worker-init-{}.json", session_id))
     }
 
-    pub fn worker_wrapper_sh(&self, session_id: &str) -> PathBuf {
-        self.run_dir()
-            .join(format!("worker-wrapper-{}.sh", session_id))
-    }
-
     pub fn cli_pid_markers_dir(&self) -> PathBuf {
         self.state_dir().join(".beam-cli-pids")
     }

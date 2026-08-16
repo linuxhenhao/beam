@@ -393,6 +393,7 @@ pub(crate) mod test_support {
             working_dir: "/tmp".to_string(),
             cli_id: cli_id.to_string(),
             cli_bin: cli_id.to_string(),
+            cgroup_slice: None,
             cli_args: vec![],
             prompt: String::new(),
             resume: false,

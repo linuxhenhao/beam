@@ -53,6 +53,7 @@ pub(crate) async fn execute_schedule_task(
         lark_app_id: lark_app_id.to_string(),
         cli_id: Some(bot.cli_id.clone()),
         cli_bin: bot.cli_bin.clone(),
+        cgroup_slice: bot.cgroup_slice.clone(),
         owner_open_id: Some(String::new()),
         quote_target_sender_open_id: None,
         bot_name: None,
@@ -884,6 +885,13 @@ pub(crate) fn build_init_from_session(
             .context("session missing working_dir")?,
         cli_id: session.cli_id.clone().context("session missing cli_id")?,
         cli_bin: session.cli_bin.clone().context("session missing cli_bin")?,
+        // cgroup slice is host config: prefer the live bot so a bots.json
+        // edit applies on restart. Fall back to the session copy when the
+        // bot is gone (e.g. local/API sessions).
+        cgroup_slice: bots
+            .get(&session.lark_app_id)
+            .map(|b| b.cgroup_slice.clone())
+            .unwrap_or_else(|| session.cgroup_slice.clone()),
         cli_args: session.cli_args.clone(),
         prompt: String::new(),
         resume: true,

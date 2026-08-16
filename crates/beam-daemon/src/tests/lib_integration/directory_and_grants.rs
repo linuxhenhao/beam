@@ -364,6 +364,7 @@ async fn inbound_quota_consumes_and_exhausts() {
         lark_app_secret: "secret".to_string(),
         cli_id: "codex".to_string(),
         cli_bin: None,
+        cgroup_slice: None,
         cli_args: Vec::new(),
         skip_working_dir_prompt: false,
         model: None,
