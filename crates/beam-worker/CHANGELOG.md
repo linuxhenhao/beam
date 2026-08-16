@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.9.0...beam-worker-v0.10.0) - 2026-08-16
+
+### Added
+
+- *(beam-worker)* 用 env 与 cgroupSlice 替换 wrapper 启动
+
+### Fixed
+
+- *(beam-worker)* 收拢 live launch 测试中的嵌套 if
+
+### Other
+
+- *(main)* 合入 grok adapter，保留 cgroupSlice 启动模块
+
 ## [0.9.0](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.8.0...beam-worker-v0.9.0) - 2026-08-08
 
 ### Other
