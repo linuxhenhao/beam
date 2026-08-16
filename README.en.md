@@ -39,7 +39,7 @@ flowchart LR
     D --> S[Session router and state]
     S --> W[beam-worker<br/>one process per session]
     W --> B[tmux / zellij / pty backend]
-    B --> C[Local AI coding CLI<br/>claude codex opencode gemini kimi ...]
+    B --> C[Local AI coding CLI<br/>claude codex opencode gemini kimi grok ...]
     W --> K[Streaming card updates]
     W --> P[Web terminal]
     C --> O[Transcript and terminal output]
@@ -126,7 +126,7 @@ beam autostart enable
 
 **Prerequisites:**
 - Rust toolchain
-- AI coding CLI installed (`opencode`, `claude`, `codex`, `gemini`, `kimi`, etc. on PATH)
+- AI coding CLI installed (`opencode`, `claude`, `codex`, `gemini`, `kimi`, `grok`, etc. on PATH)
 - `tmux` or `zellij` if you want persistent sessions
 
 ## Common Commands
