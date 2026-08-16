@@ -57,9 +57,6 @@ pub fn create(init: &InitConfig) -> Box<dyn Adapter> {
 impl Adapter for GeminiState {
     fn build_spawn_spec(&self, init: &InitConfig) -> SpawnSpec {
         let mut args = Vec::new();
-        if !init.disable_cli_bypass {
-            args.push("--yolo".to_string());
-        }
         if let Some(model) = &init.model
             && !model.is_empty()
         {

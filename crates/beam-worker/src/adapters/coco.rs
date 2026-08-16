@@ -51,19 +51,12 @@ impl Adapter for CoCoState {
             args.push("--session-id".to_string());
             args.push(init.session_id.clone());
         }
-        if !init.disable_cli_bypass {
-            args.push("--yolo".to_string());
-        }
         if let Some(model) = &init.model
             && !model.is_empty()
         {
             args.push("--config".to_string());
             args.push(format!("model.name={}", model));
         }
-        args.push("--disallowed-tool".to_string());
-        args.push("EnterPlanMode".to_string());
-        args.push("--disallowed-tool".to_string());
-        args.push("ExitPlanMode".to_string());
         args.extend(init.cli_args.clone());
         SpawnSpec {
             bin: init.cli_bin.clone(),

@@ -85,19 +85,6 @@ impl Adapter for ClaudeState {
             args.push("--session-id".to_string());
             args.push(init.session_id.clone());
         }
-        if !init.disable_cli_bypass {
-            args.push("--dangerously-skip-permissions".to_string());
-        }
-        args.push("--settings".to_string());
-        args.push(
-            serde_json::json!({
-                "skipDangerousModePermissionPrompt": true,
-                "permissions": { "defaultMode": "bypassPermissions" },
-            })
-            .to_string(),
-        );
-        args.push("--disallowed-tools".to_string());
-        args.push("EnterPlanMode,ExitPlanMode".to_string());
         args.extend(init.cli_args.clone());
         SpawnSpec {
             bin: init.cli_bin.clone(),

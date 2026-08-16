@@ -92,11 +92,6 @@ impl Adapter for HermesState {
                     .unwrap_or_else(|| init.session_id.clone()),
             );
         }
-        if !init.disable_cli_bypass {
-            args.push("--yolo".to_string());
-            args.push("--accept-hooks".to_string());
-        }
-        args.push("--pass-session-id".to_string());
         args.extend(init.cli_args.clone());
         SpawnSpec {
             bin: init.cli_bin.clone(),

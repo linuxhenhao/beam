@@ -49,9 +49,6 @@ impl Adapter for KimiState {
                     .unwrap_or_else(|| init.session_id.clone()),
             );
         }
-        if !init.disable_cli_bypass {
-            args.push("--yolo".to_string());
-        }
         if let Some(model) = &init.model
             && !model.is_empty()
         {
@@ -538,29 +535,39 @@ mod tests {
     }
 
     #[test]
-    fn build_spawn_spec_defaults_to_yolo() {
+    fn build_spawn_spec_does_not_inject_yolo() {
         let init = init_for("/tmp");
         let spec = KimiState::default().build_spawn_spec(&init);
         assert_eq!(spec.bin, "kimi");
-        assert!(spec.args.iter().any(|arg| arg == "--yolo"));
+        assert!(!spec.args.iter().any(|arg| arg == "--yolo"));
         assert!(!spec.args.iter().any(|arg| arg == "--session"));
     }
 
     #[test]
-    fn build_spawn_spec_respects_disable_bypass_model_and_resume() {
+    fn build_spawn_spec_passes_cli_args_through() {
+        let init = InitConfig {
+            cli_args: vec!["--yolo".to_string()],
+            ..init_for("/tmp")
+        };
+        let spec = KimiState::default().build_spawn_spec(&init);
+        assert_eq!(spec.args, vec!["--yolo"]);
+    }
+
+    #[test]
+    fn build_spawn_spec_respects_model_and_resume() {
         let init = InitConfig {
             resume: true,
             cli_session_id: Some("session_abc".to_string()),
             model: Some("kimi-code/k3".to_string()),
-            disable_cli_bypass: true,
+            cli_args: vec!["--yolo".to_string()],
             ..init_for("/tmp")
         };
         let spec = KimiState::default().build_spawn_spec(&init);
-        assert!(!spec.args.iter().any(|arg| arg == "--yolo"));
         let session_pos = spec.args.iter().position(|arg| arg == "--session").unwrap();
         assert_eq!(spec.args[session_pos + 1], "session_abc");
         let model_pos = spec.args.iter().position(|arg| arg == "--model").unwrap();
         assert_eq!(spec.args[model_pos + 1], "kimi-code/k3");
+        assert!(spec.args.iter().any(|arg| arg == "--yolo"));
     }
 
     #[test]
@@ -832,7 +839,7 @@ mod tests {
         };
         let mut state = state_from_init(&init);
         let spec = state.build_spawn_spec(&init);
-        assert!(spec.args.iter().any(|arg| arg == "--yolo"));
+        assert!(!spec.args.iter().any(|arg| arg == "--yolo"));
 
         let backend = crate::backend::ZellijBackend::new(zellij_session);
         backend

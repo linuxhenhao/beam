@@ -43,7 +43,13 @@ pub const CLI_SPECS: &[CliSpec] = &[
         cli_id: "claude-code",
         label: "Claude",
         bin_candidates: &["claude"],
-        default_cli_args: &[],
+        default_cli_args: &[
+            "--dangerously-skip-permissions",
+            "--settings",
+            r#"{"skipDangerousModePermissionPrompt":true,"permissions":{"defaultMode":"bypassPermissions"}}"#,
+            "--disallowed-tools",
+            "EnterPlanMode,ExitPlanMode",
+        ],
         adopt_command_patterns: &["claude"],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
@@ -79,7 +85,13 @@ pub const CLI_SPECS: &[CliSpec] = &[
         cli_id: "coco",
         label: "CoCo",
         bin_candidates: &["coco"],
-        default_cli_args: &[],
+        default_cli_args: &[
+            "--yolo",
+            "--disallowed-tool",
+            "EnterPlanMode",
+            "--disallowed-tool",
+            "ExitPlanMode",
+        ],
         adopt_command_patterns: &[],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
@@ -90,7 +102,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         cli_id: "gemini",
         label: "Gemini",
         bin_candidates: &["gemini"],
-        default_cli_args: &[],
+        default_cli_args: &["--yolo"],
         adopt_command_patterns: &["gemini"],
         supports_resume: false,
         passes_initial_prompt_via_args: true,
@@ -112,7 +124,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         cli_id: "hermes",
         label: "Hermes",
         bin_candidates: &["hermes"],
-        default_cli_args: &[],
+        default_cli_args: &["--yolo", "--accept-hooks", "--pass-session-id"],
         adopt_command_patterns: &["hermes"],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
@@ -123,7 +135,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         cli_id: "antigravity",
         label: "Antigravity",
         bin_candidates: &["agy"],
-        default_cli_args: &[],
+        default_cli_args: &["--dangerously-skip-permissions"],
         adopt_command_patterns: &[],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
@@ -134,7 +146,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         cli_id: "kimi",
         label: "Kimi",
         bin_candidates: &["kimi"],
-        default_cli_args: &[],
+        default_cli_args: &["--yolo"],
         adopt_command_patterns: &["kimi"],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
@@ -145,7 +157,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         cli_id: "grok",
         label: "Grok Build",
         bin_candidates: &["grok"],
-        default_cli_args: &[],
+        default_cli_args: &["--always-approve", "--no-alt-screen"],
         adopt_command_patterns: &["grok"],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
@@ -258,6 +270,16 @@ mod tests {
     #[test]
     fn default_args_match_legacy_values() {
         assert_eq!(
+            cli_spec("claude-code").unwrap().default_cli_args,
+            &[
+                "--dangerously-skip-permissions",
+                "--settings",
+                r#"{"skipDangerousModePermissionPrompt":true,"permissions":{"defaultMode":"bypassPermissions"}}"#,
+                "--disallowed-tools",
+                "EnterPlanMode,ExitPlanMode",
+            ]
+        );
+        assert_eq!(
             cli_spec("codex").unwrap().default_cli_args,
             &[
                 "--dangerously-bypass-approvals-and-sandbox",
@@ -265,15 +287,31 @@ mod tests {
             ]
         );
         assert_eq!(cli_spec("traex").unwrap().default_cli_args, &["-y"]);
-        for spec in CLI_SPECS {
-            if spec.cli_id != "codex" && spec.cli_id != "traex" {
-                assert!(
-                    spec.default_cli_args.is_empty(),
-                    "{}: unexpected default args",
-                    spec.cli_id
-                );
-            }
-        }
+        assert_eq!(
+            cli_spec("coco").unwrap().default_cli_args,
+            &[
+                "--yolo",
+                "--disallowed-tool",
+                "EnterPlanMode",
+                "--disallowed-tool",
+                "ExitPlanMode",
+            ]
+        );
+        assert_eq!(cli_spec("gemini").unwrap().default_cli_args, &["--yolo"]);
+        assert!(cli_spec("opencode").unwrap().default_cli_args.is_empty());
+        assert_eq!(
+            cli_spec("hermes").unwrap().default_cli_args,
+            &["--yolo", "--accept-hooks", "--pass-session-id"]
+        );
+        assert_eq!(
+            cli_spec("antigravity").unwrap().default_cli_args,
+            &["--dangerously-skip-permissions"]
+        );
+        assert_eq!(cli_spec("kimi").unwrap().default_cli_args, &["--yolo"]);
+        assert_eq!(
+            cli_spec("grok").unwrap().default_cli_args,
+            &["--always-approve", "--no-alt-screen"]
+        );
     }
 
     #[test]

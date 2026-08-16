@@ -119,6 +119,21 @@ fn setup_defaults_traex_cli_args() {
             "--no-alt-screen".to_string(),
         ]
     );
+    assert_eq!(
+        default_cli_args_for_cli_id("grok"),
+        vec![
+            "--always-approve".to_string(),
+            "--no-alt-screen".to_string(),
+        ]
+    );
+    assert_eq!(
+        default_cli_args_for_cli_id("kimi"),
+        vec!["--yolo".to_string()]
+    );
+    assert_eq!(
+        default_cli_args_for_cli_id("gemini"),
+        vec!["--yolo".to_string()]
+    );
 }
 
 #[test]
