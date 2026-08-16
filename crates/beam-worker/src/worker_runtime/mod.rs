@@ -30,6 +30,9 @@ pub(crate) use crate::backend::{SessionBackend, SpawnOpts, ZellijBackend, Zellij
 mod analyzer;
 mod coordinator;
 mod coordinator_runtime;
+mod launch;
+#[cfg(test)]
+mod launch_live;
 mod run_loop;
 mod screenshot;
 mod tui;

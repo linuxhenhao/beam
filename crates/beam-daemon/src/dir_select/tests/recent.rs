@@ -72,6 +72,7 @@ fn test_prune_expired_pending_creates_removes_expired() {
             created_at: created_at_ms,
             cli_id: "codex".to_string(),
             cli_bin: "codex".to_string(),
+            cgroup_slice: None,
             cli_args: Vec::new(),
             root_working_dir: "/tmp".to_string(),
             candidate_dirs: vec![".".to_string()],

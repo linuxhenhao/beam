@@ -11,6 +11,7 @@ pub(crate) struct SessionCreateSpec {
     pub(crate) working_dir: String,
     pub(crate) cli_id: String,
     pub(crate) cli_bin: String,
+    pub(crate) cgroup_slice: Option<String>,
     pub(crate) cli_args: Vec<String>,
     pub(crate) prompt: String,
     pub(crate) lark_app_id: String,
@@ -51,6 +52,7 @@ pub(crate) fn build_session_create_spec_from_bot(
         working_dir,
         cli_id: bot.cli_id.clone(),
         cli_bin: bot.cli_bin.clone().unwrap_or_else(|| bot.cli_id.clone()),
+        cgroup_slice: bot.cgroup_slice.clone(),
         cli_args: bot.cli_args.clone(),
         prompt,
         lark_app_id,
@@ -88,6 +90,7 @@ pub(crate) fn build_session_create_spec_from_pending(
         working_dir,
         cli_id: pending.cli_id.clone(),
         cli_bin: pending.cli_bin.clone(),
+        cgroup_slice: pending.cgroup_slice.clone(),
         cli_args: pending.cli_args.clone(),
         prompt,
         lark_app_id,
@@ -143,6 +146,7 @@ pub(crate) fn build_direct_create_session_spec_from_bot(
         working_dir,
         cli_id: bot.cli_id.clone(),
         cli_bin: bot.cli_bin.clone().unwrap_or_else(|| bot.cli_id.clone()),
+        cgroup_slice: bot.cgroup_slice.clone(),
         cli_args: bot.cli_args.clone(),
         prompt,
         lark_app_id,
@@ -186,6 +190,7 @@ pub(crate) async fn create_session_internal(
         worker_pid: None,
         cli_id: Some(spec.cli_id.clone()),
         cli_bin: Some(spec.cli_bin.clone()),
+        cgroup_slice: spec.cgroup_slice.clone(),
         cli_args: spec.cli_args.clone(),
         cli_session_id: None,
         last_cli_input: None,
@@ -234,6 +239,7 @@ pub(crate) async fn create_session_internal(
         working_dir: spec.working_dir,
         cli_id: spec.cli_id,
         cli_bin: spec.cli_bin,
+        cgroup_slice: spec.cgroup_slice,
         cli_args: spec.cli_args,
         prompt: spec.prompt.clone(),
         resume: false,
@@ -319,6 +325,7 @@ mod tests {
         let bot = BotConfig {
             cli_id: "traex".to_string(),
             cli_bin: Some("traex".to_string()),
+            cgroup_slice: Some("cgtproxy-gateway.slice".to_string()),
             cli_args: vec!["-y".to_string()],
             skip_working_dir_prompt: true,
             working_dir: Some("/bot/work".to_string()),
@@ -344,6 +351,7 @@ mod tests {
         );
         assert_eq!(spec.cli_id, "traex");
         assert_eq!(spec.cli_bin, "traex");
+        assert_eq!(spec.cgroup_slice.as_deref(), Some("cgtproxy-gateway.slice"));
         assert_eq!(spec.cli_args, vec!["-y".to_string()]);
         assert_eq!(spec.working_dir, "/bot/work");
     }
@@ -923,6 +931,7 @@ mod tests {
             working_dir: "/tmp/test-bot-identity".to_string(),
             cli_id: "codex".to_string(),
             cli_bin: "codex".to_string(),
+            cgroup_slice: None,
             cli_args: vec![],
             prompt: "hello".to_string(),
             lark_app_id: "app-bot-id-test".to_string(),

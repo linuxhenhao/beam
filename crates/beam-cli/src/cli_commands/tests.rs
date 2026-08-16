@@ -1,8 +1,9 @@
 use crate::cli_commands::{
     BotInfoEntry, active_sessions, bin_candidates_for_cli_id, build_send_request,
     default_cli_args_for_cli_id, discover_session_id_from_pid, format_bot_info_entries_for_cli,
-    format_duration, parse_cli_args_input, parse_mention, parse_migrate_flags,
-    resolve_allowed_users, setup_backup_file, validate_simulate_lark_message_args,
+    format_duration, parse_cgroup_slice_input, parse_cli_args_input, parse_mention,
+    parse_migrate_flags, resolve_allowed_users, setup_backup_file, setup_prompts_cgroup_slice,
+    validate_simulate_lark_message_args,
 };
 use crate::{Cli, Command, SendArgs, SessionCommand, SimulateCommand};
 use beam_core::{BeamPaths, SessionStatus, SessionSummary};
@@ -136,6 +137,23 @@ fn setup_cli_args_prompt_accepts_override_and_clear() {
     );
     assert!(parse_cli_args_input("clear", &defaults).is_empty());
     assert!(parse_cli_args_input("none", &defaults).is_empty());
+}
+
+#[test]
+fn setup_cgroup_slice_prompt_is_linux_only() {
+    assert_eq!(setup_prompts_cgroup_slice(), cfg!(target_os = "linux"));
+}
+
+#[test]
+fn setup_cgroup_slice_defaults_to_empty() {
+    assert_eq!(parse_cgroup_slice_input(""), None);
+    assert_eq!(parse_cgroup_slice_input("  "), None);
+    assert_eq!(parse_cgroup_slice_input("none"), None);
+    assert_eq!(parse_cgroup_slice_input("clear"), None);
+    assert_eq!(
+        parse_cgroup_slice_input("cgtproxy-gateway.slice"),
+        Some("cgtproxy-gateway.slice".to_string())
+    );
 }
 
 #[test]

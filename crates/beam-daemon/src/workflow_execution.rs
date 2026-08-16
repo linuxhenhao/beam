@@ -405,6 +405,7 @@ async fn run_workflow_subagent_session(
             working_dir: working_dir.clone(),
             cli_id: bot.cli_id.clone(),
             cli_bin: bot.cli_bin.clone().unwrap_or_else(|| bot.cli_id.clone()),
+            cgroup_slice: bot.cgroup_slice.clone(),
             cli_args: Vec::new(),
             prompt: with_workflow_output_protocol(&resolved_prompt),
             lark_app_id: "local".to_string(),

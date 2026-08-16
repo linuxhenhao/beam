@@ -108,6 +108,8 @@ pub struct Session {
     pub cli_id: Option<String>,
     #[serde(default)]
     pub cli_bin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroup_slice: Option<String>,
     #[serde(default)]
     pub cli_args: Vec<String>,
     #[serde(default)]
