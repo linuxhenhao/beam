@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.10.1...beam-worker-v0.10.2) - 2026-08-19
+
+### Added
+
+- *(worker)* 按输入框颜色确认 TUI 提交，截图保留 ANSI 着色
+
+### Fixed
+
+- *(worker)* 修正 CLI 探活误判，CliExit 不再关闭会话
+
 ## [0.10.1](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.10.0...beam-worker-v0.10.1) - 2026-08-16
 
 ### Added
