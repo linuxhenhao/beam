@@ -100,7 +100,7 @@ Session
 ├── chat_id / chat_type (p2p|group|topic)
 ├── root_message_id / quote_target_id
 ├── scope: Thread | Chat
-├── status: Active | Closed
+├── status: Active | Closed   ← 仅 /close 或卡片「关闭会话」进入 Closed
 ├── lark_app_id / owner_open_id
 ├── cli_id / cli_bin / cli_args / cgroup_slice
 ├── backend_type
@@ -143,7 +143,7 @@ WorkerToDaemon          # Worker → Daemon
 ├── ScreenshotUploaded { image_key, status, usage_limit }
 ├── PromptReady
 ├── FinalOutput { content, turn_id, kind, user_text }
-├── CliExit { code, signal }
+├── CliExit { code, signal }  ← 探测到 CLI/pane 消失；daemon 保持 Active，下一条消息再 attach
 ├── CliSessionId { cli_session_id }
 ├── AdoptPreamble { user_text, assistant_text }
 └── Error { message }

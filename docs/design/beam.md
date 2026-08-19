@@ -53,7 +53,8 @@ Rust 版应尽量保持与现有 beam 的会话语义一致：
 - CLI 运行在本机。
 - session 持久化落盘。
 - CLI 子进程可以调用本地 `beam send`。
-- 显式 `/close` 才销毁底层 tmux session；daemon/worker 退出只 detach。
+- 显式 `/close`（或卡片「关闭会话」）才把 beam session 标成 Closed，并销毁底层终端 session。
+- worker / daemon 退出、以及 worker 上报的 `CliExit`（探测到 CLI/pane 消失）只 detach：session 保持 Active，下一条消息 `ensure_worker` 再 attach。探测失败或一次假死不得关话题。
 
 ## 3. 非目标
 

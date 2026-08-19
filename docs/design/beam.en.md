@@ -37,6 +37,8 @@ A session binds:
 
 The daemon persists sessions so that cards and runtime state can be reconstructed after restart.
 
+Only an explicit `/close` (or the session-card close button) marks a session `Closed` and destroys the terminal backend. Worker/daemon exit and worker-reported `CliExit` (CLI/pane looked gone) only detach: the session stays `Active`, and the next inbound message respawns the worker and reattaches. A single failed liveness probe must not close the conversation.
+
 ## Worker Runtime
 
 For each active session, the daemon starts a worker. The worker:

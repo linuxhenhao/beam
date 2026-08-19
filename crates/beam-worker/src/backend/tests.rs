@@ -2,7 +2,7 @@ use super::subscribe::{
     is_zellij_pane_closed, numeric_pane_id, parse_zellij_cursor_from_list_panes,
     parse_zellij_subscribe_viewport, viewport_to_ansi_chunk,
 };
-use super::zellij::ZellijBackend;
+use super::zellij::{CliLiveness, PaneListView, ZellijBackend};
 use super::{SpawnOpts, ZELLIJ_PANE_DISCOVERY_MAX_ATTEMPTS, ZELLIJ_PANE_DISCOVERY_RETRY_INTERVAL};
 
 #[test]
@@ -51,6 +51,183 @@ fn parse_terminal_pane_id_returns_none_without_terminal_pane() {
     ]"#;
     assert_eq!(ZellijBackend::parse_terminal_pane_id(panes), None);
     assert_eq!(ZellijBackend::parse_terminal_pane_id(b"bad json"), None);
+}
+
+#[test]
+fn classify_pane_list_treats_empty_and_bad_json_as_unreadable() {
+    assert_eq!(
+        ZellijBackend::classify_pane_list(b""),
+        PaneListView::Unreadable
+    );
+    assert_eq!(
+        ZellijBackend::classify_pane_list(b"   \n"),
+        PaneListView::Unreadable
+    );
+    assert_eq!(
+        ZellijBackend::classify_pane_list(b"bad json"),
+        PaneListView::Unreadable
+    );
+    assert_eq!(
+        ZellijBackend::classify_pane_list(b"{}"),
+        PaneListView::Unreadable
+    );
+}
+
+#[test]
+fn classify_pane_list_distinguishes_terminal_from_plugin_only() {
+    let terminal = br#"[{"id":3,"is_plugin":false}]"#;
+    let plugins_only = br#"[{"id":0,"is_plugin":true}]"#;
+    let empty_array = b"[]";
+    assert_eq!(
+        ZellijBackend::classify_pane_list(terminal),
+        PaneListView::HasTerminal
+    );
+    assert_eq!(
+        ZellijBackend::classify_pane_list(plugins_only),
+        PaneListView::NoTerminal
+    );
+    assert_eq!(
+        ZellijBackend::classify_pane_list(empty_array),
+        PaneListView::NoTerminal
+    );
+}
+
+#[test]
+fn decide_cli_liveness_keeps_unknown_and_running_process_alive() {
+    assert_eq!(
+        ZellijBackend::decide_cli_liveness(None, None, false).0,
+        CliLiveness::Alive
+    );
+    assert_eq!(
+        ZellijBackend::decide_cli_liveness(Some(true), Some(PaneListView::Unreadable), false).0,
+        CliLiveness::Alive
+    );
+    assert_eq!(
+        ZellijBackend::decide_cli_liveness(Some(true), None, false).0,
+        CliLiveness::Alive
+    );
+    assert_eq!(
+        ZellijBackend::decide_cli_liveness(Some(true), Some(PaneListView::NoTerminal), true).0,
+        CliLiveness::Alive
+    );
+    assert_eq!(
+        ZellijBackend::decide_cli_liveness(Some(true), Some(PaneListView::HasTerminal), false).0,
+        CliLiveness::Alive
+    );
+}
+
+#[test]
+fn decide_cli_liveness_incident_empty_panes_with_process_stays_alive() {
+    // 6a77d306: zellij+grok still up, list-panes came back empty/unreadable.
+    assert_eq!(
+        ZellijBackend::decide_cli_liveness(Some(true), Some(PaneListView::Unreadable), true).0,
+        CliLiveness::Alive
+    );
+    assert_eq!(
+        ZellijBackend::classify_pane_list(b""),
+        PaneListView::Unreadable
+    );
+}
+
+#[test]
+fn parse_ps_pid_ppid_command_accepts_bsd_padded_columns() {
+    let line = "  4183935     501 /opt/homebrew/bin/zellij --server /var/folders/xx/T/zellij-501/beam-abc123";
+    let parsed = ZellijBackend::parse_ps_pid_ppid_command(line).expect("parse");
+    assert_eq!(parsed.0, 4183935);
+    assert_eq!(parsed.1, 501);
+    assert!(parsed.2.contains("zellij --server"));
+}
+
+#[test]
+fn parse_ps_pid_ppid_command_accepts_gnu_unpadded_and_rejects_junk() {
+    let gnu = "1234 1 /usr/bin/zellij --server /run/user/1000/zellij/beam-abc123";
+    let parsed = ZellijBackend::parse_ps_pid_ppid_command(gnu).expect("parse");
+    assert_eq!(parsed.0, 1234);
+    assert_eq!(parsed.1, 1);
+    assert!(ZellijBackend::parse_ps_pid_ppid_command("").is_none());
+    assert!(ZellijBackend::parse_ps_pid_ppid_command("not-a-pid 1 zellij").is_none());
+    assert!(ZellijBackend::parse_ps_pid_ppid_command("12 34").is_none());
+}
+
+#[test]
+fn command_is_session_server_matches_macos_style_ps_command() {
+    let cmd = "/opt/homebrew/bin/zellij --server /var/folders/xx/T/zellij-501/beam-abc123";
+    assert!(ZellijBackend::command_is_session_server(cmd, "beam-abc123"));
+    assert!(!ZellijBackend::command_is_session_server(cmd, "beam-other"));
+    let attach = "/opt/homebrew/bin/zellij --session beam-abc123 attach";
+    assert!(!ZellijBackend::command_is_session_server(
+        attach,
+        "beam-abc123"
+    ));
+}
+
+#[test]
+fn pane_process_from_ps_table_requires_child_of_session_server() {
+    let table = "\
+  100  1 /opt/homebrew/bin/zellij --server /tmp/zellij/beam-abc123\n\
+  200  100 /opt/homebrew/bin/grok --session-id abc --always-approve\n\
+  300  1 /bin/zsh\n";
+    assert_eq!(
+        ZellijBackend::pane_process_from_ps_table("beam-abc123", table),
+        Some(true)
+    );
+    let server_only = "  100  1 /opt/homebrew/bin/zellij --server /tmp/zellij/beam-abc123\n";
+    assert_eq!(
+        ZellijBackend::pane_process_from_ps_table("beam-abc123", server_only),
+        Some(false)
+    );
+    assert_eq!(
+        ZellijBackend::pane_process_from_ps_table("beam-abc123", "  300  1 /bin/zsh\n"),
+        None
+    );
+    let other_parent = "\
+  100  1 /opt/homebrew/bin/zellij --server /tmp/zellij/beam-abc123\n\
+  200  999 /opt/homebrew/bin/grok --always-approve\n";
+    assert_eq!(
+        ZellijBackend::pane_process_from_ps_table("beam-abc123", other_parent),
+        Some(false)
+    );
+}
+
+#[test]
+fn command_is_session_server_requires_exact_session_name() {
+    let cmd = "/usr/bin/zellij --server /tmp/zellij/beam-abc123";
+    assert!(ZellijBackend::command_is_session_server(cmd, "beam-abc123"));
+    assert!(!ZellijBackend::command_is_session_server(cmd, "beam-abc"));
+    assert!(!ZellijBackend::command_is_session_server(cmd, "abc123"));
+}
+
+#[test]
+fn real_ps_table_parses_at_least_one_process() {
+    let output = std::process::Command::new("ps")
+        .args(["-axww", "-o", "pid=,ppid=,command="])
+        .output()
+        .expect("ps must run on this host");
+    assert!(output.status.success(), "ps -axww flags must work");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.lines()
+            .filter_map(ZellijBackend::parse_ps_pid_ppid_command)
+            .count()
+            > 0,
+        "ps output should contain parseable pid/ppid/command rows"
+    );
+    assert_eq!(
+        ZellijBackend::pane_process_from_ps_table("beam-session-that-does-not-exist", &text),
+        None
+    );
+}
+
+#[test]
+fn decide_cli_liveness_dead_only_when_session_or_pane_and_process_are_gone() {
+    assert_eq!(
+        ZellijBackend::decide_cli_liveness(Some(false), Some(PaneListView::HasTerminal), true).0,
+        CliLiveness::Dead
+    );
+    assert_eq!(
+        ZellijBackend::decide_cli_liveness(Some(true), Some(PaneListView::NoTerminal), false).0,
+        CliLiveness::Dead
+    );
 }
 
 // ---- numeric_pane_id tests ----
