@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.10.1...beam-daemon-v0.10.2) - 2026-08-19
+
+### Fixed
+
+- *(worker)* 修正 CLI 探活误判，CliExit 不再关闭会话
+
 ## [0.10.0](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.9.0...beam-daemon-v0.10.0) - 2026-08-16
 
 ### Added

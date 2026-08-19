@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2](https://github.com/linuxhenhao/beam/compare/beam-core-v0.10.1...beam-core-v0.10.2) - 2026-08-19
+
+### Added
+
+- *(worker)* 按输入框颜色确认 TUI 提交，截图保留 ANSI 着色
+
 ## [0.10.1](https://github.com/linuxhenhao/beam/compare/beam-core-v0.10.0...beam-core-v0.10.1) - 2026-08-16
 
 ### Added
