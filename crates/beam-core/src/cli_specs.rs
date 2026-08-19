@@ -67,7 +67,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         adopt_command_patterns: &["codex"],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
-        tui_ready_marker: None,
+        tui_ready_marker: Some("›"),
         inject_term_xterm: true,
     },
     CliSpec {
@@ -78,7 +78,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         adopt_command_patterns: &["traex"],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
-        tui_ready_marker: None,
+        tui_ready_marker: Some("›"),
         inject_term_xterm: true,
     },
     CliSpec {
@@ -248,6 +248,8 @@ mod tests {
             gated,
             vec![
                 ("claude-code", "Welcome"),
+                ("codex", "›"),
+                ("traex", "›"),
                 ("coco", "Welcome"),
                 ("hermes", "Welcome"),
                 ("antigravity", "Welcome"),

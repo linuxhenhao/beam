@@ -36,6 +36,7 @@ mod launch;
 mod launch_live;
 mod run_loop;
 mod screenshot;
+pub(crate) mod screenshot_ansi;
 mod tui;
 
 pub(crate) use analyzer::*;

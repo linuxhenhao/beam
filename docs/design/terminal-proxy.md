@@ -97,7 +97,7 @@ anchor 按 zellij session 维度复用；如果 anchor 失败，proxy 只记录 
 Beam 把 terminal viewport 和 card viewport 分开处理：
 
 - terminal viewport 是真实 web viewer 的交互尺寸。zellij web 收到浏览器 control WS 的 resize 后驱动 pane 尺寸；Beam proxy 透传这条路径，不做拦截或过滤。默认 pane 尺寸为 160×50（参考 botmux），由 anchor 在建立连接后通过 `TerminalResize` 设置（`TerminalResize` 对应 `ResizeCause::Viewport`，会触发 zellij 重新评估/退出 mobile layout）。所有浏览器 viewer 离开后，anchor 通过 debounce 再次发送 `TerminalResize` 将 pane 恢复到 160×50。
-- card 文本和截图采样由 worker 使用 `dump-screen`（不带 `--full`）捕获当前可见 viewport，不在 Beam 侧额外裁剪或截断。如果飞书平台自身有展示限制，那是平台限制，不在 Beam 里做静默裁剪。
+- card 文本和截图采样由 worker 使用 `dump-screen --ansi`（不带 `--full`）捕获当前可见 viewport；PNG 截图按 SGR 着色渲染，不在 Beam 侧额外裁剪或截断。如果飞书平台自身有展示限制，那是平台限制，不在 Beam 里做静默裁剪。
 
 ## Ticket 生命周期
 

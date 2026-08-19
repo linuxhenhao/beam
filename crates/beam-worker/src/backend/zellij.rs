@@ -205,6 +205,7 @@ impl ZellijBackend {
     pub(crate) fn dump_screen_viewport_args(pane_id: &str) -> Vec<String> {
         vec![
             "dump-screen".to_string(),
+            "--ansi".to_string(),
             "--pane-id".to_string(),
             pane_id.to_string(),
         ]
@@ -266,7 +267,7 @@ impl ZellijBackend {
         None
     }
 
-    async fn discover_pane_id(session: &str) -> Option<String> {
+    async fn list_panes_json(session: &str) -> Result<Vec<u8>> {
         let mut cmd = tokio::process::Command::new("zellij");
         cmd.arg("--session")
             .arg(session)
@@ -277,12 +278,17 @@ impl ZellijBackend {
             .kill_on_drop(true);
         let out = tokio::time::timeout(ZELLIJ_ACTION_TIMEOUT, cmd.output())
             .await
-            .ok()?
-            .ok()?;
+            .context("zellij list-panes timed out")?
+            .context("failed to run zellij list-panes")?;
         if !out.status.success() {
-            return None;
+            anyhow::bail!("zellij list-panes failed");
         }
-        Self::parse_terminal_pane_id(&out.stdout)
+        Ok(out.stdout)
+    }
+
+    async fn discover_pane_id(session: &str) -> Option<String> {
+        let out = Self::list_panes_json(session).await.ok()?;
+        Self::parse_terminal_pane_id(&out)
     }
 
     fn pane_id_str(&self) -> String {
@@ -597,10 +603,17 @@ impl SessionBackend for ZellijBackend {
 
     /// Timeout/error is treated as "unknown → alive": a wedged zellij server
     /// must not trigger a false CliExit that would tear down the session.
+    /// A live session with no terminal pane means the CLI exited.
     async fn is_alive(&self) -> Result<bool> {
-        Ok(Self::probe_session(&self.session_name)
-            .await
-            .unwrap_or(true))
+        match Self::probe_session(&self.session_name).await {
+            Ok(false) => return Ok(false),
+            Err(_) => return Ok(true),
+            Ok(true) => {}
+        }
+        match Self::list_panes_json(&self.session_name).await {
+            Ok(out) => Ok(Self::parse_terminal_pane_id(&out).is_some()),
+            Err(_) => Ok(true),
+        }
     }
 
     async fn child_pid(&self) -> Result<Option<u32>> {

@@ -526,6 +526,12 @@ pub async fn run(init: InitConfig) -> Result<()> {
         if let Some(cli_session_id) = submit.cli_session_id {
             send_message(&stdout, &WorkerToDaemon::CliSessionId { cli_session_id }).await?;
         }
+        if !submit.submitted {
+            let message = submit
+                .failure_reason
+                .unwrap_or_else(|| "CLI submit could not be confirmed".to_string());
+            send_message(&stdout, &WorkerToDaemon::UserNotify { message }).await?;
+        }
     }
 
     // Init-time transcript source resolution for adapters with resolvable

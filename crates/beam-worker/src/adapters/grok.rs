@@ -7,10 +7,11 @@ use beam_core::{FinalOutputKind, InitConfig};
 use serde_json::Value;
 
 use crate::adapter::{
-    Adapter, PollResult, SpawnSpec, SubmitResult, TranscriptCursor, confirm_submit_loop,
-    drain_jsonl, file_size, is_uuid_like, normalize_history_text, realpath_cwd,
+    Adapter, PollResult, SpawnSpec, SubmitResult, TranscriptCursor, drain_jsonl, file_size,
+    is_uuid_like, normalize_history_text, realpath_cwd,
 };
 use crate::backend::SessionBackend;
+use crate::composer::{GROK_COMPOSER, confirm_typed_submit, sample_draft_fgs};
 
 const UPDATES_FILE: &str = "updates.jsonl";
 
@@ -114,14 +115,25 @@ impl Adapter for GrokState {
             }
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
+        let draft_fgs = sample_draft_fgs(
+            &backend.capture_viewport().await.unwrap_or_default(),
+            GROK_COMPOSER,
+        );
         backend.send_enter().await?;
 
-        let confirmed = confirm_submit_loop(backend, || {
-            let Some(path) = resolve_transcript_path(self) else {
-                return Ok(false);
-            };
-            grok_submit_confirmed(&path, base_size, content)
-        })
+        let confirmed = confirm_typed_submit(
+            backend,
+            GROK_COMPOSER,
+            &draft_fgs,
+            "enter",
+            || {
+                let Some(path) = resolve_transcript_path(self) else {
+                    return Ok(false);
+                };
+                grok_submit_confirmed(&path, base_size, content)
+            },
+            || backend.send_enter(),
+        )
         .await?;
 
         if confirmed {
@@ -137,7 +149,7 @@ impl Adapter for GrokState {
         Ok(SubmitResult {
             submitted: false,
             cli_session_id: self.cli_session_id.clone(),
-            failure_reason: Some("Grok transcript did not confirm submit".to_string()),
+            failure_reason: Some("Grok did not accept the input".to_string()),
         })
     }
 

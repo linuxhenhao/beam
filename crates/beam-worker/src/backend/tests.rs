@@ -285,15 +285,19 @@ fn parse_zellij_cursor_id_as_number_in_json() {
 
 // ---- dump_screen_viewport_args tests ----
 
-/// ZellijBackend viewport dump args contain exactly `dump-screen --pane-id <id>`,
-/// and MUST NOT include `--full`.
+/// Viewport dumps keep SGR (`--ansi`) and never include `--full`.
 #[test]
 fn dump_screen_viewport_args_no_full_flag() {
     let args = ZellijBackend::dump_screen_viewport_args("pane_1");
-    assert_eq!(args.len(), 3);
-    assert_eq!(args[0], "dump-screen");
-    assert_eq!(args[1], "--pane-id");
-    assert_eq!(args[2], "pane_1");
+    assert_eq!(
+        args,
+        vec![
+            "dump-screen".to_string(),
+            "--ansi".to_string(),
+            "--pane-id".to_string(),
+            "pane_1".to_string(),
+        ]
+    );
     assert!(!args.contains(&"--full".to_string()));
 }
 
@@ -301,7 +305,8 @@ fn dump_screen_viewport_args_no_full_flag() {
 #[test]
 fn dump_screen_viewport_args_different_pane_ids() {
     let args = ZellijBackend::dump_screen_viewport_args("terminal_99");
-    assert_eq!(args[2], "terminal_99");
+    assert_eq!(args[3], "terminal_99");
+    assert!(args.contains(&"--ansi".to_string()));
     assert!(!args.contains(&"--full".to_string()));
 }
 
@@ -310,9 +315,9 @@ fn dump_screen_viewport_args_different_pane_ids() {
 #[test]
 fn dump_screen_viewport_args_no_full_through_observe_path() {
     let args = ZellijBackend::dump_screen_viewport_args("observe_pane");
-    assert_eq!(args.len(), 3);
     assert_eq!(args[0], "dump-screen");
-    assert_eq!(args[1], "--pane-id");
-    assert_eq!(args[2], "observe_pane");
+    assert_eq!(args[1], "--ansi");
+    assert_eq!(args[2], "--pane-id");
+    assert_eq!(args[3], "observe_pane");
     assert!(!args.contains(&"--full".to_string()));
 }

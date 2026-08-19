@@ -97,7 +97,7 @@ Anchors are reused per zellij session. If anchor startup fails, the proxy only l
 Beam treats terminal viewport and card viewport separately:
 
 - The terminal viewport is the interaction size of the real web viewer. After zellij web receives browser control WS resize events, it drives the pane size; the Beam proxy only relays that path, without intercepting or filtering. Default pane dimensions are 160×50 (reference: botmux), set by the anchor via `TerminalResize` after establishing connections. `TerminalResize` corresponds to `ResizeCause::Viewport`, which triggers zellij to re-evaluate / exit mobile layout. When all browser viewers leave, the anchor restores the pane to 160×50 via debounce (again using `TerminalResize`).
-- Card text and screenshot sampling is done by the worker using `dump-screen` (without `--full`) to capture the current visible viewport. Beam does not apply additional cropping or truncation. If the Feishu platform itself has display limits, those are platform limits; Beam does not silently crop.
+- Card text and screenshot sampling is done by the worker using `dump-screen --ansi` (without `--full`) to capture the current visible viewport. Screenshot PNGs are rendered with SGR colors. Beam does not apply additional cropping or truncation. If the Feishu platform itself has display limits, those are platform limits; Beam does not silently crop.
 
 ## Ticket Lifecycle
 

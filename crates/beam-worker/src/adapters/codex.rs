@@ -13,9 +13,26 @@ use serde_json::Value;
 
 use crate::adapter::{
     Adapter, PendingTurnKind, PollResult, ResolveOutcome, SpawnSpec, SubmitResult,
-    TranscriptCursor, confirm_submit_loop, file_size, is_uuid_like, normalize_history_text,
+    TranscriptCursor, file_size, is_uuid_like, normalize_history_text,
 };
 use crate::backend::SessionBackend;
+use crate::composer::{CODEX_COMPOSER, confirm_typed_submit, sample_draft_fgs, screen_looks_busy};
+
+const COMPOSER_WAIT_ATTEMPTS: usize = 20;
+const COMPOSER_WAIT_INTERVAL: Duration = Duration::from_millis(500);
+
+async fn wait_for_codex_composer(backend: &dyn SessionBackend) -> bool {
+    for attempt in 0..COMPOSER_WAIT_ATTEMPTS {
+        let screen = backend.capture_viewport().await.unwrap_or_default();
+        if screen.contains('›') {
+            tracing::debug!(attempt, "codex composer visible");
+            return true;
+        }
+        tokio::time::sleep(COMPOSER_WAIT_INTERVAL).await;
+    }
+    tracing::debug!("codex composer not visible after wait");
+    false
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct CodexState {
@@ -109,26 +126,49 @@ impl Adapter for CodexState {
             self.pending_remote_user_inputs
                 .push_back(normalize_history_text(content));
         }
-        for _ in 0..60 {
-            let screen = backend.capture_viewport().await.unwrap_or_default();
-            if screen.contains("OpenAI Codex") && screen.contains('›') {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
+        if !wait_for_codex_composer(backend).await {
+            tracing::debug!("codex composer not visible, refusing to type");
+            return Ok(SubmitResult {
+                submitted: false,
+                cli_session_id: self.cli_session_id.clone(),
+                failure_reason: Some("Codex TUI is not ready".to_string()),
+            });
         }
         let history_boundary = capture_history_boundary(&self.history_path)?;
         backend.paste_text(content).await?;
         tokio::time::sleep(Duration::from_millis(200)).await;
-        backend.send_enter().await?;
+        let typed_screen = backend.capture_viewport().await.unwrap_or_default();
+        let draft_fgs = sample_draft_fgs(&typed_screen, CODEX_COMPOSER);
+        let queue = screen_looks_busy(&typed_screen);
+        let submit_via = if queue { "tab" } else { "enter" };
+        tracing::debug!(busy = queue, submit_via, "codex submit key");
+        if queue {
+            backend.send_special_keys(&["Tab".to_string()]).await?;
+        } else {
+            backend.send_enter().await?;
+        }
         let mut confirmed_session_id: Option<String> = None;
-        confirm_submit_loop(backend, || {
-            let found = codex_history_match(&self.history_path, &history_boundary, content)?;
-            if let Some(cli_session_id) = found {
-                confirmed_session_id = Some(cli_session_id);
-                return Ok(true);
-            }
-            Ok(false)
-        })
+        confirm_typed_submit(
+            backend,
+            CODEX_COMPOSER,
+            &draft_fgs,
+            submit_via,
+            || {
+                let found = codex_history_match(&self.history_path, &history_boundary, content)?;
+                if let Some(cli_session_id) = found {
+                    confirmed_session_id = Some(cli_session_id);
+                    return Ok(true);
+                }
+                Ok(false)
+            },
+            || async {
+                if queue {
+                    backend.send_special_keys(&["Tab".to_string()]).await
+                } else {
+                    backend.send_enter().await
+                }
+            },
+        )
         .await?;
         if let Some(cli_session_id) = confirmed_session_id {
             self.cli_session_id = Some(cli_session_id.clone());
@@ -141,7 +181,7 @@ impl Adapter for CodexState {
         Ok(SubmitResult {
             submitted: false,
             cli_session_id: self.cli_session_id.clone(),
-            failure_reason: Some("Codex history did not confirm submit".to_string()),
+            failure_reason: Some("Codex did not accept the input".to_string()),
         })
     }
 

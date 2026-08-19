@@ -1,6 +1,7 @@
 mod adapter;
 mod adapters;
 mod backend;
+mod composer;
 mod worker_runtime;
 
 use std::path::Path;
