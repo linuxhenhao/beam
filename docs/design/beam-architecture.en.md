@@ -33,7 +33,7 @@ Typical managed session flow:
 5. Daemon persists the updates and patches the streaming card.
 6. User actions such as send, close, restart, display toggle, refresh screenshot, or write-link request are handled by daemon routes/callbacks.
 7. Daemon sends control messages to the worker.
-8. Worker exits or the daemon marks the session closed.
+8. Worker exits or the daemon marks the session closed. `CliExit` is not a user close: the session stays `Active` so the next message can reattach. Only `/close` / the session-card close button mark `Closed` and destroy the terminal session.
 
 Adopted sessions differ only in backend attachment and metadata. The worker observes and drives an existing zellij pane instead of owning a newly created session.
 

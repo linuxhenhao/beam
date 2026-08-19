@@ -7,7 +7,7 @@ use std::sync::{
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use tokio::sync::broadcast;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::subscribe::{
     numeric_pane_id, parse_zellij_cursor_from_list_panes, run_zellij_subscribe,
@@ -42,6 +42,22 @@ impl std::fmt::Display for ZellijActionTimeoutError {
 }
 
 impl std::error::Error for ZellijActionTimeoutError {}
+
+/// How to read a `list-panes --json` payload. Empty / invalid output is
+/// unreadable, not "no pane": a wedged zellij often exits 0 with blank
+/// stdout, and treating that as death caused false CliExit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaneListView {
+    Unreadable,
+    NoTerminal,
+    HasTerminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CliLiveness {
+    Alive,
+    Dead,
+}
 
 #[derive(Debug)]
 pub struct ZellijBackend {
@@ -205,6 +221,7 @@ impl ZellijBackend {
     pub(crate) fn dump_screen_viewport_args(pane_id: &str) -> Vec<String> {
         vec![
             "dump-screen".to_string(),
+            "--ansi".to_string(),
             "--pane-id".to_string(),
             pane_id.to_string(),
         ]
@@ -266,23 +283,70 @@ impl ZellijBackend {
         None
     }
 
-    async fn discover_pane_id(session: &str) -> Option<String> {
+    pub(crate) fn classify_pane_list(stdout: &[u8]) -> PaneListView {
+        if stdout.iter().all(u8::is_ascii_whitespace) {
+            return PaneListView::Unreadable;
+        }
+        let Ok(json) = serde_json::from_slice::<serde_json::Value>(stdout) else {
+            return PaneListView::Unreadable;
+        };
+        if !json.is_array() {
+            return PaneListView::Unreadable;
+        }
+        if Self::parse_terminal_pane_id(stdout).is_some() {
+            PaneListView::HasTerminal
+        } else {
+            PaneListView::NoTerminal
+        }
+    }
+
+    /// Combine zellij session / pane-list / pane-process signals.
+    /// Unknowns stay alive: only a missing session, or "no terminal pane and
+    /// no pane process", is a confirmed CLI death.
+    pub(crate) fn decide_cli_liveness(
+        session_present: Option<bool>,
+        panes: Option<PaneListView>,
+        pane_process_running: bool,
+    ) -> (CliLiveness, &'static str) {
+        match session_present {
+            Some(false) => return (CliLiveness::Dead, "zellij session missing"),
+            None => return (CliLiveness::Alive, "list-sessions unknown"),
+            Some(true) => {}
+        }
+        if pane_process_running {
+            return (CliLiveness::Alive, "pane process running");
+        }
+        match panes {
+            Some(PaneListView::HasTerminal) => (CliLiveness::Alive, "terminal pane visible"),
+            Some(PaneListView::NoTerminal) => {
+                (CliLiveness::Dead, "no terminal pane and no pane process")
+            }
+            Some(PaneListView::Unreadable) | None => (CliLiveness::Alive, "pane list unknown"),
+        }
+    }
+
+    async fn list_panes_json(session: &str) -> Result<Vec<u8>> {
         let mut cmd = tokio::process::Command::new("zellij");
         cmd.arg("--session")
             .arg(session)
-            .args(["action", "list-panes", "--json"])
+            .args(["action", "list-panes", "--json", "--all"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         let out = tokio::time::timeout(ZELLIJ_ACTION_TIMEOUT, cmd.output())
             .await
-            .ok()?
-            .ok()?;
+            .context("zellij list-panes timed out")?
+            .context("failed to run zellij list-panes")?;
         if !out.status.success() {
-            return None;
+            anyhow::bail!("zellij list-panes failed");
         }
-        Self::parse_terminal_pane_id(&out.stdout)
+        Ok(out.stdout)
+    }
+
+    async fn discover_pane_id(session: &str) -> Option<String> {
+        let out = Self::list_panes_json(session).await.ok()?;
+        Self::parse_terminal_pane_id(&out)
     }
 
     fn pane_id_str(&self) -> String {
@@ -326,10 +390,7 @@ impl ZellijBackend {
         false
     }
 
-    /// Pure matcher: does a NUL-separated /proc cmdline belong to the zellij
-    /// server process of `session`?
-    fn cmdline_is_session_server(cmdline: &str, session: &str) -> bool {
-        let argv: Vec<&str> = cmdline.split('\0').filter(|s| !s.is_empty()).collect();
+    fn argv_is_session_server(argv: &[&str], session: &str) -> bool {
         let is_zellij_bin = argv
             .first()
             .and_then(|a| a.rsplit('/').next())
@@ -340,64 +401,60 @@ impl ZellijBackend {
             && argv.iter().any(|a| a.rsplit('/').next() == Some(session))
     }
 
-    /// Parse the parent pid out of /proc/<pid>/stat contents. The comm field
-    /// (field 2, parenthesised) may contain spaces, so parse from the last
-    /// ')'; ppid is the 2nd field after it.
-    fn parse_stat_ppid(stat: &str) -> Option<u32> {
-        let rparen = stat.rfind(')')?;
-        stat[rparen + 1..]
-            .split_whitespace()
-            .nth(1)
-            .and_then(|s| s.parse::<u32>().ok())
+    /// Match a BSD/GNU `ps` command line (space-separated) to this
+    /// session's `zellij --server`.
+    pub(crate) fn command_is_session_server(command: &str, session: &str) -> bool {
+        let argv: Vec<&str> = command.split_whitespace().collect();
+        Self::argv_is_session_server(&argv, session)
     }
 
-    /// On Linux, detect the "pane created but no process" failure by finding
-    /// the session's zellij server process in /proc and checking whether any
-    /// process has it as parent (the pane process is a direct child of the
-    /// server). Note: /proc/<pid>/task/<pid>/children is unusable on kernels
-    /// built without CONFIG_PROC_CHILDREN, hence the ppid reverse scan.
-    /// Returns true when the pane process exists or when it cannot be
-    /// determined (assume healthy to avoid tearing down good sessions).
-    #[cfg(target_os = "linux")]
-    fn session_pane_process_running(session: &str) -> bool {
-        let Ok(entries) = std::fs::read_dir("/proc") else {
-            return true;
-        };
-        let procs: Vec<std::path::PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .and_then(|n| n.as_bytes().first())
-                    .map(|b| b.is_ascii_digit())
-                    .unwrap_or(false)
-            })
-            .collect();
-        let server_pid = procs.iter().find_map(|path| {
-            let cmdline = std::fs::read_to_string(path.join("cmdline")).ok()?;
-            if !Self::cmdline_is_session_server(&cmdline, session) {
-                return None;
+    /// Parse one `ps -axww -o pid=,ppid=,command=` line. Works on both GNU
+    /// and BSD/macOS `ps` (space-padded pid/ppid, remainder is the command).
+    pub(crate) fn parse_ps_pid_ppid_command(line: &str) -> Option<(u32, u32, String)> {
+        let mut parts = line.split_whitespace();
+        let pid = parts.next()?.parse().ok()?;
+        let ppid = parts.next()?.parse().ok()?;
+        let command = parts.collect::<Vec<_>>().join(" ");
+        if command.is_empty() {
+            return None;
+        }
+        Some((pid, ppid, command))
+    }
+
+    /// `None` = server not found (unknown). `Some(false)` = server exists
+    /// but has no child (CLI gone). `Some(true)` = pane process present.
+    pub(crate) fn pane_process_from_ps_table(session: &str, text: &str) -> Option<bool> {
+        let mut server_pid = None;
+        let mut rows = Vec::new();
+        for line in text.lines() {
+            let Some((pid, ppid, command)) = Self::parse_ps_pid_ppid_command(line) else {
+                continue;
+            };
+            if Self::command_is_session_server(&command, session) {
+                server_pid = Some(pid);
             }
-            path.file_name()
-                .and_then(|n| n.to_str())
-                .and_then(|n| n.parse::<u32>().ok())
-        });
-        let Some(server_pid) = server_pid else {
-            // Server not found — cannot determine; assume healthy.
-            return true;
-        };
-        procs.iter().any(|path| {
-            std::fs::read_to_string(path.join("stat"))
-                .ok()
-                .and_then(|stat| Self::parse_stat_ppid(&stat))
-                == Some(server_pid)
-        })
+            rows.push((pid, ppid));
+        }
+        let server_pid = server_pid?;
+        Some(rows.iter().any(|(_, ppid)| *ppid == server_pid))
     }
 
-    #[cfg(not(target_os = "linux"))]
-    fn session_pane_process_running(_session: &str) -> bool {
-        true
+    /// Detect whether the zellij session still has a pane process (the CLI)
+    /// via `ps`. One path on Linux and macOS. Unknown (ps failed, or the
+    /// server is not in the table) is treated as healthy so a probe failure
+    /// cannot tear down a live session.
+    fn session_pane_process_running(session: &str) -> bool {
+        let output = std::process::Command::new("ps")
+            .args(["-axww", "-o", "pid=,ppid=,command="])
+            .output();
+        let Ok(out) = output else {
+            return true;
+        };
+        if !out.status.success() {
+            return true;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        Self::pane_process_from_ps_table(session, &text).unwrap_or(true)
     }
 
     async fn ensure_zellij_subscribe_started(&self) -> Result<()> {
@@ -597,10 +654,55 @@ impl SessionBackend for ZellijBackend {
 
     /// Timeout/error is treated as "unknown → alive": a wedged zellij server
     /// must not trigger a false CliExit that would tear down the session.
+    /// A live session with no terminal pane *and* no pane process means the
+    /// CLI exited. Empty/invalid `list-panes` output is unknown, not death.
     async fn is_alive(&self) -> Result<bool> {
-        Ok(Self::probe_session(&self.session_name)
-            .await
-            .unwrap_or(true))
+        let session_present = match Self::probe_session(&self.session_name).await {
+            Ok(present) => Some(present),
+            Err(err) => {
+                debug!(
+                    session = %self.session_name,
+                    error = %err,
+                    "cli liveness: list-sessions failed"
+                );
+                None
+            }
+        };
+        let panes = match Self::list_panes_json(&self.session_name).await {
+            Ok(out) => Some(Self::classify_pane_list(&out)),
+            Err(err) => {
+                debug!(
+                    session = %self.session_name,
+                    error = %err,
+                    "cli liveness: list-panes failed"
+                );
+                None
+            }
+        };
+        let pane_process_running = Self::session_pane_process_running(&self.session_name);
+        let (liveness, reason) =
+            Self::decide_cli_liveness(session_present, panes, pane_process_running);
+        let alive = liveness == CliLiveness::Alive;
+        if alive {
+            debug!(
+                session = %self.session_name,
+                ?session_present,
+                ?panes,
+                pane_process_running,
+                reason,
+                "cli liveness alive"
+            );
+        } else {
+            warn!(
+                session = %self.session_name,
+                ?session_present,
+                ?panes,
+                pane_process_running,
+                reason,
+                "cli liveness dead"
+            );
+        }
+        Ok(alive)
     }
 
     async fn child_pid(&self) -> Result<Option<u32>> {
@@ -693,55 +795,35 @@ mod tests {
     use super::ZellijBackend;
 
     #[test]
-    fn cmdline_matcher_accepts_own_server() {
-        let cmdline = "/home/user/.cargo/bin/zellij\0--server\0/run/user/1000/zellij/contract_version_1/beam-abc123\0";
-        assert!(ZellijBackend::cmdline_is_session_server(
-            cmdline,
+    fn command_matcher_accepts_own_server() {
+        let command = "/home/user/.cargo/bin/zellij --server /run/user/1000/zellij/contract_version_1/beam-abc123";
+        assert!(ZellijBackend::command_is_session_server(
+            command,
             "beam-abc123"
         ));
     }
 
     #[test]
-    fn cmdline_matcher_rejects_other_session_server() {
-        let cmdline = "/home/user/.cargo/bin/zellij\0--server\0/run/user/1000/zellij/contract_version_1/beam-other\0";
-        assert!(!ZellijBackend::cmdline_is_session_server(
-            cmdline,
+    fn command_matcher_rejects_other_session_and_clients() {
+        let other = "/home/user/.cargo/bin/zellij --server /run/user/1000/zellij/contract_version_1/beam-other";
+        assert!(!ZellijBackend::command_is_session_server(
+            other,
             "beam-abc123"
         ));
-    }
-
-    #[test]
-    fn cmdline_matcher_rejects_attach_client_and_subscribe() {
-        let attach = "/home/user/.cargo/bin/zellij\0--config\0/tmp/x/config.kdl\0attach\0--create-background\0beam-abc123\0";
-        assert!(!ZellijBackend::cmdline_is_session_server(
+        let attach = "/home/user/.cargo/bin/zellij --config /tmp/x/config.kdl attach --create-background beam-abc123";
+        assert!(!ZellijBackend::command_is_session_server(
             attach,
             "beam-abc123"
         ));
-        let subscribe = "zellij\0--session\0beam-abc123\0subscribe\0--pane-id\0terminal_0\0";
-        assert!(!ZellijBackend::cmdline_is_session_server(
+        let subscribe = "zellij --session beam-abc123 subscribe --pane-id terminal_0";
+        assert!(!ZellijBackend::command_is_session_server(
             subscribe,
             "beam-abc123"
         ));
-    }
-
-    #[test]
-    fn cmdline_matcher_rejects_non_zellij_process() {
-        let cmdline = "/bin/sh\0/home/user/.beam/run/worker-wrapper.sh\0codex\0";
-        assert!(!ZellijBackend::cmdline_is_session_server(
-            cmdline,
+        let wrapper = "/bin/sh /home/user/.beam/run/worker-wrapper.sh codex";
+        assert!(!ZellijBackend::command_is_session_server(
+            wrapper,
             "beam-abc123"
         ));
-    }
-
-    #[test]
-    fn parse_stat_ppid_reads_fourth_field() {
-        let stat = "1234 (zellij) S 2843 1234 1234 0 -1 4194304 100 0 0 0 5 2 0 0 20 0 10 0 99 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0";
-        assert_eq!(ZellijBackend::parse_stat_ppid(stat), Some(2843));
-    }
-
-    #[test]
-    fn parse_stat_ppid_tolerates_comm_with_spaces_and_parens() {
-        let stat = "1234 (weird ) name) S 5678 1234";
-        assert_eq!(ZellijBackend::parse_stat_ppid(stat), Some(5678));
     }
 }

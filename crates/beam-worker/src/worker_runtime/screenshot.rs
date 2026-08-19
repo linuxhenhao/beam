@@ -170,8 +170,7 @@ const FONT_SIZE: f32 = 14.0;
 pub(crate) const CELL_W: f32 = 8.4;
 pub(crate) const CELL_H: f32 = 18.0;
 pub(crate) const PADDING: u32 = 12;
-const BG_COLOR: Rgba<u8> = Rgba([26, 27, 38, 255]);
-const FG_COLOR: Rgba<u8> = Rgba([169, 177, 214, 255]);
+use super::screenshot_ansi::{BG_COLOR, GlyphPaint, parse_ansi_screen};
 
 pub(crate) fn home_font_dir() -> Option<std::path::PathBuf> {
     std::env::var("HOME")
@@ -322,8 +321,7 @@ pub(crate) fn find_glyph_font<'a>(
 pub(crate) fn render_text_screenshot_png(screen_raw: &str) -> Result<Vec<u8>> {
     load_font_files();
 
-    let screen = strip_ansi(screen_raw);
-    let lines: Vec<&str> = screen.lines().collect();
+    let lines = parse_ansi_screen(screen_raw);
     let rows = lines.len().max(1);
 
     let primary_guard = PRIMARY_FONT.lock().unwrap();
@@ -333,7 +331,7 @@ pub(crate) fn render_text_screenshot_png(screen_raw: &str) -> Result<Vec<u8>> {
 
     let primary = match primary {
         Some(f) => f,
-        None => return fallback_bitmap_png(&screen),
+        None => return fallback_bitmap_png(&strip_ansi(screen_raw)),
     };
 
     let scale = PxScale::from(FONT_SIZE);
@@ -344,8 +342,8 @@ pub(crate) fn render_text_screenshot_png(screen_raw: &str) -> Result<Vec<u8>> {
     let cols = lines
         .iter()
         .map(|line| {
-            line.chars()
-                .map(|ch| if is_fullwidth(ch) { 2u32 } else { 1u32 })
+            line.iter()
+                .map(|cell| if is_fullwidth(cell.ch) { 2u32 } else { 1u32 })
                 .sum::<u32>()
         })
         .max()
@@ -359,11 +357,25 @@ pub(crate) fn render_text_screenshot_png(screen_raw: &str) -> Result<Vec<u8>> {
 
     for (row, line) in lines.iter().enumerate() {
         let mut col_cells: u32 = 0;
-        for ch in line.chars() {
+        for cell in line {
+            let ch = cell.ch;
             let (font, char_width) = find_glyph_font(ch, primary, cjk);
             let scaled = font.as_scaled(scale);
             let x = PADDING as f32 + col_cells as f32 * CELL_W;
             let y = PADDING as f32 + row as f32 * CELL_H;
+            let mut paint = GlyphPaint {
+                image: &mut image,
+                x,
+                y,
+                cell_w: char_width * CELL_W,
+                cell_h: CELL_H,
+                width,
+                height,
+            };
+            paint.fill_bg(cell.bg);
+            if cell.underline {
+                paint.underline(cell.fg);
+            }
 
             if ch != ' ' {
                 let cell_px = char_width * CELL_W;
@@ -385,10 +397,10 @@ pub(crate) fn render_text_screenshot_png(screen_raw: &str) -> Result<Vec<u8>> {
                         {
                             let alpha = (cv * 255.0).min(255.0) as u8;
                             if alpha == 255 {
-                                image.put_pixel(px as u32, py as u32, FG_COLOR);
+                                image.put_pixel(px as u32, py as u32, cell.fg);
                             } else {
                                 let existing = image.get_pixel(px as u32, py as u32);
-                                let blended = blend_alpha(*existing, FG_COLOR, alpha);
+                                let blended = blend_alpha(*existing, cell.fg, alpha);
                                 image.put_pixel(px as u32, py as u32, blended);
                             }
                         }

@@ -622,20 +622,29 @@ pub(crate) async fn spawn_worker(
                         }
                     }
                 }
-                Ok(WorkerToDaemon::CliExit { .. }) => {
+                Ok(WorkerToDaemon::CliExit { code, signal }) => {
+                    // CLI/pane death is not a user close. Keep the beam
+                    // session Active so the next inbound message reattaches
+                    // (same as unexpected worker EOF). `/close` is what
+                    // marks Closed.
+                    warn!(
+                        session = %session_id_for_task,
+                        ?code,
+                        ?signal,
+                        "CLI exit reported; keeping session active for reattach"
+                    );
                     {
                         let snapshot = {
                             let mut sessions = state.sessions.lock().await;
                             if let Some(entry) = sessions.get_mut(&session_id_for_task) {
-                                entry.status = SessionStatus::Closed;
-                                entry.closed_at = Some(Utc::now());
-                                entry.worker_pid = None;
+                                apply_reported_cli_exit(entry);
                             }
                             sessions.clone()
                         };
                         let _ = persist_sessions(&state.paths, &snapshot).await;
                     }
-                    let _ = patch_lark_streaming_card(&state, &session_id_for_task, "closed").await;
+                    let _ =
+                        patch_lark_streaming_card(&state, &session_id_for_task, "CLI 已断开").await;
                     break;
                 }
                 Ok(WorkerToDaemon::Error { message }) => {
@@ -820,11 +829,17 @@ pub(crate) fn spawn_worker_health_watchdog(state: AppState) {
     });
 }
 
+/// CLI process exit is not a user close. Clear the worker pid and leave
+/// the session Active so the next inbound message can reattach.
+pub(crate) fn apply_reported_cli_exit(session: &mut Session) {
+    session.worker_pid = None;
+}
+
 /// Called when a worker's stdout reaches EOF (the process exited). If the
 /// workers table still holds *this* worker's handle, remove it so the next
 /// `ensure_worker_for_session` respawns (resumes) the worker instead of
 /// no-oping on a stale entry. Intentional teardowns (session already Closed
-/// via CliExit, or the handle already removed by close/restart) are no-ops.
+/// via `/close`, or the handle already removed by close/restart) are no-ops.
 async fn handle_worker_eof(state: &AppState, session_id: &str, worker_pid: Option<u32>) {
     let removed = {
         let mut workers = state.workers.lock().await;
@@ -847,12 +862,12 @@ async fn handle_worker_eof(state: &AppState, session_id: &str, worker_pid: Optio
     if session_status != Some(SessionStatus::Active) {
         return;
     }
-    // Unexpected death (e.g. the worker was killed): record it and let the
-    // next message revive the session via ensure_worker_for_session.
+    // Worker process gone (CliExit, kill, or crash): keep the session
+    // Active and let the next message revive it via ensure_worker.
     // build_init_from_session uses resume:true, so the new worker reattaches
     // to the still-live zellij session and CLI context is preserved.
     warn!(
-        "worker for session {} exited unexpectedly; removed from workers table (next message will respawn it)",
+        "worker for session {} exited; session kept active (next message will respawn it)",
         session_id
     );
     let snapshot = {
@@ -950,5 +965,24 @@ pub(crate) async fn send_worker_message(
             ))
         }
         Err(err) => Err(err.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_reported_cli_exit;
+    use crate::tests::test_helpers::make_session;
+    use beam_core::SessionStatus;
+
+    #[test]
+    fn reported_cli_exit_keeps_session_active() {
+        let mut session = make_session("s1");
+        session.status = SessionStatus::Active;
+        session.closed_at = None;
+        session.worker_pid = Some(42);
+        apply_reported_cli_exit(&mut session);
+        assert_eq!(session.status, SessionStatus::Active);
+        assert!(session.closed_at.is_none());
+        assert!(session.worker_pid.is_none());
     }
 }

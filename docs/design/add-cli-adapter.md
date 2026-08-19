@@ -31,7 +31,7 @@ beam 的最终输出依赖「读 CLI 落盘的会话记录」，而不是解析�
 - model：`init.model` → kimi `--model <model>`、gemini `--model <model>`。
 - resume：`init.resume` 时用 `init.cli_session_id`（fallback `resume_session_id` / `session_id`），kimi 对应 `--session <id>`。
 - 初始 prompt：只有支持「交互模式 + 命令行传入初始 prompt」的 CLI 才能在 `CLI_SPECS` 里设 `passes_initial_prompt_via_args: true`（gemini `-i`、opencode）。kimi 的 `-p` 是一次性非交互模式，**不能**算——它的初始 prompt 由 worker 经 `write_input` 在 TUI 里输入。
-- TUI ready gate：TUI 类 CLI 在输入 UI 就绪前会丢弃键入的按键。worker 在 spawn 后、发送 `Ready` 前轮询 viewport，等待 `CLI_SPECS` 里 `tui_ready_marker` 指定的子串（大小写不敏感）出现，再放行第一条输入（初始 prompt / 首条 stdin 消息）。已知 marker 用精确欢迎语（kimi `"Welcome to Kimi Code"`），未知的用通用 `"Welcome"`；`None` 表示不等待（codex/traex 在 `write_input` 内部自守，gemini/opencode 初始 prompt 走命令行参数）。adopt 会话连的是已运行 CLI，跳过等待。
+- TUI ready gate：TUI 类 CLI 在输入 UI 就绪前会丢弃键入的按键。worker 在 spawn 后、发送 `Ready` 前轮询 viewport，等待 `CLI_SPECS` 里 `tui_ready_marker` 指定的子串（大小写不敏感）出现，再放行第一条输入（初始 prompt / 首条 stdin 消息）。已知 marker 用精确欢迎语（kimi `"Welcome to Kimi Code"`，grok `"Grok"`，codex/traex `"›"`），未知的用通用 `"Welcome"`；`None` 表示不等待（gemini/opencode 初始 prompt 走命令行参数）。adopt 会话连的是已运行 CLI，跳过等待。Codex 在 `write_input` 里若仍看不到 `›` 会拒绝打字并回报失败。
 
 ## 2. 改动清单（3 个代码触点）
 
@@ -61,7 +61,7 @@ CliSpec {
 - **必须实现**三个方法：`build_spawn_spec` / `write_input` / `poll`。
 - **不要手写样板**，直接用 `crate::adapter` 的共享件：
   - `TranscriptCursor`（JSONL transcript 专用）：`drain(path)` 内含截断重置与 offset/tail 维护；`emit_if_new(text)` 同文去重；`reset_dedupe()` 新用户 turn 时调用；`skip_to(size)` adopt 基线跳过历史。state 里不要再带 `transcript_offset` / `pending_tail` / `emitted_final_text` 字段。
-  - `confirm_submit_loop(backend, || ...)`：实现「4×800ms 用 transcript 确认提交，未确认时补 Enter」的统一策略。发送阶段（`send_text`、换行方式、首个 Enter 前的 sleep）各 adapter 不同，自行保留；确认阶段一律用这个 helper。最终失败必须返回 `failure_reason`，不要谎报 `submitted`。
+  - 排队型 TUI（grok / kimi / codex）用 `composer::confirm_typed_submit`：入队即成功。提交前采样输入框真输入颜色，提交后空框或「整段统一且不是该颜色」视为 placeholder/已入队，不再补提交键；只有草稿还在才补一次。transcript 只作 idle 发出去的旁证。其它 CLI 仍可用 `confirm_submit_loop`（4×800ms，未确认补 Enter）。最终失败必须返回 `failure_reason`，不要谎报 `submitted`。
 - `poll` 约定：`final_output`、`final_output_kind = FinalOutputKind::Bridge`、`prompt_ready = true` 三者一起设置；中间步骤文本不产出。
 - **可选能力钩子**（默认 no-op，多数 adapter 不需要）：
   - `on_spawned(child_pid)`：需要跟踪 CLI 进程 PID 时（claude、codex）。

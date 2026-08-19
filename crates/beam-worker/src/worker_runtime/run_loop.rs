@@ -25,6 +25,22 @@ pub(crate) fn maybe_inject_term(
     }
 }
 
+/// Consecutive dead `is_alive` samples required before emitting `CliExit`.
+/// A single false negative (empty `list-panes`, transient pane hide) must
+/// not tear the worker down.
+pub(crate) const CLI_DEAD_CONFIRM_ATTEMPTS: usize = 3;
+
+/// Count consecutive dead liveness samples. Returns true when the worker
+/// should emit `CliExit`.
+pub(crate) fn should_emit_cli_exit(consecutive_dead: &mut usize, alive: bool) -> bool {
+    if alive {
+        *consecutive_dead = 0;
+        return false;
+    }
+    *consecutive_dead = consecutive_dead.saturating_add(1);
+    *consecutive_dead >= CLI_DEAD_CONFIRM_ATTEMPTS
+}
+
 pub(crate) async fn send_message(
     stdout: &Arc<Mutex<tokio::io::Stdout>>,
     msg: &WorkerToDaemon,
@@ -170,10 +186,12 @@ pub async fn run(init: InitConfig) -> Result<()> {
     let screen_capture_task = tokio::spawn(async move {
         let mut last_emitted_status = ScreenStatus::Starting;
         let mut last_emitted_usage_limit: Option<CliUsageLimitState> = None;
+        let mut consecutive_dead = 0usize;
         loop {
             let (screen, alive) = {
                 let screen = sample_backend.capture_viewport().await.unwrap_or_default();
-                let alive = sample_backend.is_alive().await.unwrap_or(false);
+                // Unknown/error is alive: a wedged probe must not emit CliExit.
+                let alive = sample_backend.is_alive().await.unwrap_or(true);
                 (screen, alive)
             };
 
@@ -282,7 +300,11 @@ pub async fn run(init: InitConfig) -> Result<()> {
                 }
             }
 
-            if !alive {
+            if should_emit_cli_exit(&mut consecutive_dead, alive) {
+                warn!(
+                    consecutive_dead,
+                    "cli liveness dead confirmed, emitting CliExit"
+                );
                 let _ = send_message(
                     &sample_stdout,
                     &WorkerToDaemon::CliExit {
@@ -292,6 +314,13 @@ pub async fn run(init: InitConfig) -> Result<()> {
                 )
                 .await;
                 break;
+            }
+            if !alive {
+                warn!(
+                    consecutive_dead,
+                    confirm_after = CLI_DEAD_CONFIRM_ATTEMPTS,
+                    "cli liveness dead, waiting for confirmation"
+                );
             }
 
             tokio::time::sleep(Duration::from_millis(5000)).await;
@@ -525,6 +554,12 @@ pub async fn run(init: InitConfig) -> Result<()> {
             .await?;
         if let Some(cli_session_id) = submit.cli_session_id {
             send_message(&stdout, &WorkerToDaemon::CliSessionId { cli_session_id }).await?;
+        }
+        if !submit.submitted {
+            let message = submit
+                .failure_reason
+                .unwrap_or_else(|| "CLI submit could not be confirmed".to_string());
+            send_message(&stdout, &WorkerToDaemon::UserNotify { message }).await?;
         }
     }
 
@@ -905,5 +940,30 @@ mod tests {
             daemon_message_desc(&DaemonToWorker::RefreshScreen),
             "RefreshScreen"
         );
+    }
+
+    #[test]
+    fn cli_exit_requires_consecutive_dead_samples() {
+        assert_eq!(CLI_DEAD_CONFIRM_ATTEMPTS, 3);
+        let mut dead = 0;
+        assert!(!should_emit_cli_exit(&mut dead, false));
+        assert_eq!(dead, 1);
+        assert!(!should_emit_cli_exit(&mut dead, false));
+        assert_eq!(dead, 2);
+        assert!(should_emit_cli_exit(&mut dead, false));
+        assert_eq!(dead, 3);
+        assert!(should_emit_cli_exit(&mut dead, false));
+        assert_eq!(dead, 4);
+    }
+
+    #[test]
+    fn cli_exit_counter_resets_on_alive() {
+        let mut dead = 0;
+        assert!(!should_emit_cli_exit(&mut dead, false));
+        assert!(!should_emit_cli_exit(&mut dead, false));
+        assert!(!should_emit_cli_exit(&mut dead, true));
+        assert_eq!(dead, 0);
+        assert!(!should_emit_cli_exit(&mut dead, false));
+        assert_eq!(dead, 1);
     }
 }

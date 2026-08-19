@@ -7,10 +7,11 @@ use beam_core::{FinalOutputKind, InitConfig};
 use serde_json::Value;
 
 use crate::adapter::{
-    Adapter, PollResult, SpawnSpec, SubmitResult, TranscriptCursor, confirm_submit_loop,
-    drain_jsonl, file_size, normalize_history_text, realpath_cwd,
+    Adapter, PollResult, SpawnSpec, SubmitResult, TranscriptCursor, drain_jsonl, file_size,
+    normalize_history_text, realpath_cwd,
 };
 use crate::backend::SessionBackend;
+use crate::composer::{KIMI_COMPOSER, confirm_typed_submit, sample_draft_fgs};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct KimiState {
@@ -74,14 +75,25 @@ impl Adapter for KimiState {
 
         backend.send_text(content).await?;
         tokio::time::sleep(Duration::from_millis(200)).await;
+        let draft_fgs = sample_draft_fgs(
+            &backend.capture_viewport().await.unwrap_or_default(),
+            KIMI_COMPOSER,
+        );
         backend.send_enter().await?;
 
-        let confirmed = confirm_submit_loop(backend, || {
-            let Some(path) = resolve_transcript_path(self) else {
-                return Ok(false);
-            };
-            kimi_submit_confirmed(&path, base_size, content)
-        })
+        let confirmed = confirm_typed_submit(
+            backend,
+            KIMI_COMPOSER,
+            &draft_fgs,
+            "enter",
+            || {
+                let Some(path) = resolve_transcript_path(self) else {
+                    return Ok(false);
+                };
+                kimi_submit_confirmed(&path, base_size, content)
+            },
+            || backend.send_enter(),
+        )
         .await?;
 
         if confirmed {
@@ -97,7 +109,7 @@ impl Adapter for KimiState {
         Ok(SubmitResult {
             submitted: false,
             cli_session_id: self.cli_session_id.clone(),
-            failure_reason: Some("Kimi transcript did not confirm submit".to_string()),
+            failure_reason: Some("Kimi did not accept the input".to_string()),
         })
     }
 
@@ -742,7 +754,7 @@ mod tests {
                 .failure_reason
                 .as_deref()
                 .unwrap_or("")
-                .contains("did not confirm")
+                .contains("did not accept")
         );
     }
 

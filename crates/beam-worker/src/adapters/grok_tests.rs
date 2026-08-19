@@ -503,7 +503,7 @@ async fn write_input_fails_when_transcript_does_not_confirm() {
             .failure_reason
             .as_deref()
             .unwrap_or("")
-            .contains("did not confirm")
+            .contains("did not accept")
     );
 }
 
