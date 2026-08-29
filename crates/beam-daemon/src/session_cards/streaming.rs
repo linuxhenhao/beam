@@ -71,7 +71,11 @@ pub(crate) fn status_card_text<'a>(locale: Option<&str>, status: &'a str) -> &'a
 /// call `start_pending_response_turn` — that would mark the streaming card as the
 /// pending response target, causing `deliver_final_output_once` to PATCH-overwrite
 /// the terminal card with reply content.
-pub(crate) fn build_streaming_card(session: &Session, status: &str) -> String {
+pub(crate) fn build_streaming_card(
+    session: &Session,
+    status: &str,
+    herdr_terminal: bool,
+) -> String {
     let locale = session.locale.as_deref();
     let title = if session.title.trim().is_empty() {
         session.session_id.clone()
@@ -178,9 +182,13 @@ pub(crate) fn build_streaming_card(session: &Session, status: &str) -> String {
             "card_nonce": card_nonce.clone(),
         }
     }));
-    // Herdr v1 has no web terminal: do not emit buttons that proxy to zellij
-    // web. The card carries a `herdr agent attach` hint instead (Q6 = show).
-    if session.backend_kind == BackendKind::Zellij {
+    // Zellij always gets terminal buttons. Herdr gets them once the pane is
+    // ready and the web terminal is not killed by `web.herdr_terminal=false`;
+    // otherwise the card carries a `herdr agent attach` hint.
+    let herdr_terminal_ready = session.backend_kind == BackendKind::Herdr
+        && herdr_terminal
+        && session.herdr_pane_id.is_some();
+    if session.backend_kind == BackendKind::Zellij || herdr_terminal_ready {
         actions.push(serde_json::json!({
             "tag": "button",
             "text": card_i18n::plain_text(locale, "选择只读终端入口", "Choose read-only terminal entry"),
@@ -206,7 +214,7 @@ pub(crate) fn build_streaming_card(session: &Session, status: &str) -> String {
                 "card_nonce": action_nonce,
             }
         }));
-    } else {
+    } else if session.backend_kind == BackendKind::Herdr {
         elements.push(serde_json::json!({
             "tag": "markdown",
             "content": "attach with: `herdr agent attach`",

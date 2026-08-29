@@ -44,6 +44,17 @@ pub struct WebConfig {
     /// after PR5 lands.
     #[serde(default = "default_zellij_web")]
     pub zellij_web: bool,
+    /// Emergency kill switch for the Herdr browser terminal. Defaults to
+    /// `true`; set to `false` to restore the pre-web behavior (Herdr sessions
+    /// get a 404 on `/s/{session_id}` and the card shows the attach hint).
+    #[serde(default = "default_herdr_terminal")]
+    pub herdr_terminal: bool,
+    /// Max concurrent `herdr terminal session observe` children per session.
+    #[serde(default = "default_herdr_max_observers_per_session")]
+    pub herdr_terminal_max_observers_per_session: usize,
+    /// Max concurrent `herdr terminal session observe` children daemon-wide.
+    #[serde(default = "default_herdr_max_observers_global")]
+    pub herdr_terminal_max_observers_global: usize,
 }
 
 fn default_web_host() -> String {
@@ -58,12 +69,27 @@ fn default_zellij_web() -> bool {
     true
 }
 
+fn default_herdr_terminal() -> bool {
+    true
+}
+
+fn default_herdr_max_observers_per_session() -> usize {
+    8
+}
+
+fn default_herdr_max_observers_global() -> usize {
+    64
+}
+
 impl Default for WebConfig {
     fn default() -> Self {
         Self {
             host: default_web_host(),
             proxy_base_port: default_proxy_base_port(),
             zellij_web: default_zellij_web(),
+            herdr_terminal: default_herdr_terminal(),
+            herdr_terminal_max_observers_per_session: default_herdr_max_observers_per_session(),
+            herdr_terminal_max_observers_global: default_herdr_max_observers_global(),
         }
     }
 }

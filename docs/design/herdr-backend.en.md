@@ -189,7 +189,7 @@ Official guidance: start automation with CLI wrappers; use the raw socket for lo
 | Workspace/pane CRUD, send-text/keys, read, process_info, agent list/get | `herdr …`, parse JSON stdout | Debuggable, matches documented examples, schema ships with the binary |
 | Screen push | `herdr terminal session observe <pane> --cols 160 --rows 50` | Built for third-party bridges; many observers; does not own input/resize |
 | Agent-state push | Unix socket `events.subscribe` (long-lived inside the worker) | CLI has no equivalent long subscribe; fall back to polling `agent get` |
-| Writable web terminal (later) | `herdr terminal session control --takeover` | Only one controller at a time |
+| Writable web terminal (v2; see `herdr-web-terminal.en.md`) | `herdr terminal session control` (no `--takeover`) | Only one controller at a time; conflicts return 4001 + read-only downgrade |
 
 Constraints:
 
@@ -552,12 +552,12 @@ Discovery (much cleaner than zellij dump-layout):
 
 Herdr remote is SSH / `herdr --remote`, not HTTP. Third parties already wrap the Herdr socket in HTTP (e.g. herdr-controller); Beam does **not** take that as a dependency.
 
-**Product-confirmed (Q3): the web terminal is deferred; xterm.js does not ship in v1. PR6 is a separate design/PR outside v1 success criteria.**
+**Product-confirmed (Q3): the web terminal is deferred; xterm.js does not ship in v1. PR6 is a separate design/PR outside v1 success criteria.** The v2 web terminal is now its own document: `docs/design/herdr-web-terminal.en.md` (PR-A0…PR-A6), which revises this file's earlier "writable uses `control --takeover`" v2 conclusion (see the phase table and threat model below).
 
 | Phase | Behavior |
 | --- | --- |
 | v1 | Herdr sessions get **no** `terminal_url`. Screenshot cards use card-ready (PR2), not the URL. Zellij sessions keep the existing proxy. **Daemon start still calls `ensure_zellij_web`** (`lib.rs` ~828–837); a machine without zellij cannot start beam even with `backend=herdr`. That is a v1 constraint, not something a config switch already solves, until PR5's `web.zellij_web = false` lands and is tested. Do not advertise v1 as herdr-only |
-| v2 (separate design/PR) | A Beam-owned xterm.js page fed by `terminal session observe` (read-only) or `control --takeover` (write). Reuse tickets/cookies, but the **upstream is no longer zellij web**. Resize goes through `terminal.resize` JSON. Do not build this in v1 (Q3 confirmed: deferred) |
+| v2 (separate design/PR; see `herdr-web-terminal.en.md`) | A Beam-owned xterm.js page fed by `terminal session observe` (read-only) or `control` (write, **no** `--takeover`; conflicts return 4001 + read-only downgrade). Reuse tickets/cookies, but the **upstream is no longer zellij web**. Resize goes through `terminal.resize` JSON. Do not build this in v1 (Q3 confirmed: deferred) |
 
 v1 success **does not** include browser-terminal parity, and **does not** include a daemon with no zellij binary. Managed + adopt + cards must be mergeable without a Herdr web terminal.
 
@@ -773,7 +773,7 @@ Older docs still call tmux the default. The code no longer has it.
 | Threat | Severity | Mitigation |
 | --- | --- | --- |
 | Shared Herdr Unix socket is callable by other processes of the same user (workspace.close every Beam pane) | High (local same-user) | Accept the same trust model as `~/.config/herdr/herdr.sock`; document it. Never expose the socket on TCP. Named-session mode later |
-| `terminal session control --takeover` steals input from a human or another bridge | High | v1 does not use control. v2 takeovers only when the user clicked a writable terminal ticket |
+| `terminal session control --takeover` steals input from a human or another bridge | High | v1 does not use control. v2 does not takeover by default: the writable terminal uses `control` (no `--takeover`), conflicts return 4001 + read-only downgrade, and `--takeover` is reserved for an explicit "take over" button action (see `herdr-web-terminal.en.md`) |
 | Observe frames contain secrets, prompts, tokens | Medium | Same as today's dump-screen: frames enter Beam logs/cards. Keep log redaction (`docs/design/logging.md`). Do not log raw base64 frames at INFO |
 | `pane_history` writes screens into Herdr `session-history.json` | Medium | Beam does not enable it; that is the user's Herdr config |
 | `HERDR_ENV=1` on the in-pane CLI lets the agent drive the same Herdr server (open panes, read neighbors) | Medium | Same-user local machine is already the trust boundary; document it. Do not widen it from the daemon host |

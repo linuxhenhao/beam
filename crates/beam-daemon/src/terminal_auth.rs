@@ -40,6 +40,8 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tokio::sync::Mutex;
 
+use beam_core::BackendKind;
+
 type HmacSha256 = Hmac<Sha256>;
 
 /// How long a write terminal ticket is valid after creation.
@@ -123,6 +125,51 @@ pub struct TerminalTicketPayload {
     pub permission: TerminalPermission,
     pub created_at: u64,
     pub nonce: String,
+}
+
+/// Backend-specific upstream identity stored in the server-side cookie jar.
+///
+/// - Zellij: the zellij web session cookie captured from `/command/login`.
+/// - Herdr: the workspace/pane ids persisted on `Session`; there is no
+///   upstream HTTP service or cookie, the bridge is an NDJSON subprocess.
+#[derive(Debug, Clone)]
+pub enum UpstreamTarget {
+    Zellij {
+        cookie: String,
+    },
+    Herdr {
+        workspace_id: String,
+        pane_id: String,
+    },
+}
+
+impl UpstreamTarget {
+    pub fn backend_kind(&self) -> BackendKind {
+        match self {
+            UpstreamTarget::Zellij { .. } => BackendKind::Zellij,
+            UpstreamTarget::Herdr { .. } => BackendKind::Herdr,
+        }
+    }
+}
+
+/// A successfully authenticated terminal request: backend, upstream identity
+/// and the permission recorded when the ticket/cookie was issued.
+#[derive(Debug, Clone)]
+pub struct AuthenticatedTerminal {
+    pub backend_kind: BackendKind,
+    pub upstream: UpstreamTarget,
+    pub permission: TerminalPermission,
+    pub session_id: String,
+}
+
+impl AuthenticatedTerminal {
+    /// The zellij web session cookie, if this terminal is zellij-backed.
+    pub fn zellij_cookie(&self) -> Option<&str> {
+        match &self.upstream {
+            UpstreamTarget::Zellij { cookie } => Some(cookie),
+            UpstreamTarget::Herdr { .. } => None,
+        }
+    }
 }
 
 // ── Public API: ticket generation / verification ────────────────────────
@@ -300,13 +347,12 @@ impl UsedTickets {
 
 // ── Server-side cookie jar ──────────────────────────────────────────────
 
-/// An entry mapping a Beam cookie to a zellij session cookie.
+/// An entry mapping a Beam cookie to a backend-specific upstream identity.
 #[derive(Debug, Clone)]
 struct BeamCookieEntry {
-    /// The zellij session cookie captured from /command/login Set-Cookie.
-    zellij_cookie: String,
     pub session_id: String,
     pub permission: TerminalPermission,
+    pub upstream: UpstreamTarget,
     pub created_at: Instant,
 }
 
@@ -352,12 +398,12 @@ impl TerminalAuthState {
         .await;
     }
 
-    /// Store a zellij cookie entry and return a new Beam cookie value.
+    /// Store an upstream identity entry and return a new Beam cookie value.
     pub async fn insert(
         &self,
-        zellij_cookie: String,
         session_id: String,
         permission: TerminalPermission,
+        upstream: UpstreamTarget,
     ) -> String {
         let mut inner = self.inner.lock().await;
         inner.prune();
@@ -365,9 +411,9 @@ impl TerminalAuthState {
         inner.entries.insert(
             beam_cookie.clone(),
             BeamCookieEntry {
-                zellij_cookie,
                 session_id,
                 permission,
+                upstream,
                 created_at: Instant::now(),
             },
         );
@@ -375,14 +421,19 @@ impl TerminalAuthState {
     }
 
     /// Look up a Beam cookie value and return the mapped entry.
-    /// Returns `(zellij_cookie, session_id, permission)` if found and not expired.
-    pub async fn lookup(&self, beam_cookie: &str) -> Option<(String, String, TerminalPermission)> {
+    /// Returns the authenticated terminal identity if found and not expired.
+    pub async fn lookup(&self, beam_cookie: &str) -> Option<AuthenticatedTerminal> {
         let mut inner = self.inner.lock().await;
         inner.prune();
         inner
             .entries
             .get(beam_cookie)
-            .map(|e| (e.zellij_cookie.clone(), e.session_id.clone(), e.permission))
+            .map(|e| AuthenticatedTerminal {
+                backend_kind: e.upstream.backend_kind(),
+                upstream: e.upstream.clone(),
+                permission: e.permission,
+                session_id: e.session_id.clone(),
+            })
     }
 
     /// Verify a ticket and mark it as used. Convenience combining verify + mark.
@@ -699,24 +750,60 @@ mod tests {
     #[tokio::test]
     async fn auth_state_maps_external_beam_cookie_to_internal_zellij_cookie() {
         let auth = TerminalAuthState::new();
-        let zellij_cookie = "zellij-session=secret-upstream-cookie".to_string();
 
         let beam_cookie = auth
             .insert(
-                zellij_cookie.clone(),
                 "beam-session-1".to_string(),
                 TerminalPermission::Write,
+                UpstreamTarget::Zellij {
+                    cookie: "zellij-session=secret-upstream-cookie".to_string(),
+                },
             )
             .await;
 
-        assert_ne!(beam_cookie, zellij_cookie);
-        let (stored_zellij_cookie, stored_session_id, stored_permission) = auth
+        let entry = auth
             .lookup(&beam_cookie)
             .await
             .expect("stored cookie entry");
-        assert_eq!(stored_zellij_cookie, zellij_cookie);
-        assert_eq!(stored_session_id, "beam-session-1");
-        assert_eq!(stored_permission, TerminalPermission::Write);
+        assert_eq!(entry.session_id, "beam-session-1");
+        assert_eq!(entry.permission, TerminalPermission::Write);
+        assert_eq!(entry.backend_kind, BackendKind::Zellij);
+        assert!(matches!(
+            entry.upstream,
+            UpstreamTarget::Zellij { cookie } if cookie == "zellij-session=secret-upstream-cookie"
+        ));
+    }
+
+    #[tokio::test]
+    async fn auth_state_roundtrips_herdr_upstream_identity() {
+        let auth = TerminalAuthState::new();
+        let beam_cookie = auth
+            .insert(
+                "beam-session-2".to_string(),
+                TerminalPermission::ReadOnly,
+                UpstreamTarget::Herdr {
+                    workspace_id: "w1".to_string(),
+                    pane_id: "w1:p1".to_string(),
+                },
+            )
+            .await;
+
+        let entry = auth
+            .lookup(&beam_cookie)
+            .await
+            .expect("stored cookie entry");
+        assert_eq!(entry.backend_kind, BackendKind::Herdr);
+        assert!(matches!(
+            entry.upstream,
+            UpstreamTarget::Herdr { workspace_id, pane_id }
+                if workspace_id == "w1" && pane_id == "w1:p1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn auth_state_lookup_returns_none_for_unknown_cookie() {
+        let auth = TerminalAuthState::new();
+        assert!(auth.lookup("no-such-cookie").await.is_none());
     }
 
     // ── UsedTickets ────────────────────────────────────────────────

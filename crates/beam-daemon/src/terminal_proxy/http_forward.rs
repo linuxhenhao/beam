@@ -14,14 +14,16 @@ use axum::{
 use reqwest::{Client, header as reqwest_header};
 use tracing::{debug, warn};
 
+use beam_core::BackendKind;
+
 use crate::terminal_auth;
-use crate::terminal_auth::TICKET_QUERY_PARAM;
+use crate::terminal_auth::{AuthenticatedTerminal, TICKET_QUERY_PARAM};
 
 use super::anchor::{self, should_ensure_read_only_anchor};
 use super::auth;
 use super::{
     HOP_BY_HOP, ProxyState, build_root_target_url, build_target_url, is_hop_by_hop,
-    is_websocket_handshake_header, is_websocket_upgrade, resolve_zellij_session,
+    is_websocket_handshake_header, is_websocket_upgrade, resolve_session, resolve_zellij_session,
     should_strip_response_header,
 };
 
@@ -310,8 +312,25 @@ pub(crate) async fn handle_session_terminal(
     Query(params): Query<HashMap<String, String>>,
     req: axum::extract::Request,
 ) -> Response {
-    // Check if zellij session exists
-    if resolve_zellij_session(&state.sessions, &session_id)
+    let Some(session) = resolve_session(&state.sessions, &session_id).await else {
+        debug!(
+            component = "terminal_proxy",
+            operation = "http_request",
+            outcome = "not_found",
+            session_id = session_id,
+            "terminal proxy: session {session_id} not found"
+        );
+        return (StatusCode::NOT_FOUND, "session not found").into_response();
+    };
+    let is_herdr = session.backend_kind == BackendKind::Herdr;
+    if is_herdr {
+        if !state.herdr_web.enabled {
+            return (StatusCode::NOT_FOUND, "terminal disabled").into_response();
+        }
+        if session.herdr_pane_id.is_none() {
+            return (StatusCode::NOT_FOUND, "session ended").into_response();
+        }
+    } else if resolve_zellij_session(&state.sessions, &session_id)
         .await
         .is_none()
     {
@@ -320,7 +339,7 @@ pub(crate) async fn handle_session_terminal(
             operation = "http_request",
             outcome = "not_found",
             session_id = session_id,
-            "terminal proxy: session {session_id} not found"
+            "terminal proxy: zellij session {session_id} not found"
         );
         return (StatusCode::NOT_FOUND, "session not found").into_response();
     }
@@ -343,7 +362,9 @@ pub(crate) async fn handle_session_terminal(
     if ticket.is_none() {
         if let Some(auth) = auth::authenticate_via_beam_cookie(&state, &session_id, &headers).await
         {
-            // Authenticated via cookie — proxy with injected zellij cookie
+            if is_herdr {
+                return serve_herdr_terminal_page(&session_id, auth);
+            }
             debug!(
                 component = "terminal_proxy",
                 operation = "http_request",
@@ -363,7 +384,8 @@ pub(crate) async fn handle_session_terminal(
                 &zellij_session,
                 "",
                 req,
-                &auth.zellij_cookie,
+                auth.zellij_cookie()
+                    .expect("zellij session authenticated with zellij cookie"),
                 Some(&session_id), // rewrite base href for this session
             )
             .await;
@@ -426,6 +448,23 @@ pub(crate) async fn handle_session_terminal(
         .into_response()
 }
 
+/// Serve the built-in Herdr terminal page after cookie authentication.
+fn serve_herdr_terminal_page(session_id: &str, _auth: AuthenticatedTerminal) -> Response {
+    debug!(
+        component = "terminal_proxy",
+        operation = "http_request",
+        outcome = "success",
+        session_id = session_id,
+        "terminal proxy: serving herdr terminal page for session {session_id}"
+    );
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        super::static_assets::INDEX_HTML,
+    )
+        .into_response()
+}
+
 // ── Handler: /s/{session_id}/{path} ──────────────────────────────────────
 
 /// Handle /s/{session_id}/{path} — proxy to zellij web.
@@ -459,6 +498,11 @@ pub(crate) async fn handle_session_path(
         );
         return (StatusCode::UNAUTHORIZED, "terminal authentication required").into_response();
     };
+    if auth.backend_kind == BackendKind::Herdr {
+        // Herdr sessions only use the session page + `/s/{sid}/ws/herdr`; no
+        // session-scoped assets are proxied to zellij.
+        return (StatusCode::NOT_FOUND, "session not found").into_response();
+    }
     debug!(
         component = "terminal_proxy",
         operation = "http_request",
@@ -480,7 +524,7 @@ pub(crate) async fn handle_session_path(
             state.zellij_web_port,
             &path,
             req,
-            Some(&auth.zellij_cookie),
+            auth.zellij_cookie(),
             Some(&session_id),
         )
         .await
@@ -496,7 +540,7 @@ pub(crate) async fn handle_session_path(
             &zellij_session,
             &path,
             req,
-            Some(&auth.zellij_cookie),
+            auth.zellij_cookie(),
             None,
         )
         .await

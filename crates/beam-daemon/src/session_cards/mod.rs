@@ -6,6 +6,10 @@ pub(crate) mod terminal_links;
 #[path = "tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "tests_herdr.rs"]
+mod tests_herdr;
+
 // Re-export everything so that `pub(crate) use session_cards::*;` in lib.rs
 // continues to expose all items at the crate level with zero call-site changes.
 #[allow(unused_imports)]

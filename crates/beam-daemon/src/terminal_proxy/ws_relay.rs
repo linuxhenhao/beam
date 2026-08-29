@@ -80,7 +80,7 @@ pub(crate) async fn handle_session_ws(
         viewer_counter.increment(&zellij_session_for_count).await;
 
         // Connect to zellij WS with optional cookie.
-        let result = connect_ws_with_cookie(&ws_url, Some(&auth.zellij_cookie)).await;
+        let result = connect_ws_with_cookie(&ws_url, auth.zellij_cookie()).await;
         match result {
             Ok(zellij_ws) => {
                 relay_ws(client_socket, zellij_ws).await;
@@ -173,7 +173,7 @@ pub(crate) async fn handle_session_root_ws(
             viewer_counter.increment(&zellij_session_for_count).await;
         }
 
-        let result = connect_ws_with_cookie(&ws_url, Some(&auth.zellij_cookie)).await;
+        let result = connect_ws_with_cookie(&ws_url, auth.zellij_cookie()).await;
         match result {
             Ok(zellij_ws) => {
                 relay_ws(client_socket, zellij_ws).await;

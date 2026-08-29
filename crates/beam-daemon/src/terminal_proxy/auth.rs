@@ -1,7 +1,9 @@
 //! Ticket/cookie authentication for terminal proxy.
 //!
 //! Handles zellij web login, beam ticket verification, beam cookie lookup,
-//! and the [`AuthenticatedTerminal`] result used by handlers.
+//! and the [`AuthenticatedTerminal`] result used by handlers. The ticket and
+//! cookie machinery is shared by both backends; only the upstream identity
+//! (zellij cookie vs herdr pane ids) differs.
 
 use axum::{
     http::{HeaderMap, HeaderName, StatusCode},
@@ -10,19 +12,17 @@ use axum::{
 use reqwest::{Client, header as reqwest_header};
 use tracing::{debug, warn};
 
+use beam_core::BackendKind;
+
 use crate::terminal_auth;
-use crate::terminal_auth::{BEAM_COOKIE_NAME, TerminalPermission};
+use crate::terminal_auth::{
+    AuthenticatedTerminal, BEAM_COOKIE_NAME, TerminalPermission, UpstreamTarget,
+};
 
 use super::anchor::{self, should_ensure_read_only_anchor};
 use super::{
     ProxyState, resolve_zellij_session, unavailable_token_message, zellij_token_for_permission,
 };
-
-/// Result of authenticating a request via beam cookie.
-pub(crate) struct AuthenticatedTerminal {
-    pub(crate) zellij_cookie: String,
-    pub(crate) permission: TerminalPermission,
-}
 
 /// Build a Set-Cookie header value for the Beam terminal session cookie.
 pub(crate) fn build_beam_set_cookie(beam_cookie: &str) -> String {
@@ -99,7 +99,8 @@ pub(crate) async fn zellij_web_login(
 }
 
 /// Extract the Beam cookie from request Cookie header and look up the
-/// corresponding zellij cookie. Returns the zellij cookie value if valid.
+/// backend-specific upstream identity. Returns it if valid and bound to the
+/// requested session.
 pub(crate) async fn authenticate_via_beam_cookie(
     state: &ProxyState,
     session_id: &str,
@@ -122,17 +123,15 @@ pub(crate) async fn authenticate_via_beam_cookie(
             return None;
         }
     };
-    let (zellij_cookie, stored_session_id, permission) =
-        state.auth_state.lookup(&beam_cookie).await?;
-    // Verify the cookie is for the requested session
-    if stored_session_id != session_id {
+    let entry = state.auth_state.lookup(&beam_cookie).await?;
+    if entry.session_id != session_id {
         warn!(
             component = "terminal_proxy",
             operation = "cookie_auth",
             outcome = "session_mismatch",
             session_id = session_id,
             "terminal proxy: beam cookie session mismatch: cookie for {} but requested {}",
-            stored_session_id,
+            entry.session_id,
             session_id
         );
         return None;
@@ -144,22 +143,21 @@ pub(crate) async fn authenticate_via_beam_cookie(
         session_id = session_id,
         "terminal proxy: beam cookie OK for session {session_id}"
     );
-    Some(AuthenticatedTerminal {
-        zellij_cookie,
-        permission,
-    })
+    Some(entry)
 }
 
-/// Try to authenticate via ticket, call zellij login, set Beam cookie,
-/// and redirect to clean URL.
+/// Try to authenticate via ticket, resolve the backend-specific upstream
+/// identity, set the Beam cookie, and redirect to the clean URL.
+///
+/// - Zellij: select token → zellij web login → read-only anchor → store the
+///   zellij cookie.
+/// - Herdr: no upstream login; store the persisted pane identity directly.
 pub(crate) async fn try_ticket_login(
     state: &ProxyState,
     session_id: &str,
     ticket: Option<&str>,
 ) -> Result<Response, Response> {
-    // Determine auth token and permission
-    let (auth_token, permission): (String, TerminalPermission) = if let Some(ticket) = ticket {
-        // New flow: verify ticket
+    let (permission, upstream) = if let Some(ticket) = ticket {
         debug!(
             component = "terminal_proxy",
             operation = "ticket_auth",
@@ -194,63 +192,99 @@ pub(crate) async fn try_ticket_login(
             "terminal proxy: ticket verified for session {session_id} permission={:?}",
             payload.permission
         );
-        let token = zellij_token_for_permission(&state.zellij_tokens, payload.permission)
-            .ok_or_else(|| {
-                warn!(
+
+        let session = {
+            let sessions = state.sessions.lock().await;
+            sessions.get(session_id).cloned()
+        }
+        .ok_or_else(|| {
+            debug!(
+                component = "terminal_proxy",
+                operation = "ticket_auth",
+                outcome = "session_missing",
+                session_id = session_id,
+                "terminal proxy: session {session_id} not found"
+            );
+            (StatusCode::NOT_FOUND, "session not found").into_response()
+        })?;
+
+        let permission = payload.permission;
+        let upstream = match session.backend_kind {
+            BackendKind::Zellij => {
+                let token = zellij_token_for_permission(&state.zellij_tokens, permission)
+                    .ok_or_else(|| {
+                        warn!(
+                            component = "terminal_proxy",
+                            operation = "ticket_auth",
+                            outcome = "token_unavailable",
+                            session_id = session_id,
+                            "terminal proxy: {} unavailable for session {session_id}",
+                            unavailable_token_message(permission)
+                        );
+                        (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            unavailable_token_message(permission),
+                        )
+                            .into_response()
+                    })?;
+                debug!(
                     component = "terminal_proxy",
                     operation = "ticket_auth",
-                    outcome = "token_unavailable",
+                    outcome = "logging_in",
                     session_id = session_id,
-                    "terminal proxy: {} unavailable for session {session_id}",
-                    unavailable_token_message(payload.permission)
+                    "terminal proxy: calling zellij web login for session {session_id} permission={permission:?}"
                 );
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    unavailable_token_message(payload.permission),
-                )
-                    .into_response()
-            })?;
-        (token.to_string(), payload.permission)
+                let zellij_cookie =
+                    zellij_web_login(&state.http_client, state.zellij_web_port, token)
+                        .await
+                        .map_err(|(status, msg)| {
+                            warn!(
+                                component = "terminal_proxy",
+                                operation = "ticket_auth",
+                                outcome = "upstream_error",
+                                session_id = session_id,
+                                status = status.as_u16(),
+                                "terminal proxy: zellij web login failed for session {session_id}: {status} {msg}"
+                            );
+                            (status, msg).into_response()
+                        })?;
+                debug!(
+                    component = "terminal_proxy",
+                    operation = "ticket_auth",
+                    outcome = "login_ok",
+                    session_id = session_id,
+                    "terminal proxy: zellij web login OK for session {session_id}"
+                );
+                UpstreamTarget::Zellij {
+                    cookie: zellij_cookie,
+                }
+            }
+            BackendKind::Herdr => {
+                let workspace_id = session.herdr_workspace_id.clone().ok_or_else(|| {
+                    (StatusCode::NOT_FOUND, "herdr workspace not available").into_response()
+                })?;
+                let pane_id = session.herdr_pane_id.clone().ok_or_else(|| {
+                    (StatusCode::NOT_FOUND, "herdr pane not available").into_response()
+                })?;
+                UpstreamTarget::Herdr {
+                    workspace_id,
+                    pane_id,
+                }
+            }
+        };
+        (permission, upstream)
     } else {
         return Err((StatusCode::UNAUTHORIZED, "terminal authentication required").into_response());
     };
 
-    // Call zellij web login
-    debug!(
-        component = "terminal_proxy",
-        operation = "ticket_auth",
-        outcome = "logging_in",
-        session_id = session_id,
-        "terminal proxy: calling zellij web login for session {session_id} permission={permission:?}"
-    );
-    let zellij_cookie = zellij_web_login(&state.http_client, state.zellij_web_port, &auth_token)
-        .await
-        .map_err(|(status, msg)| {
-            warn!(
-                component = "terminal_proxy",
-                operation = "ticket_auth",
-                outcome = "upstream_error",
-                session_id = session_id,
-                status = status.as_u16(),
-                "terminal proxy: zellij web login failed for session {session_id}: {status} {msg}"
-            );
-            (status, msg).into_response()
-        })?;
-    debug!(
-        component = "terminal_proxy",
-        operation = "ticket_auth",
-        outcome = "login_ok",
-        session_id = session_id,
-        "terminal proxy: zellij web login OK for session {session_id}"
-    );
-
     // Store in server-side cookie jar and get Beam cookie
     let beam_cookie = state
         .auth_state
-        .insert(zellij_cookie, session_id.to_string(), permission)
+        .insert(session_id.to_string(), permission, upstream)
         .await;
 
-    if should_ensure_read_only_anchor(permission, &state.zellij_tokens)
+    if permission == TerminalPermission::ReadOnly
+        && should_ensure_read_only_anchor(permission, &state.zellij_tokens)
         && let Some(zellij_session) = resolve_zellij_session(&state.sessions, session_id).await
     {
         anchor::ensure_read_only_anchor(state, session_id, &zellij_session).await;

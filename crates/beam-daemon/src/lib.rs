@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
-
 mod api_token;
 mod ask;
 mod backend;
@@ -40,6 +39,7 @@ mod session_cards;
 mod session_creation;
 mod terminal_auth;
 mod terminal_proxy;
+pub mod test_hooks;
 mod trigger_log;
 mod utils;
 mod webhook_key;
@@ -855,6 +855,11 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         proxy_sessions,
         zellij_tokens,
         auth_state.clone(),
+        terminal_proxy::herdr_ws::HerdrWebLimits {
+            enabled: state.config.web.herdr_terminal,
+            max_observers_per_session: state.config.web.herdr_terminal_max_observers_per_session,
+            max_observers_global: state.config.web.herdr_terminal_max_observers_global,
+        },
     )
     .await
     .with_context(|| format!("failed to start terminal proxy on {proxy_host}:{proxy_port}"))?;
@@ -988,11 +993,6 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
 
     let _ = tokio::fs::remove_file(paths.runtime_state_json()).await;
     Ok(())
-}
-
-#[doc(hidden)]
-pub fn __test_resolve_external_host(bind_host: &str) -> String {
-    resolve_external_host(bind_host)
 }
 
 #[cfg(test)]

@@ -191,7 +191,7 @@ Herdr default session（一个 Unix socket，sidebar 能看见所有 agent）
 | workspace/pane CRUD、send-text/keys、read、process_info、agent list/get | `herdr …`，解析 JSON stdout | 可调试、跟文档例子一致、schema 随 binary |
 | 屏幕推送 | `herdr terminal session observe <pane> --cols 160 --rows 50` | 专为第三方桥设计；多观察者；不占 input/resize |
 | agent 状态推送 | Unix socket `events.subscribe`（worker 内长连） | CLI 没有等价长订阅；退化为 `agent get` 轮询 |
-| 可写 web 终端（后期） | `herdr terminal session control --takeover` | 同一时刻只能有一个 controller |
+| 可写 web 终端（v2，见 `herdr-web-terminal.md`） | `herdr terminal session control`（不带 `--takeover`） | 同一时刻只能有一个 controller；冲突返回 4001 + 只读降级 |
 
 约束：
 
@@ -554,12 +554,12 @@ sequenceDiagram
 
 Herdr 远程是 SSH / `herdr --remote`，不是 HTTP。第三方已经在 Herdr socket 外包 HTTP（例如 herdr-controller），Beam **不**把那当成依赖。
 
-**产品已确认（Q3）：v1 推迟 web 终端，xterm.js 不进 v1；PR6 作为单独设计/PR，在 v1 成功标准之外。**
+**产品已确认（Q3）：v1 推迟 web 终端，xterm.js 不进 v1；PR6 作为单独设计/PR，在 v1 成功标准之外。** v2 的 web 终端已独立成文：`docs/design/herdr-web-terminal.md`（PR-A0…PR-A6），并修订了本文件里「可写用 `control --takeover`」的 v2 定案（见下表与威胁模型）。
 
 | 阶段 | 行为 |
 | --- | --- |
 | v1 | Herdr session **不设** `terminal_url`。截图卡靠 card-ready（PR2）而不是 URL。Zellij session 仍用现有 proxy。**daemon 启动仍调用 `ensure_zellij_web`**（`lib.rs` ~828–837）；没有 zellij 的机器即使用 `backend=herdr` 也起不来。这是 v1 约束，不是配置开关能解决的，直到 PR5 的 `web.zellij_web = false` 落地并测过。不要把 v1 宣传成 herdr-only |
-| v2（单独设计/PR） | Beam 自有 xterm.js 页，喂 `terminal session observe`（只读）或 `control --takeover`（可写）。复用 ticket/cookie，但 **上游不再是 zellij web**。resize 走 `terminal.resize` JSON。不要在 v1 做（Q3 已确认：v1 推迟） |
+| v2（单独设计/PR，见 `herdr-web-terminal.md`） | Beam 自有 xterm.js 页，喂 `terminal session observe`（只读）或 `control`（可写，**不带** `--takeover`；冲突 4001 + 只读降级）。复用 ticket/cookie，但 **上游不再是 zellij web**。resize 走 `terminal.resize` JSON。不要在 v1 做（Q3 已确认：v1 推迟） |
 
 v1 成功标准 **不包括** 浏览器终端对等，也 **不包括** 无 zellij 二进制的 daemon。Managed + adopt + 卡片必须在没有 Herdr web 终端的情况下可合并。
 
@@ -775,7 +775,7 @@ v1 **不**改 trait。Herdr agent 状态走私有任务 + **独立** `MuxAgentSt
 | 威胁 | 严重度 | 缓解 |
 | --- | --- | --- |
 | 共享 Herdr Unix socket 可被同用户其他进程调用（workspace.close 所有 Beam pane） | 高（本地同用户） | 接受与 `~/.config/herdr/herdr.sock` 相同的信任模型；文档写明。不要把 socket 暴露到 TCP。后期 named session 模式 |
-| `terminal session control --takeover` 从人类或另一个 bridge 抢输入 | 高 | v1 不用 control。v2 只在用户点了可写终端 ticket 时 takeover |
+| `terminal session control --takeover` 从人类或另一个 bridge 抢输入 | 高 | v1 不用 control。v2 默认不 takeover：可写用 `control`（不带 `--takeover`），冲突返回 4001 + 只读降级；只有显式「接管」按钮动作才用 `--takeover`（见 `herdr-web-terminal.md`） |
 | Observe 帧含密钥、prompt、token | 中 | 与今天 dump-screen 一样：帧进 Beam 日志/卡片。日志继续脱敏（见 `docs/design/logging.md`）。不要把原始 base64 帧打到 INFO |
 | `pane_history` 把屏幕写到 Herdr `session-history.json` | 中 | Beam 不启用；那是用户的 Herdr 配置 |
 | 给 pane 内 CLI 的 `HERDR_ENV=1` 让 agent 驱动同一 Herdr server（开 pane、读邻居） | 中 | 同用户本机本就是信任边界；文档写明。不要从 daemon 主机任意扩大 |

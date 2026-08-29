@@ -43,20 +43,27 @@ daemon `run()` 中：
 proxy 收到 ticket 后：
 
 1. 验证 HMAC 签名、session id 和一次性 nonce。
-2. 按 ticket 权限选择 zellij web token：
-   - `ReadOnly` -> `read_only_token`
-   - `Write` -> `write_token`
-3. 调 zellij web：
+2. 按 `Session.backend_kind` 分派上游：
+   - Zellij：按 ticket 权限选择 zellij web token（`ReadOnly` -> `read_only_token`，`Write` -> `write_token`）。
+   - Herdr：无上游 HTTP 登录；直接使用持久化的 `herdr_workspace_id` / `herdr_pane_id`（pane 缺失返回 404）。
+3. Zellij 调 zellij web：
 
 ```text
 POST http://127.0.0.1:{zellij_web_port}/command/login
 ```
 
-4. 捕获 zellij web 返回的 `Set-Cookie`，只取 `name=value`，存进服务端 cookie jar。
+4. Zellij 捕获返回的 `Set-Cookie`，只取 `name=value`；Herdr 无上游 cookie。
 5. 生成随机 Beam cookie value，保存映射：
 
 ```text
-beam_terminal_session value -> { zellij_cookie, session_id, permission, created_at }
+beam_terminal_session value -> { upstream, session_id, permission, created_at }
+```
+
+其中 `upstream` 是后端相关的上游身份：
+
+```text
+UpstreamTarget::Zellij { cookie }                       // zellij web 会话 cookie
+UpstreamTarget::Herdr { workspace_id, pane_id }         // 持久化的 Herdr pane 身份
 ```
 
 6. 返回浏览器：
@@ -66,7 +73,18 @@ beam_terminal_session value -> { zellij_cookie, session_id, permission, created_
 Set-Cookie: beam_terminal_session=...; HttpOnly; SameSite=Strict; Path=/s/; Max-Age=86400
 ```
 
-后续请求只用 Beam cookie 认证。proxy 查到映射后，把对应 zellij cookie 注入上游请求。
+后续请求只用 Beam cookie 认证。proxy 查到映射后，Zellij 把对应 zellij cookie 注入上游请求；Herdr 直接服务内置终端页或桥接到 observe/control 子进程。
+
+## Herdr 分支（浏览器终端）
+
+Herdr 没有 zellij-web 那种 HTTP 上游，proxy 用「每浏览器连接一个子进程」的 stdin/stdout NDJSON 桥代替：
+
+- 只读：spawn `herdr terminal session observe <pane> --cols 160 --rows 50`，转发 `terminal.frame`（base64 ANSI）到浏览器。
+- 可写：spawn `herdr terminal session control <pane>`（**不带** `--takeover`，避免抢人类 TUI），把浏览器的 `input` / `resize` 翻译成 `terminal.input` / `terminal.resize` 写入子进程 stdin。
+- 页面从 WS 握手后的 `hello` 消息获知自己是 `readonly` 还是 `write`；`terminal.closed` → 关闭 WS(1001)；controller 冲突 → 关闭 WS(4001) + `{"error":"controller in use"}`。
+- 并发兜底：每 session 8 个 observe、全局 64 个（`WebConfig.herdr_terminal_max_observers_per_session` / `..._global`），超限返回 503。可写连接不受 observe 上限约束，由 Herdr 单 controller 保证单写者；daemon 进程内 `HerdrControllerRegistry` 对 Beam 内部冲突快速失败（安全边界仍是 Herdr 自己的 controller 校验）。
+- `WebConfig.herdr_terminal=false` 是紧急熔断：Herdr session 的 `/s/{session_id}` 与 WS 桥恢复 404，卡片回到 `herdr agent attach` 提示。
+- spawn 子进程时 unset `HERDR_PANE_ID` / `HERDR_TAB_ID` / `HERDR_WORKSPACE_ID`，避免 `--current` 解析到错误 pane；子进程 stderr 只进 daemon 日志，不回传浏览器。
 
 ### Read-only render anchor
 
@@ -120,12 +138,14 @@ session-scoped 路由需要有效 Beam cookie，除首次 ticket 登录外不接
 
 | Proxy route | Upstream | 说明 |
 | --- | --- | --- |
-| `GET /s/{session_id}` | `/{zellij_session}` | 终端页面。首次可带 `beam_terminal_ticket` 登录；已登录时注入 zellij cookie 并代理 HTML。 |
-| `/s/{session_id}/ws` | `/{zellij_session}/ws` | session-scoped WS。必须使用 Beam cookie。 |
+| `GET /s/{session_id}` | Zellij：`/{zellij_session}`；Herdr：内置 `index.html` | 终端页面。首次可带 `beam_terminal_ticket` 登录；Zellij 已登录时注入 zellij cookie 并代理 HTML，Herdr 已登录时直接服务内置 xterm.js 页面。 |
+| `/s/{session_id}/ws` | `/{zellij_session}/ws` | session-scoped WS（Zellij）。必须使用 Beam cookie。 |
+| `/s/{session_id}/ws/herdr` | 无上游 HTTP；桥到 observe/control 子进程 | Herdr WS 桥。比 `{*rest}` 通配符更具体，axum 优先匹配。 |
 | `/s/{session_id}/ws/{*rest}` | `/ws/...` | zellij root WS，例如 `/ws/terminal`、`/ws/control`。要求 Beam cookie。 |
-| `/s/{session_id}/{*path}` | root 或 session path | root API/static/WS 相关 path 代理到 zellij root；其他 path 代理到 `/{zellij_session}/{path}`。 |
+| `/s/{session_id}/{*path}` | root 或 session path | root API/static/WS 相关 path 代理到 zellij root；其他 path 代理到 `/{zellij_session}/{path}`。Herdr session 走此路由一律 404（页面只依赖 `/terminal-static/...`）。 |
+| `GET /terminal-static/{*path}` | 内置 vendor 资产 | 公开无鉴权；xterm.js 等预编译资产经 `include_bytes!` 打进二进制。 |
 
-非 `/s/{session_id}...` 的路径不代理到 zellij web，返回 404。proxy 不再提供 `/_zellij/...`、全局 `/ws` 或裸 fallback proxy。
+非 `/s/{session_id}...` 与 `/terminal-static/...` 的路径不代理到 zellij web，返回 404。proxy 不再提供 `/_zellij/...`、全局 `/ws` 或裸 fallback proxy。
 
 Beam session 到 zellij session 的映射：
 

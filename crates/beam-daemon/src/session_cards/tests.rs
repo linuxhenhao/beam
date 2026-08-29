@@ -3,11 +3,10 @@
 use super::*;
 use crate::tests::test_helpers::*;
 use crate::{
-    AdoptedFrom, BackendKind, BotConfig, CliUsageLimitState, DaemonToWorker, DisplayMode,
-    LarkEventMention, PendingResponseCardState, ScreenStatus, Session, SessionScope, SessionStatus,
-    SessionSummary, build_adopt_zellij_result_reply, build_closed_session_card,
-    build_report_post_content, handle_lark_card_action_payload, prompt, terminal_auth,
-    worker_ready_display_mode_command,
+    AdoptedFrom, BotConfig, CliUsageLimitState, DaemonToWorker, DisplayMode, LarkEventMention,
+    PendingResponseCardState, ScreenStatus, Session, SessionScope, SessionStatus, SessionSummary,
+    build_adopt_zellij_result_reply, build_closed_session_card, build_report_post_content,
+    handle_lark_card_action_payload, prompt, terminal_auth, worker_ready_display_mode_command,
 };
 use beam_core::CliUsageLimitKind;
 use serde_json::Value;
@@ -196,8 +195,8 @@ fn build_streaming_card_keeps_hidden_mode_actions_minimal() {
     session.terminal_url = Some("http://127.0.0.1:9000/s/sess-8".to_string());
     session.current_screen = Some("hello".to_string());
     session.stream_card_nonce = Some("nonce-live".to_string());
-    let card: Value =
-        serde_json::from_str(&build_streaming_card(&session, "idle")).expect("valid card json");
+    let card: Value = serde_json::from_str(&build_streaming_card(&session, "idle", true))
+        .expect("valid card json");
     let body = card
         .pointer("/elements/0/content")
         .and_then(Value::as_str)
@@ -249,43 +248,14 @@ fn build_streaming_card_keeps_hidden_mode_actions_minimal() {
 }
 
 #[test]
-fn build_streaming_card_herdr_hides_terminal_buttons_and_shows_attach_hint() {
-    let mut session = make_session("sess-herdr");
-    session.status = SessionStatus::Active;
-    session.closed_at = None;
-    session.backend_kind = BackendKind::Herdr;
-    session.terminal_url = None;
-    session.herdr_workspace_id = Some("w1".to_string());
-    session.herdr_pane_id = Some("w1:p1".to_string());
-    session.stream_card_nonce = Some("nonce-herdr".to_string());
-    let card: Value =
-        serde_json::from_str(&build_streaming_card(&session, "idle")).expect("valid card json");
-    let serialized = serde_json::to_string(&card).expect("serialize card");
-    // Q6 = show: the herdr attach hint is present.
-    assert!(
-        serialized.contains("herdr agent attach"),
-        "herdr card must show attach hint, got: {serialized}"
-    );
-    // No buttons that would proxy to zellij web.
-    assert!(
-        !serialized.contains("choose_read_only_terminal_link"),
-        "herdr card must not emit zellij read-only terminal button"
-    );
-    assert!(
-        !serialized.contains("get_write_link"),
-        "herdr card must not emit zellij write-link button"
-    );
-}
-
-#[test]
 fn build_streaming_card_uses_chinese_labels_for_zh_locale() {
     let mut session = make_session("sess-zh");
     session.status = SessionStatus::Active;
     session.closed_at = None;
     session.locale = Some("zh".to_string());
     session.terminal_url = Some("http://127.0.0.1:9000/s/sess-zh".to_string());
-    let card: Value =
-        serde_json::from_str(&build_streaming_card(&session, "idle")).expect("valid card json");
+    let card: Value = serde_json::from_str(&build_streaming_card(&session, "idle", true))
+        .expect("valid card json");
     assert_eq!(
         card.pointer("/header/title/content")
             .and_then(Value::as_str),
@@ -497,8 +467,8 @@ fn build_streaming_card_uses_starting_template() {
     let mut session = make_session("sess-starting");
     session.status = SessionStatus::Active;
     session.closed_at = None;
-    let card: Value =
-        serde_json::from_str(&build_streaming_card(&session, "starting")).expect("valid card json");
+    let card: Value = serde_json::from_str(&build_streaming_card(&session, "starting", true))
+        .expect("valid card json");
     assert_eq!(
         card.pointer("/header/template").and_then(Value::as_str),
         Some("yellow")
@@ -513,8 +483,8 @@ fn build_streaming_card_adds_term_action_rows_in_screenshot_mode() {
     session.terminal_url = Some("http://127.0.0.1:9000/?token=abc".to_string());
     session.current_screen = Some("hello".to_string());
     session.display_mode = Some(DisplayMode::Screenshot);
-    let card: Value =
-        serde_json::from_str(&build_streaming_card(&session, "idle")).expect("valid card json");
+    let card: Value = serde_json::from_str(&build_streaming_card(&session, "idle", true))
+        .expect("valid card json");
     assert_eq!(
         card.pointer("/elements/5/actions/0/value/action")
             .and_then(Value::as_str),
@@ -723,8 +693,8 @@ fn build_streaming_card_shows_retry_button_when_limit_is_ready() {
         retry_label: "3:15 PM".to_string(),
         retry_ready: true,
     });
-    let card: Value =
-        serde_json::from_str(&build_streaming_card(&session, "limited")).expect("valid card json");
+    let card: Value = serde_json::from_str(&build_streaming_card(&session, "limited", true))
+        .expect("valid card json");
     assert_eq!(
         card.pointer("/header/template").and_then(Value::as_str),
         Some("green")
@@ -752,8 +722,8 @@ fn build_streaming_card_renders_image_in_screenshot_mode_when_available() {
     session.display_mode = Some(DisplayMode::Screenshot);
     session.current_image_key = Some("img_v2_abc".to_string());
     session.current_screen = Some("should not render".to_string());
-    let card: Value =
-        serde_json::from_str(&build_streaming_card(&session, "idle")).expect("valid card json");
+    let card: Value = serde_json::from_str(&build_streaming_card(&session, "idle", true))
+        .expect("valid card json");
     assert_eq!(
         card.pointer("/elements/2/img_key").and_then(Value::as_str),
         Some("img_v2_abc")
@@ -772,8 +742,8 @@ fn build_streaming_card_adopted_shows_disconnect_without_restart() {
         cwd: "/home/user".to_string(),
         ..Default::default()
     });
-    let card: Value =
-        serde_json::from_str(&build_streaming_card(&session, "idle")).expect("valid card json");
+    let card: Value = serde_json::from_str(&build_streaming_card(&session, "idle", true))
+        .expect("valid card json");
     // Collect action names for presence check (order may vary depending on token availability)
     let action_names: Vec<&str> = card
         .get("elements")

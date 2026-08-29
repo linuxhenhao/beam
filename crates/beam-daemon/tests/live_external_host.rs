@@ -32,7 +32,7 @@ fn live_external_host_prefers_tailscale_ip_for_wildcard_bind() {
         return;
     };
 
-    let resolved = beam_daemon::__test_resolve_external_host("0.0.0.0");
+    let resolved = beam_daemon::test_hooks::__test_resolve_external_host("0.0.0.0");
     assert_eq!(
         resolved,
         tailscale_ip.to_string(),
@@ -51,7 +51,7 @@ fn live_external_host_keeps_explicit_localhost_bind() {
         return;
     };
 
-    let resolved = beam_daemon::__test_resolve_external_host("127.0.0.1");
+    let resolved = beam_daemon::test_hooks::__test_resolve_external_host("127.0.0.1");
     assert_eq!(
         resolved, "127.0.0.1",
         "explicit localhost bind must not be replaced with the Tailscale IP"

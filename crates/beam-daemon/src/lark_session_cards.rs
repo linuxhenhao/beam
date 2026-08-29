@@ -39,7 +39,7 @@ pub(crate) async fn begin_lark_turn_card(
         state,
         bot,
         &session_for_card.root_message_id,
-        &build_streaming_card(&session_for_card, status),
+        &build_streaming_card(&session_for_card, status, state.config.web.herdr_terminal),
         session_for_card.scope == SessionScope::Thread,
     )
     .await?;
@@ -131,7 +131,7 @@ pub(crate) async fn ensure_lark_pending_card(state: &AppState, session_id: &str)
         state,
         bot,
         &session.root_message_id,
-        &build_streaming_card(&session, "starting"),
+        &build_streaming_card(&session, "starting", state.config.web.herdr_terminal),
         session.scope == SessionScope::Thread,
     )
     .await?;
@@ -192,7 +192,7 @@ pub(crate) async fn ensure_lark_streaming_card(
         state,
         bot,
         &session.root_message_id,
-        &build_streaming_card(&session, status),
+        &build_streaming_card(&session, status, state.config.web.herdr_terminal),
         session.scope == SessionScope::Thread,
     )
     .await?;
@@ -235,7 +235,7 @@ pub(crate) async fn patch_lark_streaming_card(
         state,
         bot,
         &card_id,
-        &build_streaming_card(&session, status),
+        &build_streaming_card(&session, status, state.config.web.herdr_terminal),
     )
     .await
 }
@@ -314,7 +314,11 @@ pub(crate) async fn post_or_refresh_lark_session_card(
                 state,
                 bot,
                 &session.root_message_id,
-                &build_streaming_card(&session, session_stream_status(&session)),
+                &build_streaming_card(
+                    &session,
+                    session_stream_status(&session),
+                    state.config.web.herdr_terminal,
+                ),
                 session.scope == SessionScope::Thread,
             )
             .await?;
