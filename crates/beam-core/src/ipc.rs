@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{config::ScreenAnalyzerConfig, session::AdoptedFrom};
+use crate::{backend_kind::BackendKind, config::ScreenAnalyzerConfig, session::AdoptedFrom};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -116,6 +116,16 @@ pub struct InitConfig {
     pub resume_session_id: Option<String>,
     #[serde(default)]
     pub disable_cli_bypass: bool,
+    /// Terminal backend selected for this session (daemon default, bot
+    /// override, or the adopted candidate's backend).
+    #[serde(default)]
+    pub backend_kind: BackendKind,
+    #[serde(default)]
+    pub herdr_session: Option<String>,
+    #[serde(default)]
+    pub herdr_workspace_id: Option<String>,
+    #[serde(default)]
+    pub herdr_pane_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -140,6 +150,12 @@ pub enum DaemonToWorker {
 pub enum WorkerToDaemon {
     Ready {
         zellij_session: String,
+        #[serde(default)]
+        backend_kind: BackendKind,
+        #[serde(default)]
+        herdr_workspace_id: Option<String>,
+        #[serde(default)]
+        herdr_pane_id: Option<String>,
     },
     PromptReady,
     ScreenUpdate {
@@ -202,6 +218,19 @@ pub enum WorkerToDaemon {
     },
     Error {
         message: String,
+    },
+    /// Mux-pushed agent state (Herdr `events.subscribe` or `agent get`
+    /// polling). Only `state == "blocked"` produces an attention side effect
+    /// in the daemon; every other state is log/metric only. Deliberately a
+    /// separate variant: `ScreenUpdate` only fires on hash/status/usage_limit
+    /// changes and would drop `blocked` when the screen is unchanged.
+    MuxAgentState {
+        state: String,
+        #[serde(default)]
+        agent_name: Option<String>,
+        pane_id: String,
+        #[serde(default)]
+        message: Option<String>,
     },
 }
 

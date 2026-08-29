@@ -580,6 +580,7 @@ mod tests {
 
     // Bring in test helpers for integration-style tests (mock Lark server).
     use crate::tests::test_helpers;
+    use beam_core::BackendKind;
 
     fn make_state(session_owner: Option<&str>, allowed_users: Vec<&str>) -> AppState {
         let paths = BeamPaths::from_root(
@@ -591,6 +592,10 @@ mod tests {
                 "sess-1".to_string(),
                 Session {
                     session_id: "sess-1".to_string(),
+                    backend_kind: BackendKind::Zellij,
+                    herdr_session: None,
+                    herdr_workspace_id: None,
+                    herdr_pane_id: None,
                     title: "test".to_string(),
                     chat_id: "chat-1".to_string(),
                     root_message_id: "root-1".to_string(),
@@ -646,6 +651,7 @@ mod tests {
 
         let bot = BotConfig {
             name: None,
+            backend: None,
             lark_app_id: "app-1".to_string(),
             lark_app_secret: "secret".to_string(),
             cli_id: "opencode".to_string(),

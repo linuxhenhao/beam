@@ -43,20 +43,27 @@ Terminal entry links use Beam tickets:
 After receiving a ticket, the proxy:
 
 1. Verifies the HMAC signature, session id, and one-time nonce.
-2. Selects the zellij web token by ticket permission:
-   - `ReadOnly` -> `read_only_token`
-   - `Write` -> `write_token`
-3. Calls zellij web:
+2. Dispatches the upstream by `Session.backend_kind`:
+   - Zellij: selects the zellij web token by ticket permission (`ReadOnly` -> `read_only_token`, `Write` -> `write_token`).
+   - Herdr: no upstream HTTP login; uses the persisted `herdr_workspace_id` / `herdr_pane_id` directly (404 when the pane is missing).
+3. Zellij calls zellij web:
 
 ```text
 POST http://127.0.0.1:{zellij_web_port}/command/login
 ```
 
-4. Captures the `Set-Cookie` returned by zellij web, keeps only `name=value`, and stores it in the server-side cookie jar.
+4. Zellij captures the returned `Set-Cookie` and keeps only `name=value`; Herdr has no upstream cookie.
 5. Generates a random Beam cookie value and stores the mapping:
 
 ```text
-beam_terminal_session value -> { zellij_cookie, session_id, permission, created_at }
+beam_terminal_session value -> { upstream, session_id, permission, created_at }
+```
+
+`upstream` is the backend-specific upstream identity:
+
+```text
+UpstreamTarget::Zellij { cookie }                       // zellij web session cookie
+UpstreamTarget::Herdr { workspace_id, pane_id }         // persisted Herdr pane identity
 ```
 
 6. Returns the browser response:
@@ -66,7 +73,18 @@ beam_terminal_session value -> { zellij_cookie, session_id, permission, created_
 Set-Cookie: beam_terminal_session=...; HttpOnly; SameSite=Strict; Path=/s/; Max-Age=86400
 ```
 
-Later requests authenticate only with the Beam cookie. After the proxy finds the mapping, it injects the corresponding zellij cookie into upstream requests.
+Later requests authenticate only with the Beam cookie. After the proxy finds the mapping, it injects the zellij cookie into upstream requests for Zellij; for Herdr it serves the built-in terminal page or bridges to observe/control subprocesses.
+
+## Herdr branch (browser terminal)
+
+Herdr has no zellij-web-style HTTP upstream, so the proxy replaces it with a stdin/stdout NDJSON bridge using one subprocess per browser connection:
+
+- Read-only: spawns `herdr terminal session observe <pane> --cols 160 --rows 50` and forwards `terminal.frame` (base64 ANSI) to the browser.
+- Write: spawns `herdr terminal session control <pane>` (**no** `--takeover`, so a human TUI is never grabbed) and translates browser `input` / `resize` messages into `terminal.input` / `terminal.resize` on the child stdin.
+- The page learns whether it is `readonly` or `write` from the `hello` message after the WS handshake; `terminal.closed` closes the WS with 1001; controller conflicts close with 4001 + `{"error":"controller in use"}`.
+- Concurrency caps: 8 observers per session and 64 global (`WebConfig.herdr_terminal_max_observers_per_session` / `..._global`), 503 beyond that. Write connections do not consume observer slots; Herdr's single-controller rule enforces the single writer, and the in-process `HerdrControllerRegistry` fails fast on Beam-internal conflicts (the security boundary remains Herdr's own controller check).
+- `WebConfig.herdr_terminal=false` is the emergency kill switch: Herdr sessions get 404 on `/s/{session_id}` and the WS bridge, and cards fall back to the `herdr agent attach` hint.
+- Spawns unset `HERDR_PANE_ID` / `HERDR_TAB_ID` / `HERDR_WORKSPACE_ID` so `--current` cannot resolve to the wrong pane; child stderr goes to the daemon log only, never back to the browser.
 
 ### Read-only Render Anchor
 
@@ -120,12 +138,14 @@ Session-scoped routes require a valid Beam cookie, except for the initial ticket
 
 | Proxy route | Upstream | Description |
 | --- | --- | --- |
-| `GET /s/{session_id}` | `/{zellij_session}` | Terminal page. The first request may include `beam_terminal_ticket`; authenticated requests inject the zellij cookie and proxy HTML. |
-| `/s/{session_id}/ws` | `/{zellij_session}/ws` | Session-scoped WS. Requires a Beam cookie. |
+| `GET /s/{session_id}` | Zellij: `/{zellij_session}`; Herdr: built-in `index.html` | Terminal page. The first request may include `beam_terminal_ticket`; authenticated Zellij requests inject the zellij cookie and proxy HTML, authenticated Herdr requests serve the built-in xterm.js page. |
+| `/s/{session_id}/ws` | `/{zellij_session}/ws` | Session-scoped WS (Zellij). Requires a Beam cookie. |
+| `/s/{session_id}/ws/herdr` | No HTTP upstream; bridges to observe/control subprocesses | Herdr WS bridge. More specific than the `{*rest}` wildcard, so axum matches it first. |
 | `/s/{session_id}/ws/{*rest}` | `/ws/...` | Zellij root WS, such as `/ws/terminal` and `/ws/control`. Requires a Beam cookie. |
-| `/s/{session_id}/{*path}` | root or session path | Root API/static/WS-related paths proxy to zellij root; other paths proxy to `/{zellij_session}/{path}`. |
+| `/s/{session_id}/{*path}` | root or session path | Root API/static/WS-related paths proxy to zellij root; other paths proxy to `/{zellij_session}/{path}`. Herdr sessions always 404 here (the page only depends on `/terminal-static/...`). |
+| `GET /terminal-static/{*path}` | Built-in vendored assets | Public and unauthenticated; prebuilt xterm.js assets are embedded via `include_bytes!`. |
 
-Paths outside `/s/{session_id}...` are not proxied to zellij web and return 404. The proxy no longer provides `/_zellij/...`, global `/ws`, or raw fallback proxying.
+Paths outside `/s/{session_id}...` and `/terminal-static/...` are not proxied to zellij web and return 404. The proxy no longer provides `/_zellij/...`, global `/ws`, or raw fallback proxying.
 
 Beam session to zellij session mapping:
 

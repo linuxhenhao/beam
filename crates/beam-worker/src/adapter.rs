@@ -387,6 +387,10 @@ pub(crate) mod test_support {
     pub(crate) fn test_init(cli_id: &str) -> InitConfig {
         InitConfig {
             session_id: "session-test".to_string(),
+            backend_kind: Default::default(),
+            herdr_session: None,
+            herdr_workspace_id: None,
+            herdr_pane_id: None,
             title: "title".to_string(),
             chat_id: "chat".to_string(),
             root_message_id: "root".to_string(),

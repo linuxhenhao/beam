@@ -1,3 +1,4 @@
+use super::worker_health::worker_ready_reported;
 use super::*;
 
 /// Upper bound for a worker to report `Ready` after being spawned. When the
@@ -42,6 +43,10 @@ pub(crate) async fn execute_schedule_task(
     };
     let session = Session {
         session_id: session_id.clone(),
+        backend_kind: BackendKind::Zellij,
+        herdr_session: None,
+        herdr_workspace_id: None,
+        herdr_pane_id: None,
         title: format!("schedule:{}", task_id),
         chat_id: chat_id.to_string(),
         root_message_id: root_message_id.unwrap_or(chat_id).to_string(),
@@ -121,6 +126,12 @@ pub(crate) async fn spawn_worker(
     session: Session,
     init: InitConfig,
 ) -> Result<()> {
+    // Herdr is fail-closed: probe before every herdr worker spawn.
+    if init.backend_kind == BackendKind::Herdr
+        && let probe = crate::herdr_probe::probe_herdr(&state.config).await?
+    {
+        info!(session = %session.session_id, herdr_version = %probe.version, "herdr probe ok");
+    }
     tokio::fs::create_dir_all(state.paths.run_dir()).await?;
     let init_path = state.paths.worker_init_json(&session.session_id);
     tokio::fs::write(&init_path, serde_json::to_vec_pretty(&init)?).await?;
@@ -185,18 +196,32 @@ pub(crate) async fn spawn_worker(
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             match serde_json::from_str::<WorkerToDaemon>(&line) {
-                Ok(WorkerToDaemon::Ready { zellij_session }) => {
+                Ok(WorkerToDaemon::Ready {
+                    zellij_session,
+                    backend_kind,
+                    herdr_workspace_id,
+                    herdr_pane_id,
+                }) => {
                     {
                         let external_host = current_external_host(&state).await;
                         let snapshot = {
                             let mut sessions = state.sessions.lock().await;
                             if let Some(entry) = sessions.get_mut(&session_id_for_task) {
-                                entry.terminal_url = Some(terminal_base_url(
-                                    &external_host,
-                                    state.config.web.proxy_base_port,
-                                    &session_id_for_task,
-                                ));
-                                entry.last_screen_status = Some(ScreenStatus::Starting);
+                                // Zellij gets a web URL from Ready; Herdr v1
+                                // must NOT (card latch uses herdr ids).
+                                crate::backend::apply_ready_identity(
+                                    entry,
+                                    backend_kind,
+                                    herdr_workspace_id.clone(),
+                                    herdr_pane_id.clone(),
+                                    (backend_kind == BackendKind::Zellij).then(|| {
+                                        terminal_base_url(
+                                            &external_host,
+                                            state.config.web.proxy_base_port,
+                                            &session_id_for_task,
+                                        )
+                                    }),
+                                );
                             }
                             sessions.clone()
                         };
@@ -650,6 +675,21 @@ pub(crate) async fn spawn_worker(
                 Ok(WorkerToDaemon::Error { message }) => {
                     warn!("worker {} error: {}", session_id_for_task, message);
                 }
+                Ok(WorkerToDaemon::MuxAgentState {
+                    state: agent_state,
+                    agent_name: _,
+                    pane_id,
+                    message,
+                }) => {
+                    let _ = crate::backend::handle_mux_agent_state(
+                        &state,
+                        &session_id_for_task,
+                        &agent_state,
+                        &pane_id,
+                        message.as_deref(),
+                    )
+                    .await;
+                }
                 Ok(WorkerToDaemon::Heartbeat {
                     processing_since_ms,
                 }) => {
@@ -719,9 +759,7 @@ pub(crate) async fn spawn_worker(
             let Some(session) = session else {
                 return;
             };
-            // The Ready handler sets terminal_url; a non-active session is
-            // already handled elsewhere (e.g. CliExit).
-            if session.terminal_url.is_some() || session.status != SessionStatus::Active {
+            if worker_ready_reported(&session) {
                 return;
             }
             warn!(
@@ -770,63 +808,6 @@ async fn notify_worker_ready_timeout(state: &AppState, session: &Session) {
             session.session_id, err
         );
     }
-}
-
-/// Periodic watchdog: flag sessions whose worker stopped heartbeating (hung,
-/// or dead but not yet reaped) so the state is visible on the session card
-/// and via `beam status`. Only workers that have sent at least one heartbeat
-/// are judged; older workers simply stay "unknown".
-pub(crate) fn spawn_worker_health_watchdog(state: AppState) {
-    tokio::spawn(async move {
-        const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(45);
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-            let stale_sessions: Vec<(String, Option<u64>)> = {
-                let workers = state.workers.lock().await;
-                let sessions = state.sessions.lock().await;
-                let mut health = state.worker_health.lock().await;
-                let now = Instant::now();
-                let mut stale = Vec::new();
-                for (session_id, entry) in health.iter_mut() {
-                    let worker_present = workers.contains_key(session_id);
-                    let session_active = sessions
-                        .get(session_id)
-                        .map(|s| s.status == SessionStatus::Active)
-                        .unwrap_or(false);
-                    if !worker_present || !session_active || entry.unresponsive {
-                        continue;
-                    }
-                    if now.duration_since(entry.last_heartbeat) > STALE_AFTER {
-                        entry.unresponsive = true;
-                        stale.push((session_id.clone(), entry.processing_since_ms));
-                    }
-                }
-                stale
-            };
-            for (session_id, processing_since_ms) in stale_sessions {
-                match processing_since_ms {
-                    Some(start_ms) => {
-                        let stuck_ms =
-                            (Utc::now().timestamp_millis().max(0) as u64).saturating_sub(start_ms);
-                        warn!(
-                            "worker for session {} is unresponsive: no heartbeat for >{}s; message loop stuck processing for {}ms",
-                            session_id,
-                            STALE_AFTER.as_secs(),
-                            stuck_ms
-                        );
-                    }
-                    None => {
-                        warn!(
-                            "worker for session {} is unresponsive: no heartbeat for >{}s",
-                            session_id,
-                            STALE_AFTER.as_secs()
-                        );
-                    }
-                }
-                let _ = patch_lark_streaming_card(&state, &session_id, "worker 无响应").await;
-            }
-        }
-    });
 }
 
 /// CLI process exit is not a user close. Clear the worker pid and leave
@@ -891,6 +872,10 @@ pub(crate) fn build_init_from_session(
         .unwrap_or_default();
     Ok(InitConfig {
         session_id: session.session_id.clone(),
+        backend_kind: session.backend_kind,
+        herdr_session: session.herdr_session.clone(),
+        herdr_workspace_id: session.herdr_workspace_id.clone(),
+        herdr_pane_id: session.herdr_pane_id.clone(),
         title: session.title.clone(),
         chat_id: session.chat_id.clone(),
         root_message_id: session.root_message_id.clone(),

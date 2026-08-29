@@ -1,0 +1,13 @@
+{
+  "id": "cli:agent:get",
+  "result": {
+    "agent": {
+      "agent": "codex",
+      "agent_status": "blocked",
+      "cwd": "/repo/proj",
+      "pane_id": "w1:p1",
+      "workspace_id": "w1"
+    },
+    "type": "agent_info"
+  }
+}

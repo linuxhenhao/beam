@@ -51,6 +51,7 @@ fn ws_card_action_handler_routes_toggle_display() {
         let app_id = "app-toggle-ws";
         let bot = BotConfig {
             name: None,
+            backend: None,
             lark_app_id: app_id.to_string(),
             lark_app_secret: "secret".to_string(),
             cli_id: "codex".to_string(),
@@ -126,6 +127,7 @@ fn ws_card_action_handler_routes_ask_toggle_and_submit() {
         let app_id = "app-ask-ws";
         let bot = BotConfig {
             name: None,
+            backend: None,
             lark_app_id: app_id.to_string(),
             lark_app_secret: "secret".to_string(),
             cli_id: "opencode".to_string(),

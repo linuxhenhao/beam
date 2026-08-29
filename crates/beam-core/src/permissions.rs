@@ -161,6 +161,7 @@ mod tests {
     fn default_bot() -> BotConfig {
         BotConfig {
             name: None,
+            backend: None,
             lark_app_id: "app-1".to_string(),
             lark_app_secret: "secret".to_string(),
             cli_id: "codex".to_string(),

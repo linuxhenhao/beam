@@ -349,6 +349,7 @@ mod tests {
         session.owner_open_id = Some("ou_owner".to_string());
         let bot = BotConfig {
             name: None,
+            backend: None,
             lark_app_id: "app".to_string(),
             lark_app_secret: "secret".to_string(),
             cli_id: "codex".to_string(),

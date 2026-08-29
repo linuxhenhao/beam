@@ -1,0 +1,8 @@
+{
+  "result": {
+    "workspaces": [
+      { "workspace_id": "w2", "label": "mine" },
+      { "workspace_id": "w3", "label": "beam-deadbeef" }
+    ]
+  }
+}

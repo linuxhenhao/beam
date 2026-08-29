@@ -17,14 +17,16 @@ use reqwest::Client;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use beam_core::session::Session;
+use beam_core::{BackendKind, session::Session};
 
 use crate::terminal_auth::{TerminalAuthState, TerminalPermission};
 use crate::zellij_web::ZellijWebTokens;
 
 pub(crate) mod anchor;
 pub(crate) mod auth;
+pub(crate) mod herdr_ws;
 pub(crate) mod http_forward;
+pub(crate) mod static_assets;
 pub(crate) mod ws_relay;
 
 #[cfg(test)]
@@ -110,7 +112,22 @@ async fn resolve_zellij_session(
     session_id: &str,
 ) -> Option<String> {
     let sessions = sessions.lock().await;
-    sessions.get(session_id).map(zellij_session_for_beam)
+    let session = sessions.get(session_id)?;
+    // Herdr sessions have no zellij web target; the proxy must 404 rather
+    // than map them onto a `beam-{sid8}` zellij name.
+    if session.backend_kind == BackendKind::Herdr {
+        return None;
+    }
+    Some(zellij_session_for_beam(session))
+}
+
+/// Resolve a beam session by id (any backend).
+async fn resolve_session(
+    sessions: &Arc<Mutex<HashMap<String, Session>>>,
+    session_id: &str,
+) -> Option<Session> {
+    let sessions = sessions.lock().await;
+    sessions.get(session_id).cloned()
 }
 
 // ── URL builders ─────────────────────────────────────────────────────────
@@ -188,6 +205,9 @@ pub(crate) struct ProxyState {
     pub(crate) auth_state: TerminalAuthState,
     pub(crate) anchors: anchor::ZellijAnchorManager,
     pub(crate) viewer_counter: anchor::ViewerCounter,
+    pub(crate) herdr_observer_limiter: herdr_ws::HerdrObserverLimiter,
+    pub(crate) herdr_controller_registry: herdr_ws::HerdrControllerRegistry,
+    pub(crate) herdr_web: herdr_ws::HerdrWebLimits,
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────
@@ -199,6 +219,7 @@ pub async fn start_proxy(
     sessions: Arc<Mutex<HashMap<String, Session>>>,
     zellij_tokens: ZellijWebTokens,
     auth_state: TerminalAuthState,
+    herdr_web: herdr_ws::HerdrWebLimits,
 ) -> anyhow::Result<u16> {
     let anchors = anchor::ZellijAnchorManager::default();
     let viewer_counter = anchor::ViewerCounter {
@@ -214,6 +235,9 @@ pub async fn start_proxy(
         auth_state,
         anchors,
         viewer_counter,
+        herdr_observer_limiter: herdr_ws::HerdrObserverLimiter::default(),
+        herdr_controller_registry: herdr_ws::HerdrControllerRegistry::default(),
+        herdr_web,
     };
 
     let app = Router::new()
@@ -231,6 +255,12 @@ pub async fn start_proxy(
             "/s/{session_id}/ws",
             axum::routing::any(ws_relay::handle_session_ws),
         )
+        // Herdr terminal WS bridge (observe/control). More specific than the
+        // `{*rest}` wildcard below, so axum matches it first.
+        .route(
+            "/s/{session_id}/ws/herdr",
+            axum::routing::any(herdr_ws::handle_herdr_ws),
+        )
         // Session-scoped WS to zellij root: /ws/terminal/... and /ws/control
         .route(
             "/s/{session_id}/ws/{*rest}",
@@ -240,6 +270,11 @@ pub async fn start_proxy(
         .route(
             "/s/{session_id}/{*path}",
             axum::routing::any(http_forward::handle_session_path),
+        )
+        // Public vendored terminal assets (xterm.js etc.), no auth.
+        .route(
+            "/terminal-static/{*path}",
+            axum::routing::get(static_assets::handle_terminal_static),
         )
         .fallback(http_forward::handle_not_found)
         .with_state(state);

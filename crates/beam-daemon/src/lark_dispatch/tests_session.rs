@@ -3,7 +3,7 @@ use crate::tests::test_helpers::*;
 
 use axum::http::StatusCode;
 use beam_core::{
-    AdoptedFrom, AgentAttention, BotConfig, CustomTrigger, SessionScope, SessionStatus,
+    AdoptedFrom, AgentAttention, BackendKind, BotConfig, CustomTrigger, SessionScope, SessionStatus,
 };
 use chrono::Utc;
 use std::collections::HashMap;
@@ -36,9 +36,12 @@ fn validate_resume_target_rejects_active_session() {
 fn validate_resume_target_rejects_adopted_session() {
     let mut candidate = make_session("adopted-1");
     candidate.adopted_from = Some(AdoptedFrom {
+        backend_kind: BackendKind::Zellij,
         tmux_target: Some("0:1.0".to_string()),
         zellij_session: None,
         zellij_pane_id: None,
+        herdr_workspace_id: None,
+        herdr_pane_id: None,
         original_cli_pid: 123,
         session_id: None,
         cli_id: Some("codex".to_string()),
@@ -232,6 +235,7 @@ fn session_anchor_matches_p2p_falls_back_to_root_message_id() {
 fn evaluate_talk_denies_unknown_sender_with_strict_bot() {
     let bot = BotConfig {
         name: None,
+        backend: None,
         lark_app_id: "app-1".to_string(),
         lark_app_secret: "secret".to_string(),
         cli_id: "codex".to_string(),
@@ -267,6 +271,7 @@ fn evaluate_lark_preflight_handles_dedupe_empty_and_permission_gate() {
     maybe_remove_dir(&paths.root().to_path_buf());
     let bot = BotConfig {
         name: None,
+        backend: None,
         lark_app_id: "app-1".to_string(),
         lark_app_secret: "secret".to_string(),
         cli_id: "codex".to_string(),
@@ -345,6 +350,7 @@ fn evaluate_lark_preflight_allows_slash_custom_trigger_for_grant_user() {
     let paths = temp_paths("preflight-trigger");
     maybe_remove_dir(&paths.root().to_path_buf());
     let bot = BotConfig {
+        backend: None,
         lark_app_id: "app-1".to_string(),
         lark_app_secret: "secret".to_string(),
         cli_id: "codex".to_string(),

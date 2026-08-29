@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::backend_kind::BackendKind;
 use crate::ipc::{CliUsageLimitState, DisplayMode, ScreenStatus};
 
 /// Agent attention state set via `--attention` flag, analogous to botmux `agentAttention`.
@@ -57,11 +58,17 @@ pub enum PendingResponseCardState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AdoptedFrom {
     #[serde(default)]
+    pub backend_kind: BackendKind,
+    #[serde(default)]
     pub tmux_target: Option<String>,
     #[serde(default)]
     pub zellij_session: Option<String>,
     #[serde(default)]
     pub zellij_pane_id: Option<String>,
+    #[serde(default)]
+    pub herdr_workspace_id: Option<String>,
+    #[serde(default)]
+    pub herdr_pane_id: Option<String>,
     pub original_cli_pid: i32,
     #[serde(default)]
     pub session_id: Option<String>,
@@ -172,6 +179,20 @@ pub struct Session {
     pub resume_session_id: Option<String>,
     #[serde(default)]
     pub disable_cli_bypass: bool,
+    /// Terminal backend for this session, persisted at create/adopt time.
+    /// Restore only reads the persisted value; a later config flip must not
+    /// move an existing session to another mux.
+    #[serde(default)]
+    pub backend_kind: BackendKind,
+    /// Named Herdr session escape hatch (round-trips with `InitConfig`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub herdr_session: Option<String>,
+    /// Herdr public ids. Unlike zellij, these cannot be derived from the
+    /// beam session id, so they are persisted when Ready arrives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub herdr_workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub herdr_pane_id: Option<String>,
     #[serde(default)]
     pub initial_prompt: Option<String>,
     /// Feishu thread_id (omt_*), stable topic identifier.

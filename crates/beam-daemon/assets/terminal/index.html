@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Beam Terminal</title>
+  <link rel="stylesheet" href="/terminal-static/vendor/xterm.css">
+  <link rel="stylesheet" href="/terminal-static/terminal.css">
+</head>
+<body>
+  <div id="app">
+    <div id="toolbar">
+      <span id="mode-badge" class="badge connecting">connecting</span>
+      <span id="session-label"></span>
+    </div>
+    <div id="terminal-container"></div>
+    <div id="overlay" class="hidden">
+      <div class="overlay-card">
+        <div id="overlay-title"></div>
+        <div id="overlay-detail"></div>
+        <button id="reconnect" class="hidden">reconnect</button>
+      </div>
+    </div>
+  </div>
+  <script src="/terminal-static/vendor/xterm.min.js"></script>
+  <script src="/terminal-static/vendor/xterm-addon-fit.min.js"></script>
+  <script src="/terminal-static/vendor/xterm-addon-web-links.min.js"></script>
+  <script type="module" src="/terminal-static/app.js"></script>
+</body>
+</html>

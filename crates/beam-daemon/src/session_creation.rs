@@ -162,9 +162,15 @@ pub(crate) async fn create_session_internal(
 ) -> Result<SessionSummary> {
     let session_id = Uuid::new_v4().to_string();
     let prompt_turn_id = (!spec.prompt.is_empty()).then(next_session_turn_id);
+    // Resolve backend at create time (adopt → bot → daemon default); restore
+    // only reads the persisted value.
+    let (backend_kind, herdr_session) = crate::backend::resolve_session_backend(
+        state,
+        &spec.lark_app_id,
+        spec.adopted_from.as_ref(),
+    );
 
-    // Resolve bot identity for this session (P2-9 off-topic hint support).
-    // Skip for "local" sessions (no Lark backend).
+    // Resolve bot identity (skip for "local" sessions).
     let (bot_name, bot_open_id) = if spec.lark_app_id == "local" {
         (None, None)
     } else {
@@ -173,6 +179,10 @@ pub(crate) async fn create_session_internal(
 
     let session = Session {
         session_id: session_id.clone(),
+        backend_kind,
+        herdr_session: herdr_session.clone(),
+        herdr_workspace_id: None,
+        herdr_pane_id: None,
         title: spec.title.clone(),
         chat_id: spec.chat_id.clone(),
         chat_type: spec.chat_type.clone(),
@@ -233,6 +243,10 @@ pub(crate) async fn create_session_internal(
     }
     let init = InitConfig {
         session_id,
+        backend_kind,
+        herdr_session,
+        herdr_workspace_id: None,
+        herdr_pane_id: None,
         title: spec.title,
         chat_id: spec.chat_id,
         root_message_id: spec.root_message_id,
@@ -329,6 +343,7 @@ mod tests {
             cli_args: vec!["-y".to_string()],
             skip_working_dir_prompt: true,
             working_dir: Some("/bot/work".to_string()),
+            backend: None,
             ..make_bot("app-spec")
         };
         let daemon_working_dirs = vec!["/daemon/work".to_string()];
@@ -364,6 +379,7 @@ mod tests {
             cli_args: vec![],
             skip_working_dir_prompt: true,
             working_dir: None,
+            backend: None,
             ..make_bot("app-spec-fallback")
         };
         let daemon_working_dirs = vec!["/daemon/work".to_string()];

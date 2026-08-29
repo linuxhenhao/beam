@@ -1,5 +1,20 @@
 use super::*;
 
+/// Whether a session is far enough along to receive streaming/screenshot
+/// cards. Decoupled from `terminal_url`: Herdr sessions have no web terminal
+/// in v1, so their latch is the persisted workspace/pane ids instead.
+pub(crate) fn session_card_ready(session: &Session) -> bool {
+    if session.lark_app_id == "local" || session.root_message_id.is_empty() {
+        return false;
+    }
+    match session.backend_kind {
+        BackendKind::Zellij => session.terminal_url.is_some(),
+        BackendKind::Herdr => {
+            session.herdr_workspace_id.is_some() && session.herdr_pane_id.is_some()
+        }
+    }
+}
+
 pub(crate) fn build_adopt_already_attached_reply(session: &Session) -> String {
     let adopted = match session.adopted_from.as_ref() {
         Some(adopted) => adopted,
@@ -51,6 +66,37 @@ pub(crate) fn build_zellij_adopt_post_content(items: &[ZellijAdoptCandidate]) ->
         "zh_cn": { "title": "", "content": paragraphs },
     })
     .to_string()
+}
+
+/// Append Herdr adopt candidates to an existing adopt-list post. Commands are
+/// printed with the `herdr:` prefix so users do not paste a bare `w1:p1`
+/// (which the parser would treat as a zellij target).
+pub(crate) fn append_herdr_adopt_post_content(
+    existing: String,
+    items: &[crate::herdr_adopt::HerdrAdoptCandidate],
+) -> String {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&existing).expect("existing adopt post is valid json");
+    let content = value
+        .pointer_mut("/zh_cn/content")
+        .and_then(serde_json::Value::as_array_mut)
+        .expect("adopt post content array");
+    content.push(serde_json::json!({
+        "tag": "text",
+        "text": "Available herdr panes (copy a command block and send it to adopt):",
+    }));
+    for item in items {
+        content.push(serde_json::json!({
+            "tag": "text",
+            "text": format!("{}  {}", item.title, item.cwd),
+        }));
+        content.push(serde_json::json!({
+            "tag": "code_block",
+            "language": "PlainText",
+            "text": format!("/adopt herdr:{}", item.pane_id),
+        }));
+    }
+    value.to_string()
 }
 
 pub(crate) fn build_closed_session_reply(session: &Session) -> String {
@@ -140,10 +186,7 @@ pub(crate) fn build_restart_result_reply(result: Result<StatusCode, &str>) -> St
 }
 
 pub(crate) fn decide_lark_card_delivery(session: &Session) -> LarkCardDeliveryPlan {
-    if session.lark_app_id == "local"
-        || session.root_message_id.is_empty()
-        || session.terminal_url.is_none()
-    {
+    if !session_card_ready(session) {
         return LarkCardDeliveryPlan::NotReady;
     }
     if session.stream_card_id.is_some() {
@@ -162,6 +205,43 @@ pub(crate) fn build_card_not_ready_reply() -> &'static str {
 mod tests {
     use super::*;
     use crate::tests::test_helpers::*;
+
+    #[test]
+    fn session_card_ready_decouples_herdr_from_terminal_url() {
+        // Zellij still needs terminal_url.
+        let mut zellij = make_session("card-zellij");
+        zellij.status = SessionStatus::Active;
+        zellij.terminal_url = None;
+        assert!(!session_card_ready(&zellij));
+        zellij.terminal_url = Some("http://t".to_string());
+        assert!(session_card_ready(&zellij));
+
+        // Herdr needs workspace+pane ids and does NOT need terminal_url.
+        let mut herdr = make_session("card-herdr");
+        herdr.status = SessionStatus::Active;
+        herdr.backend_kind = BackendKind::Herdr;
+        herdr.terminal_url = None;
+        assert!(!session_card_ready(&herdr));
+        herdr.herdr_workspace_id = Some("w1".to_string());
+        assert!(!session_card_ready(&herdr));
+        herdr.herdr_pane_id = Some("w1:p1".to_string());
+        assert!(session_card_ready(&herdr));
+    }
+
+    #[test]
+    fn session_card_ready_rejects_local_and_empty_root() {
+        let mut session = make_session("card-local");
+        session.status = SessionStatus::Active;
+        session.terminal_url = Some("http://t".to_string());
+        session.lark_app_id = "local".to_string();
+        assert!(!session_card_ready(&session));
+
+        let mut session = make_session("card-root");
+        session.status = SessionStatus::Active;
+        session.terminal_url = Some("http://t".to_string());
+        session.root_message_id = String::new();
+        assert!(!session_card_ready(&session));
+    }
 
     #[test]
     fn adopt_list_post_content_wraps_commands_in_code_blocks() {
@@ -219,6 +299,7 @@ mod tests {
             let app_id = "app-reply";
             let bot = BotConfig {
                 name: None,
+                backend: None,
                 lark_app_id: app_id.to_string(),
                 lark_app_secret: "secret".to_string(),
                 cli_id: "codex".to_string(),
@@ -273,6 +354,7 @@ mod tests {
             let app_id = "app-notify-thread";
             let bot = BotConfig {
                 name: None,
+                backend: None,
                 lark_app_id: app_id.to_string(),
                 lark_app_secret: "secret".to_string(),
                 cli_id: "codex".to_string(),
@@ -355,6 +437,7 @@ mod tests {
             let app_id = "app-notify-chat";
             let bot = BotConfig {
                 name: None,
+                backend: None,
                 lark_app_id: app_id.to_string(),
                 lark_app_secret: "secret".to_string(),
                 cli_id: "codex".to_string(),

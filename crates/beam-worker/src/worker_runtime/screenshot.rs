@@ -208,6 +208,9 @@ pub(crate) fn load_font_files() {
         }
     }
 
+    *primary = primary
+        .take()
+        .or_else(super::embedded_font::embedded_mono_font);
     let cjk_search: Vec<std::path::PathBuf> = {
         let mut paths = Vec::new();
         if let Some(d) = home_font_dir() {
@@ -218,7 +221,6 @@ pub(crate) fn load_font_files() {
         paths.push("/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc".into());
         paths
     };
-
     let mut cjk = CJK_FONT.lock().unwrap();
     for path in &cjk_search {
         if let Ok(data) = std::fs::read(path)

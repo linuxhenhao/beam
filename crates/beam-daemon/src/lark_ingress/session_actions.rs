@@ -81,9 +81,7 @@ pub(crate) async fn close_session(
             .await
             .map_err(internal_error)?;
     } else if session.adopted_from.is_none() {
-        let _ = std::process::Command::new("zellij")
-            .args(["delete-session", &session_zellij_target(&session), "-f"])
-            .output();
+        crate::herdr_lifecycle::destroy_mux_if_managed(&session).await;
     }
 
     let mut workers = state.workers.lock().await;
@@ -113,10 +111,7 @@ pub(crate) async fn close_session(
         warn!("failed to delete frozen cards for {}: {}", session_id, err);
     }
     if session.adopted_from.is_none() {
-        let target = session_zellij_target(&session);
-        let _ = std::process::Command::new("zellij")
-            .args(["delete-session", &target, "-f"])
-            .output();
+        crate::herdr_lifecycle::destroy_mux_if_managed(&session).await;
     }
     Ok(StatusCode::OK)
 }
@@ -133,8 +128,6 @@ pub(crate) async fn restart_session(
             .cloned()
             .ok_or_else(|| (StatusCode::NOT_FOUND, "session not found".to_string()))?
     };
-    let target = session_zellij_target(&session);
-
     if let Some(adopted) = session
         .adopted_from
         .as_ref()
@@ -155,9 +148,7 @@ pub(crate) async fn restart_session(
         }
     }
     if session.adopted_from.is_none() {
-        let _ = std::process::Command::new("zellij")
-            .args(["delete-session", &target, "-f"])
-            .output();
+        crate::herdr_lifecycle::destroy_mux_if_managed(&session).await;
     }
     {
         let snapshot = {
@@ -298,9 +289,12 @@ pub(crate) async fn adopt_zellij_session(
 
     let session_id = Uuid::new_v4().to_string();
     let mut adopted_from = AdoptedFrom {
+        backend_kind: BackendKind::Zellij,
         tmux_target: None,
         zellij_session: Some(req.zellij_session.clone()),
         zellij_pane_id: Some(pane_id.clone()),
+        herdr_workspace_id: None,
+        herdr_pane_id: None,
         original_cli_pid: candidate.cli_pid.unwrap_or(0),
         session_id: None,
         cli_id: Some(req.cli_id.clone()),
@@ -336,6 +330,10 @@ pub(crate) async fn adopt_zellij_session(
         .unwrap_or_default();
     let session = Session {
         session_id: session_id.clone(),
+        backend_kind: BackendKind::Zellij,
+        herdr_session: None,
+        herdr_workspace_id: None,
+        herdr_pane_id: None,
         title,
         chat_id: chat_id.clone(),
         chat_type: chat_type.clone(),
@@ -399,6 +397,10 @@ pub(crate) async fn adopt_zellij_session(
 
     let init = InitConfig {
         session_id: session_id.clone(),
+        backend_kind: BackendKind::Zellij,
+        herdr_session: None,
+        herdr_workspace_id: None,
+        herdr_pane_id: None,
         title: session.title.clone(),
         chat_id: session.chat_id.clone(),
         root_message_id: session.root_message_id.clone(),
@@ -460,10 +462,30 @@ pub(crate) async fn ensure_worker_for_session(state: &AppState, session_id: &str
     if session.status != SessionStatus::Active {
         anyhow::bail!("session {} is not active", session_id);
     }
-    {
-        let target = session_zellij_target(&session);
-        if !zellij_has_session(&target) {
-            anyhow::bail!("zellij session is not available for {}", session_id);
+    match session.backend_kind {
+        BackendKind::Zellij => {
+            let target = session_zellij_target(&session);
+            if !zellij_has_session(&target) {
+                anyhow::bail!("zellij session is not available for {}", session_id);
+            }
+        }
+        // Herdr managed: no zellij session is required. The worker decides
+        // create-vs-resume via its own `is_alive` table; a missing workspace
+        // is recreated by label.
+        BackendKind::Herdr if session.adopted_from.is_none() => {}
+        // Herdr adopt: the persisted workspace/pane must still exist.
+        BackendKind::Herdr => {
+            if let Some(workspace_id) = session.herdr_workspace_id.as_deref() {
+                let alive = crate::herdr_lifecycle::mux_target_alive(&session).await;
+                if !alive {
+                    anyhow::bail!(
+                        "adopted herdr workspace {} no longer exists; re-run /adopt",
+                        workspace_id
+                    );
+                }
+            } else {
+                anyhow::bail!("adopted herdr session is missing workspace id");
+            }
         }
     }
 
@@ -582,73 +604,37 @@ pub(crate) async fn dispatch_event_outcome(
             Ok(Json(serde_json::json!({ "ok": true })))
         }
         LarkEventOutcome::AdoptZellij { target } => {
-            let (zellij_session, zellij_pane_id) = match target.split_once(':') {
-                Some((s, p)) => (s.to_string(), p.to_string()),
-                None => (target.clone(), "terminal_0".to_string()),
-            };
-            let result = adopt_zellij_session(
-                State(state.clone()),
-                Json(AdoptZellijSessionRequest {
-                    zellij_session,
-                    zellij_pane_id,
-                    cli_id: bot.cli_id.clone(),
-                    cli_bin: bot.cli_bin.clone().unwrap_or_else(|| bot.cli_id.clone()),
-                    title: Some(format!("adopt {}", target)),
-                    cwd: String::new(),
-                    pane_cols: None,
-                    pane_rows: None,
-                    lark_app_id: Some(app_id.to_string()),
-                    chat_id: Some(chat_id.to_string()),
-                    chat_type: parsed.chat_type.clone(),
-                    root_message_id: Some(message_id.to_string()),
-                    scope: Some(*scope),
-                    thread_id: parsed.thread_id.clone(),
-                    owner_open_id: parsed.sender_open_id.clone(),
-                }),
+            crate::herdr_adopt::dispatch_zellij_adopt_reply(
+                state,
+                bot,
+                message_id,
+                app_id,
+                chat_id,
+                parsed.chat_type.clone(),
+                *scope,
+                parsed.thread_id.clone(),
+                parsed.sender_open_id.clone(),
+                &target,
             )
-            .await;
-            let reply_in_thread = *scope == SessionScope::Thread;
-            match result {
-                Ok((_, Json(session))) => {
-                    let reply = build_adopt_zellij_result_reply(Ok(&session));
-                    let _ = lark_reply_message_with_opts(
-                        state,
-                        bot,
-                        message_id,
-                        &reply,
-                        reply_in_thread,
-                    )
-                    .await;
-                }
-                Err((_, err)) => {
-                    let reply = build_adopt_zellij_result_reply(Err(err.as_str()));
-                    let _ = lark_reply_message_with_opts(
-                        state,
-                        bot,
-                        message_id,
-                        &reply,
-                        reply_in_thread,
-                    )
-                    .await;
-                }
-            }
-            Ok(Json(serde_json::json!({ "ok": true })))
+            .await
+        }
+        LarkEventOutcome::AdoptHerdr { target } => {
+            crate::herdr_adopt::dispatch_herdr_adopt_reply(
+                state,
+                bot,
+                message_id,
+                app_id,
+                chat_id,
+                parsed.chat_type.clone(),
+                *scope,
+                parsed.thread_id.clone(),
+                parsed.sender_open_id.clone(),
+                &target,
+            )
+            .await
         }
         LarkEventOutcome::AdoptList => {
-            let items = discover_zellij_adopt_candidates();
-            if items.is_empty() {
-                let _ = lark_reply_message(
-                    state,
-                    bot,
-                    message_id,
-                    "no zellij sessions available for adoption",
-                )
-                .await;
-            } else {
-                let post = build_zellij_adopt_post_content(&items);
-                let _ = lark_reply_post_message(state, bot, message_id, &post).await;
-            }
-            Ok(Json(serde_json::json!({ "ok": true })))
+            crate::herdr_adopt::dispatch_adopt_list_reply(state, bot, message_id).await
         }
         LarkEventOutcome::PassthroughInput { text } => {
             if let Some(session) = existing {

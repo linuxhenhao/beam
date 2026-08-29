@@ -246,6 +246,10 @@ pub(crate) async fn start_workflow_attempt_resume(
     let started_at = Utc::now().timestamp_millis().max(0) as u64;
     let session = Session {
         session_id: session_id.clone(),
+        backend_kind: BackendKind::Zellij,
+        herdr_session: None,
+        herdr_workspace_id: None,
+        herdr_pane_id: None,
         title: format!("workflow resume {} {}", run_id, activity_id),
         chat_id: format!("wf-resume-chat-{run_id}"),
         chat_type: Some("local".to_string()),
@@ -309,6 +313,10 @@ pub(crate) async fn start_workflow_attempt_resume(
 
     let init = InitConfig {
         session_id: session_id.clone(),
+        backend_kind: BackendKind::Zellij,
+        herdr_session: None,
+        herdr_workspace_id: None,
+        herdr_pane_id: None,
         title: session.title.clone(),
         chat_id: session.chat_id.clone(),
         root_message_id: session.root_message_id.clone(),

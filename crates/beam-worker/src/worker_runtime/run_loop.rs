@@ -58,26 +58,11 @@ pub async fn run(init: InitConfig) -> Result<()> {
     let session_name = format!("beam-{}", &init.session_id[..8.min(init.session_id.len())]);
     let paths = BeamPaths::discover()?;
     let adapter = Arc::new(Mutex::new(CliAdapter::from_init(&init)?));
-    let (backend_impl, attach_context): (Box<dyn SessionBackend>, &'static str) =
-        if let Some(adopted) = init.adopted_from.as_ref() {
-            if let Some(pane_id) = adopted.zellij_pane_id.clone() {
-                let session = adopted.zellij_session.clone().unwrap_or_else(|| {
-                    format!("beam-{}", &init.session_id[..8.min(init.session_id.len())])
-                });
-                let observe = ZellijObserveBackend::new(
-                    session,
-                    pane_id,
-                    u32::try_from(adopted.original_cli_pid).ok(),
-                );
-                (Box::new(observe), "observe")
-            } else {
-                let zellij = ZellijBackend::new(session_name.clone());
-                (Box::new(zellij), "spawn")
-            }
-        } else {
-            let zellij = ZellijBackend::new(session_name.clone());
-            (Box::new(zellij), "spawn")
-        };
+    // Backend selection: Herdr adopted sessions observe a user pane; Herdr
+    // managed sessions spawn into a labeled workspace; everything else keeps
+    // the zellij path unchanged.
+    let (backend_impl, attach_context, herdr_handle) =
+        crate::backend::select::select_backend(&init, &session_name);
     let spawn_spec = adapter.lock().await.build_spawn_spec(&init);
     let extra_env = maybe_inject_term(&init.cli_id, std::env::var("TERM").ok().as_deref())
         .into_iter()
@@ -127,7 +112,12 @@ pub async fn run(init: InitConfig) -> Result<()> {
     // Shared handle: the backend synchronizes internally per operation, so
     // no outer Mutex is needed and a long write_input() never blocks screen
     // capture, terminal keys, or the screenshot coordinator.
-    let backend: Arc<dyn SessionBackend> = Arc::from(backend_impl);
+    let backend = backend_impl;
+    let (herdr_workspace_id, herdr_pane_id) = herdr_handle
+        .as_ref()
+        .and_then(|h| h.herdr_ids())
+        .map(|ids| (Some(ids.workspace_id), Some(ids.pane_id)))
+        .unwrap_or((None, None));
     let mut cli_pid_marker = None;
     let child_pid = backend.child_pid().await?;
     adapter.lock().await.on_spawned(child_pid);
@@ -164,6 +154,9 @@ pub async fn run(init: InitConfig) -> Result<()> {
         &stdout,
         &WorkerToDaemon::Ready {
             zellij_session: session_name.clone(),
+            backend_kind: init.backend_kind,
+            herdr_workspace_id,
+            herdr_pane_id,
         },
     )
     .await?;
@@ -530,6 +523,41 @@ pub async fn run(init: InitConfig) -> Result<()> {
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                }
+            }
+        });
+    }
+    // Herdr agent state polling: emit MuxAgentState for side effects only
+    // (blocked → attention). v1 uses a bounded `agent get` poll.
+    if init.backend_kind == beam_core::BackendKind::Herdr
+        && let Some(handle) = herdr_handle.as_ref()
+        && let Some(pane_id) = handle.herdr_ids().map(|ids| ids.pane_id)
+    {
+        let agent_stdout = stdout.clone();
+        let agent_pane_id = pane_id.clone();
+        worker_joins.spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let state = crate::backend::herdr::cli::agent_get(&agent_pane_id)
+                    .await
+                    .ok()
+                    .and_then(|payload| crate::backend::herdr::cli::parse_agent_state(&payload));
+                let Some(state) = state else {
+                    continue;
+                };
+                if send_message(
+                    &agent_stdout,
+                    &WorkerToDaemon::MuxAgentState {
+                        state,
+                        agent_name: None,
+                        pane_id: agent_pane_id.clone(),
+                        message: None,
+                    },
+                )
+                .await
+                .is_err()
+                {
+                    break;
                 }
             }
         });

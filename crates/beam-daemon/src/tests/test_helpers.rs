@@ -8,8 +8,9 @@ use axum::{
     routing::{get, post},
 };
 use beam_core::{
-    AttemptState, BeamPaths, BotConfig, Config, DecisionNode, ReconcileResultState, Session,
-    SessionScope, SessionStatus, WaitState, WorkflowDefinition, WorkflowNode, WorkflowOutputRef,
+    AttemptState, BackendKind, BeamPaths, BotConfig, Config, DecisionNode, ReconcileResultState,
+    Session, SessionScope, SessionStatus, WaitState, WorkflowDefinition, WorkflowNode,
+    WorkflowOutputRef,
     workflow_definition::NodeBase,
     workflow_snapshot::{ActivityStatus, CancelRequestState},
 };
@@ -282,6 +283,10 @@ pub(crate) fn test_decision_workflow() -> WorkflowDefinition {
 pub(crate) fn make_session(session_id: &str) -> Session {
     Session {
         session_id: session_id.to_string(),
+        backend_kind: BackendKind::Zellij,
+        herdr_session: None,
+        herdr_workspace_id: None,
+        herdr_pane_id: None,
         title: format!("session {}", session_id),
         chat_id: "chat-1".to_string(),
         root_message_id: "root-1".to_string(),
@@ -337,6 +342,7 @@ pub(crate) fn make_session(session_id: &str) -> Session {
 pub(crate) fn make_bot(app_id: &str) -> BotConfig {
     BotConfig {
         name: None,
+        backend: None,
         lark_app_id: app_id.to_string(),
         lark_app_secret: "secret".to_string(),
         cli_id: "codex".to_string(),

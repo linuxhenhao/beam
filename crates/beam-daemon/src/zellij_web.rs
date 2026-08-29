@@ -22,6 +22,7 @@ mod lifecycle;
 mod tokens;
 mod watchdog;
 
+use anyhow::Context;
 #[allow(unused_imports)]
 pub use lifecycle::{ensure_zellij_web, zellij_web_is_running, zellij_web_start};
 #[allow(unused_imports)]
@@ -29,6 +30,25 @@ pub use tokens::{
     ZellijWebTokens, ensure_zellij_web_tokens, load_zellij_web_tokens, save_zellij_web_tokens,
 };
 pub use watchdog::spawn_zellij_web_watchdog;
+
+/// Start the local zellij web server + tokens when `web.zellij_web` is
+/// enabled; otherwise return empty tokens so the terminal proxy still runs
+/// without an upstream. `tokens_path` points at the daemon's state directory.
+pub fn start_zellij_web_if_enabled(
+    enabled: bool,
+    port: u16,
+    tokens_path: &std::path::Path,
+) -> anyhow::Result<ZellijWebTokens> {
+    if !enabled {
+        return Ok(ZellijWebTokens::disabled(port));
+    }
+    ensure_zellij_web(port)
+        .with_context(|| format!("failed to start zellij web server on port {port}"))?;
+    let tokens = ensure_zellij_web_tokens(tokens_path, port)
+        .with_context(|| "failed to create zellij web tokens")?;
+    spawn_zellij_web_watchdog(port);
+    Ok(tokens)
+}
 
 #[cfg(test)]
 mod tests;

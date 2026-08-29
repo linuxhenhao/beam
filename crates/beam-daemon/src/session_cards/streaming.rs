@@ -1,5 +1,5 @@
 use super::actions::card_text;
-use crate::{DisplayMode, ScreenStatus, Session, card_i18n};
+use crate::{BackendKind, DisplayMode, ScreenStatus, Session, card_i18n};
 
 /// Toggles between Hidden and Screenshot display modes. Used when the user clicks
 /// the "Show/Hide screenshot" button on the streaming card.
@@ -71,7 +71,11 @@ pub(crate) fn status_card_text<'a>(locale: Option<&str>, status: &'a str) -> &'a
 /// call `start_pending_response_turn` — that would mark the streaming card as the
 /// pending response target, causing `deliver_final_output_once` to PATCH-overwrite
 /// the terminal card with reply content.
-pub(crate) fn build_streaming_card(session: &Session, status: &str) -> String {
+pub(crate) fn build_streaming_card(
+    session: &Session,
+    status: &str,
+    herdr_terminal: bool,
+) -> String {
     let locale = session.locale.as_deref();
     let title = if session.title.trim().is_empty() {
         session.session_id.clone()
@@ -178,31 +182,48 @@ pub(crate) fn build_streaming_card(session: &Session, status: &str) -> String {
             "card_nonce": card_nonce.clone(),
         }
     }));
-    actions.push(serde_json::json!({
-        "tag": "button",
-        "text": card_i18n::plain_text(locale, "选择只读终端入口", "Choose read-only terminal entry"),
-        "type": "primary",
-        "value": {
-            "action": "choose_read_only_terminal_link",
-            "root_id": session.root_message_id,
-            "session_id": session.session_id,
-            "cli_id": session.cli_id.clone().unwrap_or_else(|| "cli".to_string()),
-            "card_nonce": action_nonce,
-        }
-    }));
+    // Zellij always gets terminal buttons. Herdr gets them once the pane is
+    // ready and the web terminal is not killed by `web.herdr_terminal=false`;
+    // otherwise the card carries a `herdr agent attach` hint.
+    let herdr_terminal_ready = session.backend_kind == BackendKind::Herdr
+        && herdr_terminal
+        && session.herdr_pane_id.is_some();
+    if session.backend_kind == BackendKind::Zellij || herdr_terminal_ready {
+        actions.push(serde_json::json!({
+            "tag": "button",
+            "text": card_i18n::plain_text(locale, "选择只读终端入口", "Choose read-only terminal entry"),
+            "type": "primary",
+            "value": {
+                "action": "choose_read_only_terminal_link",
+                "root_id": session.root_message_id,
+                "session_id": session.session_id,
+                "cli_id": session.cli_id.clone().unwrap_or_else(|| "cli".to_string()),
+                "card_nonce": action_nonce,
+            }
+        }));
 
-    actions.push(serde_json::json!({
-        "tag": "button",
-        "text": card_i18n::plain_text(locale, "私发可写链接", "Send write link privately"),
-        "type": "default",
-        "value": {
-            "action": "get_write_link",
-            "root_id": session.root_message_id,
-            "session_id": session.session_id,
-            "cli_id": session.cli_id.clone().unwrap_or_else(|| "cli".to_string()),
-            "card_nonce": action_nonce,
-        }
-    }));
+        actions.push(serde_json::json!({
+            "tag": "button",
+            "text": card_i18n::plain_text(locale, "私发可写链接", "Send write link privately"),
+            "type": "default",
+            "value": {
+                "action": "get_write_link",
+                "root_id": session.root_message_id,
+                "session_id": session.session_id,
+                "cli_id": session.cli_id.clone().unwrap_or_else(|| "cli".to_string()),
+                "card_nonce": action_nonce,
+            }
+        }));
+    } else if session.backend_kind == BackendKind::Herdr {
+        elements.push(serde_json::json!({
+            "tag": "markdown",
+            "content": "attach with: `herdr agent attach`",
+            "i18n_content": {
+                "zh_cn": "用 `herdr agent attach` 连接终端",
+                "en_us": "attach with: `herdr agent attach`",
+            }
+        }));
+    }
     if status == "limited"
         && session
             .usage_limit

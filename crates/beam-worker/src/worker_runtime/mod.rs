@@ -25,11 +25,12 @@ pub(crate) use uuid::Uuid;
 pub(crate) use crate::adapter::CliAdapter;
 pub(crate) use crate::adapter::ResolveOutcome;
 pub(crate) use crate::adapter::{TUI_READY_TIMEOUT, wait_for_tui_ready};
-pub(crate) use crate::backend::{SessionBackend, SpawnOpts, ZellijBackend, ZellijObserveBackend};
+pub(crate) use crate::backend::{SessionBackend, SpawnOpts};
 
 mod analyzer;
 mod coordinator;
 mod coordinator_runtime;
+mod embedded_font;
 mod grok_prompts;
 mod launch;
 #[cfg(test)]

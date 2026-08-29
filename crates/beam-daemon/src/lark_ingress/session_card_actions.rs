@@ -235,30 +235,30 @@ async fn handle_terminal_link(
         )));
     };
 
-    if read_only {
-        let ro_token_available = load_zellij_web_tokens_for_card()
-            .as_ref()
-            .and_then(|t| t.read_only_token.as_deref())
-            .is_some_and(|t| !t.is_empty());
-        if !ro_token_available {
-            return Ok(Json(build_lark_card_action_toast(
-                "error",
-                "terminal not ready",
-            )));
+    // Readiness is backend-specific: zellij needs the corresponding web
+    // token, herdr needs a ready pane (and the web terminal not killed).
+    let terminal_ready = match session.backend_kind {
+        BackendKind::Zellij => {
+            if read_only {
+                load_zellij_web_tokens_for_card()
+                    .as_ref()
+                    .and_then(|t| t.read_only_token.as_deref())
+                    .is_some_and(|t| !t.is_empty())
+            } else {
+                zellij_web::load_zellij_web_tokens(&state.paths.zellij_web_tokens_json())
+                    .unwrap_or(None)
+                    .as_ref()
+                    .and_then(|t| t.write_token.as_deref())
+                    .is_some_and(|t| !t.is_empty())
+            }
         }
-    } else {
-        let write_token_available =
-            zellij_web::load_zellij_web_tokens(&state.paths.zellij_web_tokens_json())
-                .unwrap_or(None)
-                .as_ref()
-                .and_then(|t| t.write_token.as_deref())
-                .is_some_and(|t| !t.is_empty());
-        if !write_token_available {
-            return Ok(Json(build_lark_card_action_toast(
-                "error",
-                "terminal not ready",
-            )));
-        }
+        BackendKind::Herdr => state.config.web.herdr_terminal && session.herdr_pane_id.is_some(),
+    };
+    if !terminal_ready {
+        return Ok(Json(build_lark_card_action_toast(
+            "error",
+            "terminal not ready",
+        )));
     }
 
     let toast_msg = if read_only {
@@ -267,14 +267,30 @@ async fn handle_terminal_link(
         "write link ready"
     };
 
+    // `get_write_link` must issue a write ticket (the previous code always
+    // issued a read-only ticket even for write links).
+    let permission = if read_only {
+        terminal_auth::TerminalPermission::ReadOnly
+    } else {
+        terminal_auth::TerminalPermission::Write
+    };
+    let (header_zh, header_en, body_zh, body_en) = if read_only {
+        (
+            "选择只读终端入口",
+            "Choose read-only terminal entry",
+            "如果某个入口打不开，请返回后选择其他入口。",
+            "If one entry does not open, go back and choose another.",
+        )
+    } else {
+        (
+            "选择可写终端入口",
+            "Choose writable terminal entry",
+            "可写链接为一次性使用，5 分钟内有效。",
+            "The writable link is single-use and valid for 5 minutes.",
+        )
+    };
     let card_json = build_terminal_link_choice_card_json(
-        state,
-        &session,
-        terminal_auth::TerminalPermission::ReadOnly,
-        "选择只读终端入口",
-        "Choose read-only terminal entry",
-        "如果某个入口打不开，请返回后选择其他入口。",
-        "If one entry does not open, go back and choose another.",
+        state, &session, permission, header_zh, header_en, body_zh, body_en,
     )
     .await;
 
@@ -429,6 +445,7 @@ async fn handle_retry_last_task(
     let card = serde_json::from_str::<Value>(&build_streaming_card(
         &session_snapshot.0,
         session_stream_status(&session_snapshot.0),
+        state.config.web.herdr_terminal,
     ))
     .unwrap_or_else(|_| serde_json::json!({}));
     Ok(Json(serde_json::json!({
@@ -501,6 +518,7 @@ async fn handle_toggle_display(
         } else {
             session_stream_status(&session_snapshot)
         },
+        state.config.web.herdr_terminal,
     ))
     .unwrap_or_else(|_| serde_json::json!({}));
     match resolve_card_render_target(action, &session_snapshot) {
@@ -598,6 +616,7 @@ async fn handle_refresh_screenshot(
     let card = serde_json::from_str::<Value>(&build_streaming_card(
         &session,
         session_stream_status(&session),
+        state.config.web.herdr_terminal,
     ))
     .unwrap_or_else(|_| serde_json::json!({}));
     match resolve_card_render_target(action, &session) {
@@ -669,6 +688,7 @@ async fn handle_term_action(
         } else {
             session_stream_status(&session)
         },
+        state.config.web.herdr_terminal,
     ))
     .unwrap_or_else(|_| serde_json::json!({}));
     match resolve_card_render_target(action, &session) {

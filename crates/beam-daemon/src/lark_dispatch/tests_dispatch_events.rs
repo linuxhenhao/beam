@@ -30,6 +30,7 @@ fn handle_lark_event_uses_api_to_detect_topic_group() {
         let app_id = "app-topic";
         let bot = BotConfig {
             name: None,
+            backend: None,
             lark_app_id: app_id.to_string(),
             lark_app_secret: "secret".to_string(),
             cli_id: "codex".to_string(),
@@ -108,6 +109,7 @@ fn handle_lark_event_trigger_creates_session_with_bot_default_dir() {
         let app_id = "app-trigger-dir";
         let bot = BotConfig {
             name: None,
+            backend: None,
             lark_app_id: app_id.to_string(),
             lark_app_secret: "secret".to_string(),
             cli_id: "codex".to_string(),
@@ -194,6 +196,7 @@ fn handle_lark_event_trigger_uses_trigger_working_dir() {
         let app_id = "app-trigger-dir-pinned";
         let bot = BotConfig {
             name: None,
+            backend: None,
             lark_app_id: app_id.to_string(),
             lark_app_secret: "secret".to_string(),
             cli_id: "codex".to_string(),
@@ -274,6 +277,7 @@ fn handle_lark_event_trigger_without_skip_dir_select_shows_card() {
         let app_id = "app-trigger-card";
         let bot = BotConfig {
             name: None,
+            backend: None,
             lark_app_id: app_id.to_string(),
             lark_app_secret: "secret".to_string(),
             cli_id: "codex".to_string(),
@@ -400,6 +404,7 @@ fn handle_lark_event_trigger_sends_ack_reply() {
         let app_id = "app-trigger-ack";
         let bot = BotConfig {
             name: None,
+            backend: None,
             lark_app_id: app_id.to_string(),
             lark_app_secret: "secret".to_string(),
             cli_id: "codex".to_string(),
@@ -537,6 +542,7 @@ fn handle_lark_event_trigger_activates_in_new_topic_despite_chat_session() {
         let app_id = "app-trigger-inactive";
         let bot = BotConfig {
             name: None,
+            backend: None,
             lark_app_id: app_id.to_string(),
             lark_app_secret: "secret".to_string(),
             cli_id: "codex".to_string(),
@@ -698,6 +704,7 @@ fn handle_lark_event_trigger_keyword_in_existing_topic_does_not_reinject() {
         let app_id = "app-trigger-existing";
         let bot = BotConfig {
             name: None,
+            backend: None,
             lark_app_id: app_id.to_string(),
             lark_app_secret: "secret".to_string(),
             cli_id: "codex".to_string(),

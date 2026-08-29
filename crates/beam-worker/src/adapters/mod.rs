@@ -58,7 +58,7 @@ pub fn tui_ready_marker(cli_id: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{create_adapter, tui_ready_marker};
-    use crate::adapter::test_support::test_init;
+    use crate::adapter::test_support::{home_test_lock, test_init};
 
     #[test]
     fn create_adapter_rejects_unknown_cli_ids() {
@@ -95,6 +95,12 @@ mod tests {
 
     #[test]
     fn registry_covers_every_cli_spec() {
+        // Adapter factories can touch process-global state (e.g. the hermes
+        // runtime reset in `state_from_init`) or read HOME, so serialize with
+        // the other adapter tests to avoid cross-test races.
+        let _lock = home_test_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         for spec in beam_core::cli_specs::CLI_SPECS {
             assert!(
                 create_adapter(&test_init(spec.cli_id)).is_ok(),
