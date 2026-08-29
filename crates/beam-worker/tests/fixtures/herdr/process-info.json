@@ -1,0 +1,20 @@
+{
+  "id": "cli:pane:process_info",
+  "result": {
+    "process_info": {
+      "foreground_process_group_id": 4242,
+      "foreground_processes": [
+        {
+          "argv": ["claude", "--dangerously-skip-permissions"],
+          "cmdline": "claude --dangerously-skip-permissions",
+          "cwd": "/repo/proj",
+          "name": "claude",
+          "pid": 4242
+        }
+      ],
+      "pane_id": "w1:p1",
+      "shell_pid": 4100
+    },
+    "type": "pane_process_info"
+  }
+}

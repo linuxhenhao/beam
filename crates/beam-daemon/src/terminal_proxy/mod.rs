@@ -17,7 +17,7 @@ use reqwest::Client;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use beam_core::session::Session;
+use beam_core::{BackendKind, session::Session};
 
 use crate::terminal_auth::{TerminalAuthState, TerminalPermission};
 use crate::zellij_web::ZellijWebTokens;
@@ -110,7 +110,13 @@ async fn resolve_zellij_session(
     session_id: &str,
 ) -> Option<String> {
     let sessions = sessions.lock().await;
-    sessions.get(session_id).map(zellij_session_for_beam)
+    let session = sessions.get(session_id)?;
+    // Herdr sessions have no zellij web target; the proxy must 404 rather
+    // than map them onto a `beam-{sid8}` zellij name.
+    if session.backend_kind == BackendKind::Herdr {
+        return None;
+    }
+    Some(zellij_session_for_beam(session))
 }
 
 // ── URL builders ─────────────────────────────────────────────────────────

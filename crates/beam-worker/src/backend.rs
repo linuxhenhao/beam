@@ -68,10 +68,13 @@ pub trait SessionBackend: Send + Sync {
     fn subscribe(&self) -> broadcast::Receiver<String>;
 }
 
+pub(crate) mod herdr;
 mod observe;
+pub(crate) mod select;
 mod subscribe;
 mod zellij;
 
+pub use herdr::{HerdrBackend, HerdrObserveBackend};
 pub use observe::ZellijObserveBackend;
 pub use zellij::ZellijBackend;
 

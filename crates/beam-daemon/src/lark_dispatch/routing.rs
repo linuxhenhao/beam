@@ -67,6 +67,15 @@ pub(crate) fn decide_lark_event_outcome(
                 LarkEventOutcome::AdoptZellij { target }
             }
         }
+        LarkTextAction::AdoptHerdr(target) => {
+            if let Some(session) = existing.filter(|session| session.adopted_from.is_some()) {
+                LarkEventOutcome::ReplyOnly {
+                    reply: build_adopt_already_attached_reply(session),
+                }
+            } else {
+                LarkEventOutcome::AdoptHerdr { target }
+            }
+        }
         LarkTextAction::AdoptList => {
             if let Some(session) = existing.filter(|session| session.adopted_from.is_some()) {
                 LarkEventOutcome::ReplyOnly {

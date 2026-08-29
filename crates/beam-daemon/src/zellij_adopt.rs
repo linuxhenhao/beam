@@ -423,17 +423,17 @@ pub(crate) fn session_zellij_target(session: &Session) -> String {
 pub(crate) fn reconcile_restored_sessions_with<FZ>(
     sessions: &mut HashMap<String, Session>,
     quiet_restart: bool,
-    has_zellij_session: FZ,
+    mux_target_alive: FZ,
 ) -> Vec<Session>
 where
-    FZ: Fn(&str) -> bool,
+    FZ: Fn(&Session) -> bool,
 {
     let mut restore_candidates = Vec::new();
     for session in sessions.values_mut() {
         if session.status != SessionStatus::Active {
             continue;
         }
-        let is_live = has_zellij_session(&session_zellij_target(session));
+        let is_live = mux_target_alive(session);
 
         if is_live {
             session.worker_pid = None;
@@ -472,7 +472,7 @@ mod tests {
         missing_zellij.terminal_url = Some("http://127.0.0.1:4".to_string());
 
         let mut sessions = HashMap::from([(missing_zellij.session_id.clone(), missing_zellij)]);
-        let restore = reconcile_restored_sessions_with(&mut sessions, false, |_target| false);
+        let restore = reconcile_restored_sessions_with(&mut sessions, false, |_session| false);
 
         assert!(restore.is_empty());
         assert_eq!(sessions["zellij-missing"].status, SessionStatus::Closed);
@@ -492,7 +492,7 @@ mod tests {
         let mut eager_sessions =
             HashMap::from([(zellij_session.session_id.clone(), zellij_session.clone())]);
         let eager_restore =
-            reconcile_restored_sessions_with(&mut eager_sessions, false, |_target| true);
+            reconcile_restored_sessions_with(&mut eager_sessions, false, |_session| true);
         assert_eq!(eager_restore.len(), 1);
         assert!(
             eager_restore
@@ -509,7 +509,7 @@ mod tests {
         let mut quiet_sessions =
             HashMap::from([(zellij_session.session_id.clone(), zellij_session)]);
         let quiet_restore =
-            reconcile_restored_sessions_with(&mut quiet_sessions, true, |_target| true);
+            reconcile_restored_sessions_with(&mut quiet_sessions, true, |_session| true);
         assert!(quiet_restore.is_empty());
         assert_eq!(quiet_sessions["zellij-live"].status, SessionStatus::Active);
         assert_eq!(quiet_sessions["zellij-live"].worker_pid, None);

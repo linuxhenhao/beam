@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 mod api_token;
 mod ask;
+mod backend;
 mod card_i18n;
 mod connector_runtime;
 mod connector_store;
@@ -16,6 +17,9 @@ mod dir_select;
 mod external_host_watcher;
 mod final_output;
 mod grant;
+mod herdr_adopt;
+mod herdr_lifecycle;
+mod herdr_probe;
 mod ip_resolver;
 mod lark_api_helpers;
 mod lark_card_builders;
@@ -40,6 +44,7 @@ mod trigger_log;
 mod utils;
 mod webhook_key;
 mod webhook_lifecycle;
+mod worker_health;
 mod worker_lifecycle;
 mod workflow_approval_cards;
 mod workflow_cancellation;
@@ -114,8 +119,8 @@ use axum::{
 };
 use base64::Engine;
 use beam_core::{
-    AdoptedFrom, AgentAttention, ApiHealth, AttemptResumeRequest, AttentionRequest, BeamPaths,
-    BotConfig, BotSummary, ChatMode, CliUsageLimitState, ColdWorkflowRun, Config,
+    AdoptedFrom, AgentAttention, ApiHealth, AttemptResumeRequest, AttentionRequest, BackendKind,
+    BeamPaths, BotConfig, BotSummary, ChatMode, CliUsageLimitState, ColdWorkflowRun, Config,
     CreateSessionRequest, CustomTrigger, DaemonOverview, DaemonRuntimeState, DaemonToWorker,
     DisplayMode, EventDraft, EventLog, EventWindowOpts, FinalOutputKind, FinalOutputRequest,
     InitConfig, PendingResponseCardState, RestartSessionRequest, ResumeSessionRequest,
@@ -169,6 +174,7 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
 
     let config = load_config(&paths)?;
     let bots = load_bot_configs(&paths)?;
+    herdr_probe::probe_herdr_at_startup(&config, &bots).await?;
     let mut sessions = load_sessions(&paths).await?;
     for session in sessions.values_mut() {
         let marker = read_pending_response_patch_marker(&paths, &session.session_id).await?;
@@ -193,7 +199,6 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
     };
     persist_runtime_state(&paths, &runtime).await?;
 
-    // Load persisted in-memory state that should survive restarts.
     let workflow_progress_cards =
         workflow_runtime_driver::load_workflow_progress_cards(&paths).await;
     info!(
@@ -288,8 +293,7 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         }
     }
 
-    // Probe bot open_id / app_name from Lark API and persist to bots-info.json.
-    // Best-effort; failures are logged and do not block startup.
+    // Probe bot open_id / app_name from Lark API (best-effort).
     for bot in state.bots.values() {
         let paths = state.paths.clone();
         let bot = bot.clone();
@@ -303,7 +307,7 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         let restore_candidates = reconcile_restored_sessions_with(
             &mut sessions,
             state.config.daemon.quiet_restart,
-            zellij_has_session,
+            crate::herdr_lifecycle::mux_target_alive_sync,
         );
         let snapshot = sessions.clone();
         drop(sessions);
@@ -827,14 +831,13 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
 
     // Start zellij web server and ensure tokens
     let zellij_web_port = state.config.web.proxy_base_port + 1;
-    zellij_web::ensure_zellij_web(zellij_web_port)
-        .with_context(|| format!("failed to start zellij web server on port {zellij_web_port}"))?;
-    let zellij_tokens = zellij_web::ensure_zellij_web_tokens(
-        &state.paths.zellij_web_tokens_json(),
+    // PR5 gate: a herdr-only daemon may skip zellij web entirely. Default is
+    // true (existing behavior); only tested herdr-only deployments flip it.
+    let zellij_tokens = zellij_web::start_zellij_web_if_enabled(
+        state.config.web.zellij_web,
         zellij_web_port,
-    )
-    .with_context(|| "failed to create zellij web tokens")?;
-    zellij_web::spawn_zellij_web_watchdog(zellij_web_port);
+        &state.paths.zellij_web_tokens_json(),
+    )?;
 
     // Start terminal proxy with auth bridge
     let proxy_host = state.config.web.host.clone();
@@ -856,7 +859,6 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
     .await
     .with_context(|| format!("failed to start terminal proxy on {proxy_host}:{proxy_port}"))?;
 
-    // Periodic state persistence for stores that are updated frequently.
     let periodic_paths = paths.clone();
     let periodic_auth = auth_state.clone();
     let periodic_recent_events = state.recent_lark_events.clone();
@@ -907,8 +909,7 @@ pub async fn run(paths: BeamPaths, options: RunOptions) -> Result<()> {
         }
     });
 
-    // Worker health watchdog: flag sessions whose worker stopped heartbeating.
-    worker_lifecycle::spawn_worker_health_watchdog(state.clone());
+    worker_health::spawn_worker_health_watchdog(state.clone());
 
     // Schedule loop: periodically check schedules and trigger due tasks.
     let schedule_paths = paths.clone();

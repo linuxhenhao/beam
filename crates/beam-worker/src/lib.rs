@@ -9,6 +9,8 @@ use std::path::Path;
 use anyhow::Result;
 use beam_core::InitConfig;
 
+pub use backend::herdr::observe::parse_herdr_frame_line;
+pub use backend::{HerdrBackend, HerdrObserveBackend, SessionBackend, SpawnOpts};
 pub use worker_runtime::run;
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 use super::actions::card_text;
-use crate::{DisplayMode, ScreenStatus, Session, card_i18n};
+use crate::{BackendKind, DisplayMode, ScreenStatus, Session, card_i18n};
 
 /// Toggles between Hidden and Screenshot display modes. Used when the user clicks
 /// the "Show/Hide screenshot" button on the streaming card.
@@ -178,31 +178,44 @@ pub(crate) fn build_streaming_card(session: &Session, status: &str) -> String {
             "card_nonce": card_nonce.clone(),
         }
     }));
-    actions.push(serde_json::json!({
-        "tag": "button",
-        "text": card_i18n::plain_text(locale, "选择只读终端入口", "Choose read-only terminal entry"),
-        "type": "primary",
-        "value": {
-            "action": "choose_read_only_terminal_link",
-            "root_id": session.root_message_id,
-            "session_id": session.session_id,
-            "cli_id": session.cli_id.clone().unwrap_or_else(|| "cli".to_string()),
-            "card_nonce": action_nonce,
-        }
-    }));
+    // Herdr v1 has no web terminal: do not emit buttons that proxy to zellij
+    // web. The card carries a `herdr agent attach` hint instead (Q6 = show).
+    if session.backend_kind == BackendKind::Zellij {
+        actions.push(serde_json::json!({
+            "tag": "button",
+            "text": card_i18n::plain_text(locale, "选择只读终端入口", "Choose read-only terminal entry"),
+            "type": "primary",
+            "value": {
+                "action": "choose_read_only_terminal_link",
+                "root_id": session.root_message_id,
+                "session_id": session.session_id,
+                "cli_id": session.cli_id.clone().unwrap_or_else(|| "cli".to_string()),
+                "card_nonce": action_nonce,
+            }
+        }));
 
-    actions.push(serde_json::json!({
-        "tag": "button",
-        "text": card_i18n::plain_text(locale, "私发可写链接", "Send write link privately"),
-        "type": "default",
-        "value": {
-            "action": "get_write_link",
-            "root_id": session.root_message_id,
-            "session_id": session.session_id,
-            "cli_id": session.cli_id.clone().unwrap_or_else(|| "cli".to_string()),
-            "card_nonce": action_nonce,
-        }
-    }));
+        actions.push(serde_json::json!({
+            "tag": "button",
+            "text": card_i18n::plain_text(locale, "私发可写链接", "Send write link privately"),
+            "type": "default",
+            "value": {
+                "action": "get_write_link",
+                "root_id": session.root_message_id,
+                "session_id": session.session_id,
+                "cli_id": session.cli_id.clone().unwrap_or_else(|| "cli".to_string()),
+                "card_nonce": action_nonce,
+            }
+        }));
+    } else {
+        elements.push(serde_json::json!({
+            "tag": "markdown",
+            "content": "attach with: `herdr agent attach`",
+            "i18n_content": {
+                "zh_cn": "用 `herdr agent attach` 连接终端",
+                "en_us": "attach with: `herdr agent attach`",
+            }
+        }));
+    }
     if status == "limited"
         && session
             .usage_limit

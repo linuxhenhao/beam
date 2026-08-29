@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "protocol": 20,
+  "schema_version": 1,
+  "schemas": {
+    "error_response": {
+      "$defs": { "ErrorBody": { "type": "object" } }
+    },
+    "request": {
+      "oneOf": [
+        { "properties": { "method": { "const": "agent.get" } } },
+        { "properties": { "method": { "const": "agent.list" } } },
+        { "properties": { "method": { "const": "pane.process_info" } } },
+        { "properties": { "method": { "const": "pane.read" } } },
+        { "properties": { "method": { "const": "pane.send_keys" } } },
+        { "properties": { "method": { "const": "pane.send_text" } } },
+        { "properties": { "method": { "const": "workspace.close" } } },
+        { "properties": { "method": { "const": "workspace.create" } } },
+        { "properties": { "method": { "const": "workspace.get" } } },
+        { "properties": { "method": { "const": "workspace.list" } } }
+      ]
+    }
+  }
+}

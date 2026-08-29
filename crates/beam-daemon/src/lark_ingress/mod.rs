@@ -40,6 +40,7 @@ pub(crate) enum LarkEventOutcome {
     RestartSession { reply: String },
     ShowCard { reply: String },
     AdoptZellij { target: String },
+    AdoptHerdr { target: String },
     AdoptList,
     PassthroughInput { text: String },
     ReplyOnly { reply: String },

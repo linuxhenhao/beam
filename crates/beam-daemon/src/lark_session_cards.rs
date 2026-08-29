@@ -12,10 +12,7 @@ pub(crate) async fn begin_lark_turn_card(
     let Some(session) = snapshot else {
         return Ok(());
     };
-    if session.lark_app_id == "local"
-        || session.root_message_id.is_empty()
-        || session.terminal_url.is_none()
-    {
+    if !session_card_ready(&session) {
         return Ok(());
     }
     let Some(bot) = state.bots.get(&session.lark_app_id) else {

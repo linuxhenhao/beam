@@ -1,7 +1,7 @@
 use super::*;
 use crate::adapter::test_support::{home_test_lock, set_home, temp_home, test_init};
 use async_trait::async_trait;
-use beam_core::AdoptedFrom;
+use beam_core::{AdoptedFrom, BackendKind};
 use std::fs::{self, create_dir_all};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -290,9 +290,12 @@ fn build_spawn_spec_respects_model_and_resume() {
 fn adopt_does_not_treat_beam_session_id_as_grok_id() {
     let init = InitConfig {
         adopted_from: Some(AdoptedFrom {
+            backend_kind: BackendKind::Zellij,
             tmux_target: None,
             zellij_session: Some("sess".to_string()),
             zellij_pane_id: Some("pane".to_string()),
+            herdr_workspace_id: None,
+            herdr_pane_id: None,
             original_cli_pid: 1,
             session_id: None,
             cli_id: Some("grok".to_string()),

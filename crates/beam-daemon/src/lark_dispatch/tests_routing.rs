@@ -2,7 +2,7 @@ use super::*;
 use crate::tests::test_helpers::*;
 
 use axum::http::StatusCode;
-use beam_core::{AdoptedFrom, SessionScope, SessionStatus};
+use beam_core::{AdoptedFrom, BackendKind, SessionScope, SessionStatus};
 use std::collections::HashMap;
 
 use crate::{
@@ -59,9 +59,12 @@ fn decide_lark_event_outcome_reflects_existing_session_state() {
 fn decide_lark_event_outcome_blocks_re_adopt_when_session_already_adopted() {
     let mut session = make_session("sess-1");
     session.adopted_from = Some(AdoptedFrom {
+        backend_kind: BackendKind::Zellij,
         tmux_target: Some("mysession:0.0".to_string()),
         zellij_session: None,
         zellij_pane_id: None,
+        herdr_workspace_id: None,
+        herdr_pane_id: None,
         original_cli_pid: 12345,
         session_id: None,
         cli_id: Some("coco".to_string()),

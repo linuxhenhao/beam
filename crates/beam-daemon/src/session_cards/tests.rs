@@ -3,10 +3,11 @@
 use super::*;
 use crate::tests::test_helpers::*;
 use crate::{
-    AdoptedFrom, BotConfig, CliUsageLimitState, DaemonToWorker, DisplayMode, LarkEventMention,
-    PendingResponseCardState, ScreenStatus, Session, SessionScope, SessionStatus, SessionSummary,
-    build_adopt_zellij_result_reply, build_closed_session_card, build_report_post_content,
-    handle_lark_card_action_payload, prompt, terminal_auth, worker_ready_display_mode_command,
+    AdoptedFrom, BackendKind, BotConfig, CliUsageLimitState, DaemonToWorker, DisplayMode,
+    LarkEventMention, PendingResponseCardState, ScreenStatus, Session, SessionScope, SessionStatus,
+    SessionSummary, build_adopt_zellij_result_reply, build_closed_session_card,
+    build_report_post_content, handle_lark_card_action_payload, prompt, terminal_auth,
+    worker_ready_display_mode_command,
 };
 use beam_core::CliUsageLimitKind;
 use serde_json::Value;
@@ -245,6 +246,35 @@ fn build_streaming_card_keeps_hidden_mode_actions_minimal() {
     );
     assert!(choose_action.pointer("/multi_url").is_none());
     assert!(card.pointer("/elements/3").is_none());
+}
+
+#[test]
+fn build_streaming_card_herdr_hides_terminal_buttons_and_shows_attach_hint() {
+    let mut session = make_session("sess-herdr");
+    session.status = SessionStatus::Active;
+    session.closed_at = None;
+    session.backend_kind = BackendKind::Herdr;
+    session.terminal_url = None;
+    session.herdr_workspace_id = Some("w1".to_string());
+    session.herdr_pane_id = Some("w1:p1".to_string());
+    session.stream_card_nonce = Some("nonce-herdr".to_string());
+    let card: Value =
+        serde_json::from_str(&build_streaming_card(&session, "idle")).expect("valid card json");
+    let serialized = serde_json::to_string(&card).expect("serialize card");
+    // Q6 = show: the herdr attach hint is present.
+    assert!(
+        serialized.contains("herdr agent attach"),
+        "herdr card must show attach hint, got: {serialized}"
+    );
+    // No buttons that would proxy to zellij web.
+    assert!(
+        !serialized.contains("choose_read_only_terminal_link"),
+        "herdr card must not emit zellij read-only terminal button"
+    );
+    assert!(
+        !serialized.contains("get_write_link"),
+        "herdr card must not emit zellij write-link button"
+    );
 }
 
 #[test]
@@ -522,6 +552,7 @@ fn refresh_screenshot_in_hidden_mode_returns_info_toast() {
         let app_id = "app-refresh";
         let bot = BotConfig {
             name: None,
+            backend: None,
             lark_app_id: app_id.to_string(),
             lark_app_secret: "secret".to_string(),
             cli_id: "codex".to_string(),
@@ -596,6 +627,7 @@ fn toggle_display_returns_a_screenshot_card_response() {
         let app_id = "app-toggle";
         let bot = BotConfig {
             name: None,
+            backend: None,
             lark_app_id: app_id.to_string(),
             lark_app_secret: "secret".to_string(),
             cli_id: "codex".to_string(),

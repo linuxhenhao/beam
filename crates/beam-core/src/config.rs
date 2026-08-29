@@ -3,12 +3,19 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::backend_kind::BackendKind;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonConfig {
     #[serde(default)]
     pub quiet_restart: bool,
     #[serde(default = "default_working_dirs")]
     pub working_dirs: Vec<String>,
+    /// Terminal backend for new sessions. Existing deployments default to
+    /// `zellij`; upgrades must not silently change the mux. Per-bot override
+    /// lives on [`BotConfig::backend`].
+    #[serde(default)]
+    pub backend: BackendKind,
 }
 
 fn default_working_dirs() -> Vec<String> {
@@ -20,6 +27,7 @@ impl Default for DaemonConfig {
         Self {
             quiet_restart: false,
             working_dirs: default_working_dirs(),
+            backend: BackendKind::Zellij,
         }
     }
 }
@@ -30,6 +38,12 @@ pub struct WebConfig {
     pub host: String,
     #[serde(default = "default_proxy_base_port")]
     pub proxy_base_port: u16,
+    /// Whether the daemon starts the local zellij web server on boot.
+    /// v1 defaults to `true` (existing behavior). Set to `false` to allow a
+    /// herdr-only deployment to start without zellij web; only tested
+    /// after PR5 lands.
+    #[serde(default = "default_zellij_web")]
+    pub zellij_web: bool,
 }
 
 fn default_web_host() -> String {
@@ -40,11 +54,48 @@ fn default_proxy_base_port() -> u16 {
     8800
 }
 
+fn default_zellij_web() -> bool {
+    true
+}
+
 impl Default for WebConfig {
     fn default() -> Self {
         Self {
             host: default_web_host(),
             proxy_base_port: default_proxy_base_port(),
+            zellij_web: default_zellij_web(),
+        }
+    }
+}
+
+/// Herdr-specific settings. Only read when a session actually runs on the
+/// Herdr backend; a Zellij-default deployment never probes herdr.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HerdrConfig {
+    #[serde(default = "default_herdr_min_version")]
+    pub min_version: String,
+    /// Named Herdr session escape hatch. v1 default is the shared `default`
+    /// session; a named session hides agents from the default sidebar.
+    #[serde(default = "default_herdr_session")]
+    pub session: String,
+    #[serde(default)]
+    pub socket_path: Option<String>,
+}
+
+fn default_herdr_min_version() -> String {
+    "0.8.2".to_string()
+}
+
+fn default_herdr_session() -> String {
+    "default".to_string()
+}
+
+impl Default for HerdrConfig {
+    fn default() -> Self {
+        Self {
+            min_version: default_herdr_min_version(),
+            session: default_herdr_session(),
+            socket_path: None,
         }
     }
 }
@@ -55,6 +106,8 @@ pub struct Config {
     pub daemon: DaemonConfig,
     #[serde(default)]
     pub web: WebConfig,
+    #[serde(default)]
+    pub herdr: HerdrConfig,
     #[serde(default)]
     pub lark: LarkConfig,
     #[serde(default, rename = "screenAnalyzer")]
@@ -75,6 +128,10 @@ pub struct BotConfig {
     pub cli_bin: Option<String>,
     #[serde(rename = "cliArgs", default)]
     pub cli_args: Vec<String>,
+    /// Per-bot backend override (bots.json, camelCase to match the JSON
+    /// convention). `None` follows the daemon default.
+    #[serde(default)]
+    pub backend: Option<BackendKind>,
     /// Linux-only user systemd slice for the CLI process. Empty/omitted is unset.
     #[serde(
         rename = "cgroupSlice",

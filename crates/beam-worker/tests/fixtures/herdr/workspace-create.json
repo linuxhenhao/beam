@@ -1,0 +1,7 @@
+{
+  "result": {
+    "workspace": { "workspace_id": "w1" },
+    "tab": { "tab_id": "t1" },
+    "root_pane": { "pane_id": "w1:p1" }
+  }
+}

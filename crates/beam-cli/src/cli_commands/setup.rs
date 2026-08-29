@@ -126,6 +126,60 @@ pub(crate) fn which_exists(bin: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Probe whether a usable `herdr` binary is on PATH. Returns the version
+/// string when present; `None` when missing or unusable.
+pub(crate) fn probe_herdr_cli() -> Option<String> {
+    if !which_exists("herdr") {
+        return None;
+    }
+    let out = std::process::Command::new("herdr")
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Ask for the daemon-level terminal backend. Only offered after a successful
+/// herdr probe; a herdr choice that cannot be probed is rejected.
+pub(crate) fn ask_daemon_backend(herdr_version: Option<&str>) -> Result<beam_core::BackendKind> {
+    match herdr_version {
+        Some(version) => {
+            println!("检测到 herdr：{version}");
+            let input = ask_line("daemon 终端后端 [zellij/herdr] [zellij]: ")?;
+            if input.trim().eq_ignore_ascii_case("herdr") {
+                Ok(beam_core::BackendKind::Herdr)
+            } else {
+                Ok(beam_core::BackendKind::Zellij)
+            }
+        }
+        None => {
+            println!("未检测到 herdr（可选：curl -fsSL https://herdr.dev/install.sh | sh）");
+            Ok(beam_core::BackendKind::Zellij)
+        }
+    }
+}
+
+/// Ask whether this bot overrides the daemon backend (empty = follow daemon).
+pub(crate) fn ask_bot_backend(
+    daemon_backend: beam_core::BackendKind,
+) -> Result<Option<beam_core::BackendKind>> {
+    let input = ask_line(&format!(
+        "该 bot 的终端后端（回车 = 跟随 daemon {}）[zellij/herdr]: ",
+        daemon_backend.as_str()
+    ))?;
+    match input.trim().to_ascii_lowercase().as_str() {
+        "herdr" => Ok(Some(beam_core::BackendKind::Herdr)),
+        "zellij" => Ok(Some(beam_core::BackendKind::Zellij)),
+        _ => Ok(None),
+    }
+}
+
 pub(crate) fn prompt_cli_id() -> Result<String> {
     let installed = detect_installed_clis();
     if installed.is_empty() {
@@ -235,6 +289,7 @@ pub(crate) async fn prompt_setup_bot() -> Result<BotConfig> {
         } else {
             Some(name)
         },
+        backend: None,
         lark_app_id: credentials.app_id,
         lark_app_secret: credentials.app_secret,
         cli_id,
@@ -276,16 +331,37 @@ pub(crate) async fn cmd_setup(paths: &BeamPaths) -> Result<()> {
         std::fs::create_dir_all(&dir)?;
     }
 
+    // PR5: probe herdr once; when present, offer the daemon backend choice.
+    let herdr_version = probe_herdr_cli();
+    if herdr_version.is_none() {
+        println!("未检测到 herdr。可安装：curl -fsSL https://herdr.dev/install.sh | sh");
+    }
+
     let cfg = paths.config_toml();
+    let daemon_backend = ask_daemon_backend(herdr_version.as_deref())?;
+    let backend_line = if daemon_backend == beam_core::BackendKind::Herdr {
+        "backend = \"herdr\"\n"
+    } else {
+        ""
+    };
     if !cfg.exists() {
-        let defaults = "\
-[daemon]\nworking_dirs = [\"~\"]\n\n\
+        let defaults = format!(
+            "[daemon]\nworking_dirs = [\"~\"]\n{backend_line}\
 [web]\nhost = \"0.0.0.0\"\nproxy_base_port = 8800\n\n\
-";
+"
+        );
         std::fs::write(&cfg, defaults)?;
         println!("Wrote {}", cfg.display());
     } else {
         println!("Config exists: {}", cfg.display());
+    }
+    // Herdr integration hooks improve blocked detection / native resume, but
+    // they modify the user's CLI config: only inform, never auto-install.
+    if daemon_backend == beam_core::BackendKind::Herdr && herdr_version.is_some() {
+        println!(
+            "💡 herdr integration hooks (herdr integration install) can improve blocked detection \
+             and native resume, but they modify your CLI config. Run them yourself if you want."
+        );
     }
 
     let bots = paths.bots_json();
@@ -332,7 +408,8 @@ pub(crate) async fn cmd_setup(paths: &BeamPaths) -> Result<()> {
     } else {
         Vec::new()
     };
-    let next_bot = prompt_setup_bot().await?;
+    let mut next_bot = prompt_setup_bot().await?;
+    next_bot.backend = ask_bot_backend(daemon_backend)?;
     validate_setup_credentials(&next_bot.lark_app_id, &next_bot.lark_app_secret).await?;
     next_bots.push(next_bot);
 

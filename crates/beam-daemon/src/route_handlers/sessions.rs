@@ -20,6 +20,10 @@ pub(crate) async fn create_session(
     let session_id = Uuid::new_v4().to_string();
     let session = Session {
         session_id: session_id.clone(),
+        backend_kind: BackendKind::Zellij,
+        herdr_session: None,
+        herdr_workspace_id: None,
+        herdr_pane_id: None,
         title: req.title.clone(),
         chat_id: "local".to_string(),
         chat_type: Some("local".to_string()),
@@ -87,6 +91,10 @@ pub(crate) async fn create_session(
     let prompt_turn_id = (!req.prompt.is_empty()).then(next_session_turn_id);
     let init = InitConfig {
         session_id: session_id.clone(),
+        backend_kind: BackendKind::Zellij,
+        herdr_session: None,
+        herdr_workspace_id: None,
+        herdr_pane_id: None,
         title: req.title,
         chat_id: "local".to_string(),
         root_message_id: session_id.clone(),

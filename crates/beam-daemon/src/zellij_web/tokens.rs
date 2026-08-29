@@ -27,6 +27,20 @@ pub struct ZellijWebTokens {
 }
 
 impl ZellijWebTokens {
+    /// Empty tokens for a deployment that skipped zellij web entirely
+    /// (`web.zellij_web = false`). The terminal proxy still runs but has no
+    /// upstream to forward to; Herdr sessions 404 before reaching it.
+    pub fn disabled(port: u16) -> Self {
+        Self {
+            port,
+            read_only_token: None,
+            write_token: None,
+            token_name: None,
+            read_only_token_name: None,
+            write_token_name: None,
+        }
+    }
+
     /// Check whether both tokens are present and valid.
     pub fn is_complete(&self) -> bool {
         self.read_only_token.as_ref().is_some_and(|t| !t.is_empty())

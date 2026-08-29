@@ -274,6 +274,7 @@ mod tests {
     fn operate_permission_defaults_open_without_allowlist() {
         let bot = BotConfig {
             name: None,
+            backend: None,
             lark_app_id: "app".to_string(),
             lark_app_secret: "secret".to_string(),
             cli_id: "codex".to_string(),
@@ -304,6 +305,7 @@ mod tests {
     fn operate_permission_respects_allowlist() {
         let bot = BotConfig {
             name: None,
+            backend: None,
             lark_app_id: "app".to_string(),
             lark_app_secret: "secret".to_string(),
             cli_id: "codex".to_string(),
