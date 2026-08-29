@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.10.2...beam-daemon-v0.11.0) - 2026-08-29
+
+### Added
+
+- *(daemon)* 实现 herdr web 终端（内置 xterm.js 页 + observe/control WS 桥）
+
+### Fixed
+
+- *(daemon)* 修复 Herdr 会话 worker 就绪看门狗误报启动超时
+
+### Other
+
+- *(readme)* 更新 README 后端支持并致谢 botmux
+- 实现了herdr支持
+
 ## [0.10.2](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.10.1...beam-daemon-v0.10.2) - 2026-08-19
 
 ### Fixed

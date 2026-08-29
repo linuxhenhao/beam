@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/linuxhenhao/beam/compare/beam-cli-v0.10.2...beam-cli-v0.11.0) - 2026-08-29
+
+### Other
+
+- *(readme)* 更新 README 后端支持并致谢 botmux
+- 实现了herdr支持
+
 ## [0.10.1](https://github.com/linuxhenhao/beam/compare/beam-cli-v0.10.0...beam-cli-v0.10.1) - 2026-08-16
 
 ### Added

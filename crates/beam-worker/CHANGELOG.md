@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.10.2...beam-worker-v0.11.0) - 2026-08-29
+
+### Fixed
+
+- *(worker)* 修正 fake herdr shim 的可执行位
+- *(worker)* 内嵌等宽字体使截图渲染不依赖系统字体
+- *(worker)* 修复 adapter 注册表测试重置 hermes 全局 runtime 的竞态
+
+### Other
+
+- *(readme)* 更新 README 后端支持并致谢 botmux
+- 实现了herdr支持
+
 ## [0.10.2](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.10.1...beam-worker-v0.10.2) - 2026-08-19
 
 ### Added
