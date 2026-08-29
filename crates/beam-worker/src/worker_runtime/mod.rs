@@ -30,6 +30,7 @@ pub(crate) use crate::backend::{SessionBackend, SpawnOpts};
 mod analyzer;
 mod coordinator;
 mod coordinator_runtime;
+mod embedded_font;
 mod grok_prompts;
 mod launch;
 #[cfg(test)]
