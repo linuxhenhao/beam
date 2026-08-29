@@ -1,3 +1,4 @@
+use super::worker_health::worker_ready_reported;
 use super::*;
 
 /// Upper bound for a worker to report `Ready` after being spawned. When the
@@ -758,9 +759,7 @@ pub(crate) async fn spawn_worker(
             let Some(session) = session else {
                 return;
             };
-            // The Ready handler sets terminal_url; a non-active session is
-            // already handled elsewhere (e.g. CliExit).
-            if session.terminal_url.is_some() || session.status != SessionStatus::Active {
+            if worker_ready_reported(&session) {
                 return;
             }
             warn!(

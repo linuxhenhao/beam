@@ -3,6 +3,21 @@
 
 use super::*;
 
+/// Whether a session's worker has reported ready, per backend.
+///
+/// Zellij readiness is signalled by `terminal_url` (written by the Ready
+/// handler). Herdr sessions keep `terminal_url` unset, so their readiness is
+/// the persisted herdr pane identity instead. Non-active sessions are handled
+/// elsewhere (e.g. CliExit) and always count as ready so they never get a
+/// spurious "startup timeout" notice.
+pub(crate) fn worker_ready_reported(session: &Session) -> bool {
+    session.terminal_url.is_some()
+        || (session.backend_kind == BackendKind::Herdr
+            && session.herdr_workspace_id.is_some()
+            && session.herdr_pane_id.is_some())
+        || session.status != SessionStatus::Active
+}
+
 /// Periodic watchdog: flag sessions whose worker stopped heartbeating (hung,
 /// or dead but not yet reaped) so the state is visible on the session card
 /// and via `beam status`. Only workers that have sent at least one heartbeat
@@ -58,4 +73,38 @@ pub(crate) fn spawn_worker_health_watchdog(state: AppState) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::worker_ready_reported;
+    use crate::tests::test_helpers::make_session;
+    use beam_core::{BackendKind, SessionStatus};
+
+    #[test]
+    fn zellij_requires_terminal_url() {
+        let mut session = make_session("s1");
+        session.status = SessionStatus::Active;
+        assert!(!worker_ready_reported(&session));
+        session.terminal_url = Some("http://127.0.0.1:8800/s/s1".to_string());
+        assert!(worker_ready_reported(&session));
+    }
+
+    #[test]
+    fn herdr_uses_pane_ids() {
+        let mut session = make_session("s1");
+        session.status = SessionStatus::Active;
+        session.backend_kind = BackendKind::Herdr;
+        assert!(!worker_ready_reported(&session));
+        session.herdr_workspace_id = Some("w1".to_string());
+        session.herdr_pane_id = Some("w1:p1".to_string());
+        assert!(worker_ready_reported(&session));
+    }
+
+    #[test]
+    fn non_active_never_times_out() {
+        let mut session = make_session("s1");
+        session.status = SessionStatus::Closed;
+        assert!(worker_ready_reported(&session));
+    }
 }
