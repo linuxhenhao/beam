@@ -13,9 +13,7 @@
 
 ---
 
-**`beam` is a simplified Rust fork of [botmux](https://github.com/deepcoldy/botmux).**
-
-**It does not invent another agent.** It connects existing AI coding CLIs to Feishu/Lark topic threads, then adds persistent sessions, streaming cards, and a web terminal.
+**`beam` does not invent another agent.** It connects existing AI coding CLIs to Feishu/Lark topic threads, then adds persistent sessions, streaming cards, and a web terminal.
 
 In one line, the defining idea is: **one Lark thread becomes one local AI coding session.**
 
@@ -38,7 +36,7 @@ flowchart LR
     T --> D[beam-daemon]
     D --> S[Session router and state]
     S --> W[beam-worker<br/>one process per session]
-    W --> B[tmux / zellij / pty backend]
+    W --> B[zellij / herdr backend]
     B --> C[Local AI coding CLI<br/>claude codex opencode gemini kimi grok ...]
     W --> K[Streaming card updates]
     W --> P[Web terminal]
@@ -76,9 +74,9 @@ Every active session can expose a browser terminal backed by the same live CLI p
 - type directly into the running session
 - recover from interactive prompts or TUI states
 
-### Persistent sessions with `tmux` or `zellij`
+### Persistent sessions with `zellij` or `herdr`
 
-beam supports `tmux`, `pty`, and `zellij` backends. `tmux` is the default production path, while `zellij` is also supported for managed and adopted sessions.
+beam supports [zellij](https://zellij.dev/) and [herdr](https://herdr.dev/) backends, with `zellij` as the default. You can switch to `herdr` per daemon or per bot. Both support managed and adopted sessions.
 
 With persistent backends:
 
@@ -88,7 +86,7 @@ With persistent backends:
 
 ### Session adopt
 
-beam can adopt an already-running terminal session and bring it under Lark control. This is useful when work started manually in `tmux` or `zellij` and later needs cards, terminal proxying, or chat-driven follow-up.
+beam can adopt an already-running terminal session and bring it under Lark control. This is useful when work started manually in `zellij` or `herdr` and later needs cards, terminal proxying, or chat-driven follow-up.
 
 ### Multi-bot collaboration
 
@@ -127,7 +125,7 @@ beam autostart enable
 **Prerequisites:**
 - Rust toolchain
 - AI coding CLI installed (`opencode`, `claude`, `codex`, `gemini`, `kimi`, `grok`, etc. on PATH)
-- `tmux` or `zellij` if you want persistent sessions
+- `zellij` or `herdr` if you want persistent sessions
 
 ## Common Commands
 
@@ -162,6 +160,10 @@ That split is intentional. A stuck or noisy CLI should not take down the entire 
 - Platform and team collaboration: [docs/platform-design.md](docs/platform-design.md)
 - Cross-deployment federation: [docs/federation-design.md](docs/federation-design.md)
 - Logging specification and troubleshooting: [docs/design/logging.en.md](docs/design/logging.en.md)
+
+## Acknowledgments
+
+beam's earliest prototype was inspired by [botmux](https://github.com/deepcoldy/botmux). Since then beam has evolved its own path: it supports only `zellij` and `herdr` as persistent backends, and has built its own session lifecycle, streaming cards, web terminal proxy, and multi-bot collaboration model around Lark threads. Thanks to botmux for the starting point.
 
 ## License
 

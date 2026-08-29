@@ -13,9 +13,7 @@
 
 ---
 
-**`beam` 是 [botmux](https://github.com/deepcoldy/botmux) 的一个简化版 Rust fork。**
-
-**它不是在发明另一个 agent。** 它做的事情是把现有 AI coding CLI 接到 Feishu/Lark 话题线程里，再补上持久会话、流式卡片和 Web 终端。
+**`beam` 不是在发明另一个 agent。** 它把现有 AI coding CLI 接到 Feishu/Lark 话题线程里，再补上持久会话、流式卡片和 Web 终端。
 
 一句话讲最大的特点：**一个 Lark 线程，就是一个本地 AI 编程会话。**
 
@@ -38,7 +36,7 @@ flowchart LR
     T --> D[beam-daemon]
     D --> S[会话路由与状态]
     S --> W[beam-worker<br/>每个会话一个进程]
-    W --> B[tmux / zellij / pty 后端]
+    W --> B[zellij / herdr 后端]
     B --> C[本地 AI coding CLI<br/>claude codex opencode gemini kimi grok ...]
     W --> K[流式卡片更新]
     W --> P[Web 终端]
@@ -76,9 +74,9 @@ beam 会持续更新 Lark 卡片，展示当前终端状态。卡片里可以带
 - 直接向运行中的会话输入内容
 - 处理中途出现的交互式提示或 TUI 场景
 
-### 用 `tmux` 或 `zellij` 持久化会话
+### 用 `zellij` 或 `herdr` 持久化会话
 
-beam 支持 `tmux`、`pty` 和 `zellij` 三种 backend。默认生产路径仍然是 `tmux`，但 `zellij` 也支持 managed 和 adopted session。
+beam 支持 [zellij](https://zellij.dev/) 和 [herdr](https://herdr.dev/) 两种 backend，默认是 `zellij`，可以通过 daemon 或单个 bot 的配置切换到 `herdr`。两者都支持 managed 和 adopted session。
 
 使用持久后端时：
 
@@ -88,7 +86,7 @@ beam 支持 `tmux`、`pty` 和 `zellij` 三种 backend。默认生产路径仍�
 
 ### Session adopt
 
-beam 可以把一个已经在运行的终端会话接进来，纳入 Lark 控制。适合那些一开始手动在 `tmux` 或 `zellij` 里启动、后来又希望补上卡片、终端代理和聊天接力的场景。
+beam 可以把一个已经在运行的终端会话接进来，纳入 Lark 控制。适合那些一开始手动在 `zellij` 或 `herdr` 里启动、后来又希望补上卡片、终端代理和聊天接力的场景。
 
 ### 多 bot 协作
 
@@ -153,7 +151,7 @@ beam autostart enable
 **前置要求：**
 - Rust toolchain
 - AI 编程 CLI 已安装（`opencode`、`claude`、`codex`、`gemini`、`kimi`、`grok` 等在 PATH 中）
-- 如果你需要持久会话，安装 `tmux` 或 `zellij`
+- 如果你需要持久会话，安装 `zellij` 或 `herdr`
 
 ## 常用命令
 
@@ -189,6 +187,10 @@ beam dashboard    # 打开 dashboard
 - 平台与团队协作：[docs/platform-design.md](docs/platform-design.md)
 - 跨部署 federation：[docs/federation-design.md](docs/federation-design.md)
 - 日志规范与排障：[docs/design/logging.md](docs/design/logging.md)
+
+## 致谢
+
+beam 的最初原型受到 [botmux](https://github.com/deepcoldy/botmux) 的启发。如今 beam 已经走出独立的路线：只支持 `zellij` 和 `herdr` 两种持久后端，并围绕 Lark 线程构建了自己的会话生命周期、流式卡片、Web 终端代理与多 bot 协作模型。感谢 botmux 提供的起点。
 
 ## 许可证
 
