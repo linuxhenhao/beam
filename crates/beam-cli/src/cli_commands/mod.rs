@@ -39,8 +39,9 @@ pub(crate) use migration::parse_migrate_flags;
 pub(crate) use send::parse_mention;
 #[cfg(test)]
 pub(crate) use setup::{
-    bin_candidates_for_cli_id, default_cli_args_for_cli_id, parse_cgroup_slice_input,
-    parse_cli_args_input, resolve_allowed_users, setup_backup_file, setup_prompts_cgroup_slice,
+    apply_daemon_backend_choice, bin_candidates_for_cli_id, default_cli_args_for_cli_id,
+    parse_cgroup_slice_input, parse_cli_args_input, resolve_allowed_users, setup_backup_file,
+    setup_prompts_cgroup_slice,
 };
 
 pub(crate) async fn run(command: Command) -> Result<()> {

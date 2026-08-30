@@ -557,7 +557,7 @@ Herdr remote is SSH / `herdr --remote`, not HTTP. Third parties already wrap the
 | Phase | Behavior |
 | --- | --- |
 | v1 | Herdr sessions get **no** `terminal_url`. Screenshot cards use card-ready (PR2), not the URL. Zellij sessions keep the existing proxy. **Daemon start still calls `ensure_zellij_web`** (`lib.rs` ~828–837); a machine without zellij cannot start beam even with `backend=herdr`. That is a v1 constraint, not something a config switch already solves, until PR5's `web.zellij_web = false` lands and is tested. Do not advertise v1 as herdr-only |
-| v2 (separate design/PR; see `herdr-web-terminal.en.md`) | A Beam-owned xterm.js page fed by `terminal session observe` (read-only) or `control` (write, **no** `--takeover`; conflicts return 4001 + read-only downgrade). Reuse tickets/cookies, but the **upstream is no longer zellij web**. Resize goes through `terminal.resize` JSON. Do not build this in v1 (Q3 confirmed: deferred) |
+| v2 (separate design, see [herdr-web-access.en.md](herdr-web-access.en.md)) | A Beam-owned xterm.js page fed by `terminal session observe` (read-only) or `control --takeover` (write). Reuse tickets/cookies, but the **upstream is no longer zellij web**. Resize goes through `terminal.resize` JSON. Do not build this in v1 (Q3 confirmed: deferred) |
 
 v1 success **does not** include browser-terminal parity, and **does not** include a daemon with no zellij binary. Managed + adopt + cards must be mergeable without a Herdr web terminal.
 

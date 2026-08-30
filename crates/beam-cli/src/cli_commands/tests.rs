@@ -1,9 +1,9 @@
 use crate::cli_commands::{
     BotInfoEntry, active_sessions, bin_candidates_for_cli_id, build_send_request,
-    default_cli_args_for_cli_id, discover_session_id_from_pid, format_bot_info_entries_for_cli,
-    format_duration, parse_cgroup_slice_input, parse_cli_args_input, parse_mention,
-    parse_migrate_flags, resolve_allowed_users, setup_backup_file, setup_prompts_cgroup_slice,
-    validate_simulate_lark_message_args,
+    apply_daemon_backend_choice, default_cli_args_for_cli_id, discover_session_id_from_pid,
+    format_bot_info_entries_for_cli, format_duration, parse_cgroup_slice_input,
+    parse_cli_args_input, parse_mention, parse_migrate_flags, resolve_allowed_users,
+    setup_backup_file, setup_prompts_cgroup_slice, validate_simulate_lark_message_args,
 };
 use crate::{Cli, Command, SendArgs, SessionCommand, SimulateCommand};
 use beam_core::{BeamPaths, SessionStatus, SessionSummary};
@@ -106,6 +106,85 @@ fn setup_backup_file_writes_bak_copy() {
         .expect("backup path");
     assert!(backup.ends_with("bots.json.bak"));
     assert_eq!(fs::read_to_string(&backup).unwrap(), "[]\n");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn setup_applies_daemon_backend_to_existing_config() {
+    let root = temp_root("cfg-herdr");
+    let cfg = root.join("config.toml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        &cfg,
+        "[daemon]\nworking_dirs = [\"~\"]\n\n[web]\nhost = \"0.0.0.0\"\nproxy_base_port = 8800\n",
+    )
+    .unwrap();
+    let changed = apply_daemon_backend_choice(&cfg, beam_core::BackendKind::Herdr).unwrap();
+    assert!(changed);
+    let raw = fs::read_to_string(&cfg).unwrap();
+    assert!(raw.contains("backend = \"herdr\""));
+    assert!(raw.contains("working_dirs"));
+    assert!(raw.contains("proxy_base_port = 8800"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn setup_keeps_existing_herdr_backend_unchanged() {
+    let root = temp_root("cfg-herdr-existing");
+    let cfg = root.join("config.toml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&cfg, "[daemon]\nbackend = \"herdr\"\n").unwrap();
+    let changed = apply_daemon_backend_choice(&cfg, beam_core::BackendKind::Herdr).unwrap();
+    assert!(!changed);
+    assert_eq!(
+        fs::read_to_string(&cfg).unwrap(),
+        "[daemon]\nbackend = \"herdr\"\n"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn setup_replaces_explicit_zellij_backend_with_herdr() {
+    let root = temp_root("cfg-replace");
+    let cfg = root.join("config.toml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&cfg, "[daemon]\nbackend = \"zellij\"\nworking_dirs = [\"~\"]\n").unwrap();
+    let changed = apply_daemon_backend_choice(&cfg, beam_core::BackendKind::Herdr).unwrap();
+    assert!(changed);
+    let raw = fs::read_to_string(&cfg).unwrap();
+    assert!(raw.contains("backend = \"herdr\""));
+    assert!(!raw.contains("backend = \"zellij\""));
+    assert!(raw.contains("working_dirs"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn setup_adds_daemon_section_when_missing() {
+    let root = temp_root("cfg-nodaemon");
+    let cfg = root.join("config.toml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&cfg, "[web]\nhost = \"0.0.0.0\"\n").unwrap();
+    let changed = apply_daemon_backend_choice(&cfg, beam_core::BackendKind::Herdr).unwrap();
+    assert!(changed);
+    let raw = fs::read_to_string(&cfg).unwrap();
+    assert!(raw.contains("[daemon]"));
+    assert!(raw.contains("backend = \"herdr\""));
+    assert!(raw.contains("host = \"0.0.0.0\""));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn setup_zellij_choice_leaves_existing_config_untouched() {
+    let root = temp_root("cfg-zellij");
+    let cfg = root.join("config.toml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&cfg, "[daemon]\nworking_dirs = [\"~\"]\n").unwrap();
+    let changed = apply_daemon_backend_choice(&cfg, beam_core::BackendKind::Zellij).unwrap();
+    assert!(!changed);
+    assert_eq!(
+        fs::read_to_string(&cfg).unwrap(),
+        "[daemon]\nworking_dirs = [\"~\"]\n"
+    );
     let _ = fs::remove_dir_all(root);
 }
 
