@@ -81,20 +81,20 @@ pub(crate) fn append_herdr_adopt_post_content(
         .pointer_mut("/zh_cn/content")
         .and_then(serde_json::Value::as_array_mut)
         .expect("adopt post content array");
-    content.push(serde_json::json!({
+    content.push(serde_json::json!([{
         "tag": "text",
         "text": "Available herdr panes (copy a command block and send it to adopt):",
-    }));
+    }]));
     for item in items {
-        content.push(serde_json::json!({
+        content.push(serde_json::json!([{
             "tag": "text",
             "text": format!("{}  {}", item.title, item.cwd),
-        }));
-        content.push(serde_json::json!({
+        }]));
+        content.push(serde_json::json!([{
             "tag": "code_block",
             "language": "PlainText",
             "text": format!("/adopt herdr:{}", item.pane_id),
-        }));
+        }]));
     }
     value.to_string()
 }
@@ -280,6 +280,43 @@ mod tests {
         assert_eq!(paragraphs[2][0]["language"], "PlainText");
         assert_eq!(paragraphs[2][0]["text"], "/adopt mysession:terminal_0");
         assert_eq!(paragraphs[4][0]["text"], "/adopt dev:terminal_3");
+    }
+
+    #[test]
+    fn adopt_list_post_content_herdr_append_keeps_paragraph_arrays() {
+        let zellij_items = vec![ZellijAdoptCandidate {
+            zellij_session: "mysession".to_string(),
+            zellij_pane_id: "terminal_0".to_string(),
+            title: "claude".to_string(),
+            cwd: "/home/user/proj".to_string(),
+            cli_id: "claude-code".to_string(),
+            cli_pid: Some(123),
+            pane_cols: None,
+            pane_rows: None,
+        }];
+        let herdr_items = vec![crate::herdr_adopt::HerdrAdoptCandidate {
+            workspace_id: "wN".to_string(),
+            pane_id: "wN:p1".to_string(),
+            title: "codex".to_string(),
+            cwd: "/home/user/beam".to_string(),
+            cli_pid: Some(42),
+        }];
+        let content = append_herdr_adopt_post_content(
+            build_zellij_adopt_post_content(&zellij_items),
+            &herdr_items,
+        );
+        let value: serde_json::Value = serde_json::from_str(&content).expect("valid post json");
+        let paragraphs = value
+            .pointer("/zh_cn/content")
+            .and_then(serde_json::Value::as_array)
+            .expect("post content array");
+        for paragraph in paragraphs {
+            assert!(
+                paragraph.is_array(),
+                "each post paragraph must be an array of elements, got: {paragraph}"
+            );
+        }
+        assert!(content.contains("/adopt herdr:wN:p1"));
     }
 
     #[test]

@@ -180,6 +180,60 @@ pub(crate) fn ask_bot_backend(
     }
 }
 
+/// Apply the daemon backend selection to an existing config.toml without
+/// clobbering comments or unknown keys. Only Herdr needs an explicit line;
+/// Zellij is the default and leaves the file untouched. Returns whether the
+/// file changed.
+pub(crate) fn apply_daemon_backend_choice(
+    cfg_path: &Path,
+    backend: beam_core::BackendKind,
+) -> Result<bool> {
+    if backend != beam_core::BackendKind::Herdr {
+        return Ok(false);
+    }
+    let raw = std::fs::read_to_string(cfg_path)?;
+    if raw.contains("backend = \"herdr\"") {
+        return Ok(false);
+    }
+    let updated = if raw
+        .lines()
+        .any(|line| line.trim_start().starts_with("backend = "))
+    {
+        let mut out = String::with_capacity(raw.len() + 8);
+        let mut replaced = false;
+        for line in raw.split_inclusive('\n') {
+            if !replaced && line.trim_end().trim_start().starts_with("backend = ") {
+                out.push_str("backend = \"herdr\"\n");
+                replaced = true;
+            } else {
+                out.push_str(line);
+            }
+        }
+        if !replaced {
+            out.push_str("\nbackend = \"herdr\"\n");
+        }
+        out
+    } else if let Some(pos) = raw.find("[daemon]") {
+        let insert_at = pos + "[daemon]".len();
+        let mut out = raw.clone();
+        out.insert_str(insert_at, "\nbackend = \"herdr\"");
+        out
+    } else {
+        let mut out = raw.clone();
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("[daemon]\nbackend = \"herdr\"\n");
+        out
+    };
+    if updated != raw {
+        std::fs::write(cfg_path, updated)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 pub(crate) fn prompt_cli_id() -> Result<String> {
     let installed = detect_installed_clis();
     if installed.is_empty() {
@@ -353,7 +407,17 @@ pub(crate) async fn cmd_setup(paths: &BeamPaths) -> Result<()> {
         std::fs::write(&cfg, defaults)?;
         println!("Wrote {}", cfg.display());
     } else {
-        println!("Config exists: {}", cfg.display());
+        // config.toml commonly predates the herdr feature, so apply the
+        // daemon-level choice to the existing file instead of dropping it.
+        if apply_daemon_backend_choice(&cfg, daemon_backend)? {
+            println!(
+                "已更新 daemon 终端后端为 {}: {}",
+                daemon_backend.as_str(),
+                cfg.display()
+            );
+        } else {
+            println!("Config exists: {}", cfg.display());
+        }
     }
     // Herdr integration hooks improve blocked detection / native resume, but
     // they modify the user's CLI config: only inform, never auto-install.
