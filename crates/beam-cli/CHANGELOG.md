@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1](https://github.com/linuxhenhao/beam/compare/beam-cli-v0.11.0...beam-cli-v0.11.1) - 2026-08-30
+
+### Fixed
+
+- *(setup)* herdr ignored because of config.toml, fixed
+
+### Other
+
+- *(cli)* 格式化 cli_commands 测试代码
+
 ## [0.11.0](https://github.com/linuxhenhao/beam/compare/beam-cli-v0.10.2...beam-cli-v0.11.0) - 2026-08-29
 
 ### Other
