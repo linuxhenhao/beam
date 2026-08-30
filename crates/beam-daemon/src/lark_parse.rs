@@ -135,21 +135,16 @@ pub(crate) fn classify_lark_text_action(text: &str, has_existing_session: bool) 
         if rest.is_empty() || rest == "list" {
             return LarkTextAction::AdoptList;
         }
-        // Herdr public pane ids are `w1:p1` and collide with the zellij
-        // `session:pane` grammar, so `/adopt herdr:<pane_id>` disambiguates.
-        // Case-insensitive prefix; the remainder must match the public id.
+        // Herdr public pane ids collide with the zellij `session:pane` grammar,
+        // so `/adopt herdr:<pane_id>` disambiguates. Case-insensitive prefix;
+        // the remainder is passed through and the actual pane lookup validates
+        // it (avoids re-implementing herdr's base-32 id encoding).
         if let Some(pane_id) = rest
             .get(.."herdr:".len())
             .filter(|prefix| prefix.eq_ignore_ascii_case("herdr:"))
             .and_then(|_| rest.get("herdr:".len()..))
         {
-            let pane_id = pane_id.trim();
-            if is_herdr_public_pane_id(pane_id) {
-                return LarkTextAction::AdoptHerdr(pane_id.to_string());
-            }
-            return LarkTextAction::PassthroughInput(format!(
-                "/adopt herdr:{pane_id} is not a valid herdr pane id (expected w1:p1)"
-            ));
+            return LarkTextAction::AdoptHerdr(pane_id.trim().to_string());
         }
         return LarkTextAction::AdoptZellij(rest.to_string());
     }
@@ -164,20 +159,6 @@ pub(crate) fn classify_lark_text_action(text: &str, has_existing_session: bool) 
     } else {
         LarkTextAction::CreateSession
     }
-}
-
-/// Herdr public pane id: `w<digits>:p<digits>` (e.g. `w1:p1`).
-pub(crate) fn is_herdr_public_pane_id(value: &str) -> bool {
-    let Some((workspace, pane)) = value.split_once(':') else {
-        return false;
-    };
-    let workspace_ok = workspace
-        .strip_prefix('w')
-        .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()));
-    let pane_ok = pane
-        .strip_prefix('p')
-        .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()));
-    workspace_ok && pane_ok
 }
 
 // ---- Card action parsing ----
@@ -593,6 +574,11 @@ mod tests {
             classify_lark_text_action("/adopt HERDR:w2:p3", false),
             LarkTextAction::AdoptHerdr("w2:p3".to_string())
         );
+        // Herdr 0.8.x workspace ids are base-26 style (`wN`, `wP`).
+        assert_eq!(
+            classify_lark_text_action("/adopt herdr:wN:p1", false),
+            LarkTextAction::AdoptHerdr("wN:p1".to_string())
+        );
         // Bare `w1:p1` is a zellij target (session w1 / pane p1), NOT herdr.
         assert_eq!(
             classify_lark_text_action("/adopt w1:p1", false),
@@ -602,25 +588,12 @@ mod tests {
             classify_lark_text_action("/adopt my-session:terminal_0", false),
             LarkTextAction::AdoptZellij("my-session:terminal_0".to_string())
         );
-        // Invalid herdr pane id → passthrough error, never a zellij session
-        // named "herdr".
+        // Any `herdr:` target goes to the herdr adopt path; the pane lookup
+        // validates it. Never falls through to a zellij session named "herdr".
         assert_eq!(
             classify_lark_text_action("/adopt herdr:not-a-pane", false),
-            LarkTextAction::PassthroughInput(
-                "/adopt herdr:not-a-pane is not a valid herdr pane id (expected w1:p1)".to_string()
-            )
+            LarkTextAction::AdoptHerdr("not-a-pane".to_string())
         );
-    }
-
-    #[test]
-    fn is_herdr_public_pane_id_validates_shape() {
-        assert!(is_herdr_public_pane_id("w1:p1"));
-        assert!(is_herdr_public_pane_id("w12:p34"));
-        assert!(!is_herdr_public_pane_id("p1:w1"));
-        assert!(!is_herdr_public_pane_id("w:p1"));
-        assert!(!is_herdr_public_pane_id("w1:p"));
-        assert!(!is_herdr_public_pane_id("w1"));
-        assert!(!is_herdr_public_pane_id("w1:p1:extra"));
     }
 
     #[test]

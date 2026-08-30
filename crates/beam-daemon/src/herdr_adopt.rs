@@ -347,13 +347,19 @@ pub(crate) async fn dispatch_herdr_adopt_reply(
     match result {
         Ok((_, Json(session))) => {
             let reply = build_adopt_zellij_result_reply(Ok(&session));
-            let _ =
-                lark_reply_message_with_opts(state, bot, message_id, &reply, reply_in_thread).await;
+            if let Err(err) =
+                lark_reply_message_with_opts(state, bot, message_id, &reply, reply_in_thread).await
+            {
+                error!("adopt herdr result reply failed: {}", err);
+            }
         }
         Err((_, err)) => {
             let reply = build_adopt_zellij_result_reply(Err(err.as_str()));
-            let _ =
-                lark_reply_message_with_opts(state, bot, message_id, &reply, reply_in_thread).await;
+            if let Err(send_err) =
+                lark_reply_message_with_opts(state, bot, message_id, &reply, reply_in_thread).await
+            {
+                error!("adopt herdr result reply failed: {}", send_err);
+            }
         }
     }
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -368,20 +374,31 @@ pub(crate) async fn dispatch_adopt_list_reply(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let items = discover_zellij_adopt_candidates();
     let herdr_items = discover_herdr_adopt_candidates();
+    debug!(
+        "adopt list candidates zellij={} herdr={}",
+        items.len(),
+        herdr_items.len()
+    );
     if items.is_empty() && herdr_items.is_empty() {
-        let _ = lark_reply_message(
+        if let Err(err) = lark_reply_message(
             state,
             bot,
             message_id,
             "no zellij sessions or herdr panes available for adoption",
         )
-        .await;
+        .await
+        {
+            error!("adopt list empty reply failed: {}", err);
+        }
     } else {
         let mut post = build_zellij_adopt_post_content(&items);
         if !herdr_items.is_empty() {
             post = append_herdr_adopt_post_content(post, &herdr_items);
         }
-        let _ = lark_reply_post_message(state, bot, message_id, &post).await;
+        match lark_reply_post_message(state, bot, message_id, &post).await {
+            Ok(msg_id) => debug!("adopt list reply sent: {}", msg_id),
+            Err(err) => error!("adopt list reply failed: {}", err),
+        }
     }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -430,13 +447,19 @@ pub(crate) async fn dispatch_zellij_adopt_reply(
     match result {
         Ok((_, Json(session))) => {
             let reply = build_adopt_zellij_result_reply(Ok(&session));
-            let _ =
-                lark_reply_message_with_opts(state, bot, message_id, &reply, reply_in_thread).await;
+            if let Err(err) =
+                lark_reply_message_with_opts(state, bot, message_id, &reply, reply_in_thread).await
+            {
+                error!("adopt zellij result reply failed: {}", err);
+            }
         }
         Err((_, err)) => {
             let reply = build_adopt_zellij_result_reply(Err(err.as_str()));
-            let _ =
-                lark_reply_message_with_opts(state, bot, message_id, &reply, reply_in_thread).await;
+            if let Err(send_err) =
+                lark_reply_message_with_opts(state, bot, message_id, &reply, reply_in_thread).await
+            {
+                error!("adopt zellij result reply failed: {}", send_err);
+            }
         }
     }
     Ok(Json(serde_json::json!({ "ok": true })))
