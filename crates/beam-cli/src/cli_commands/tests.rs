@@ -1,6 +1,6 @@
 use crate::cli_commands::{
-    BotInfoEntry, active_sessions, bin_candidates_for_cli_id, build_send_request,
-    apply_daemon_backend_choice, default_cli_args_for_cli_id, discover_session_id_from_pid,
+    BotInfoEntry, active_sessions, apply_daemon_backend_choice, bin_candidates_for_cli_id,
+    build_send_request, default_cli_args_for_cli_id, discover_session_id_from_pid,
     format_bot_info_entries_for_cli, format_duration, parse_cgroup_slice_input,
     parse_cli_args_input, parse_mention, parse_migrate_flags, resolve_allowed_users,
     setup_backup_file, setup_prompts_cgroup_slice, validate_simulate_lark_message_args,
@@ -148,7 +148,11 @@ fn setup_replaces_explicit_zellij_backend_with_herdr() {
     let root = temp_root("cfg-replace");
     let cfg = root.join("config.toml");
     fs::create_dir_all(&root).unwrap();
-    fs::write(&cfg, "[daemon]\nbackend = \"zellij\"\nworking_dirs = [\"~\"]\n").unwrap();
+    fs::write(
+        &cfg,
+        "[daemon]\nbackend = \"zellij\"\nworking_dirs = [\"~\"]\n",
+    )
+    .unwrap();
     let changed = apply_daemon_backend_choice(&cfg, beam_core::BackendKind::Herdr).unwrap();
     assert!(changed);
     let raw = fs::read_to_string(&cfg).unwrap();
