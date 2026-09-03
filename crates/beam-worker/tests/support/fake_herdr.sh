@@ -36,11 +36,12 @@ case "${1:-}" in
   status)
     if [ "${2:-}" = "server" ]; then
       if [ -f "$STATE/server_up" ]; then
-        echo '{"status":"ok"}'
-        exit 0
+        echo "{\"status\":\"running\",\"running\":true,\"version\":\"0.8.2\",\"socket\":\"$STATE/herdr.sock\"}"
+      else
+        echo "{\"status\":\"not_running\",\"running\":false,\"socket\":\"$STATE/herdr.sock\"}"
       fi
-      echo "server not running" >&2
-      exit 1
+      # Real herdr 0.8.2 exits 0 in both states; the state is read from JSON.
+      exit 0
     fi
     exit 2
     ;;

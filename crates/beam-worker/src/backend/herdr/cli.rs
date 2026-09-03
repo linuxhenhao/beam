@@ -63,14 +63,44 @@ async fn run_json(cmd: &mut Command, timeout: std::time::Duration, what: &str) -
 }
 
 /// `herdr status server` — true when the server socket answers.
+///
+/// The exit code is not a usable signal: herdr exits 0 both when the server
+/// is running and when it is not (`status: running` vs `status: not
+/// running`), so the state is read from the `--json` output instead.
 pub(crate) async fn status_server() -> Result<bool> {
     let mut cmd = base_command();
-    cmd.args(["status", "server"]);
+    cmd.args(["status", "server", "--json"]);
     let out = tokio::time::timeout(HERDR_ACTION_TIMEOUT, cmd.output())
         .await
         .context("herdr status server timed out")?
         .context("failed to spawn herdr status server")?;
-    Ok(out.status.success())
+    if !out.status.success() {
+        // Older herdr builds exit nonzero when no server is running.
+        return Ok(false);
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    Ok(status_output_running(&stdout))
+}
+
+/// True when a `herdr status server` payload reports a running server.
+///
+/// Prefers the `--json` shape (`{"running":true,...}`), and falls back to the
+/// human format (`status: running`) for servers without JSON output.
+fn status_output_running(stdout: &str) -> bool {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout) {
+        if let Some(running) = value.get("running").and_then(serde_json::Value::as_bool) {
+            return running;
+        }
+        return value
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|status| status == "running");
+    }
+    stdout.lines().any(|line| {
+        line.trim()
+            .strip_prefix("status:")
+            .is_some_and(|state| state.trim() == "running")
+    })
 }
 
 /// `herdr server` — start a headless server detached from this worker.
@@ -517,5 +547,32 @@ mod tests {
         assert_eq!(panes.len(), 2);
         assert_eq!(panes[1].workspace_id, "w3");
         assert_eq!(panes[1].pane_id, "w3:p1");
+    }
+
+    #[test]
+    fn status_output_running_reads_json_bool() {
+        let running = r#"{"status":"running","running":true,"version":"0.8.2","protocol":20,"capabilities":null,"compatible":true,"socket":"/home/huangyu/.config/herdr/herdr.sock","session":null,"restart_needed":false}"#;
+        assert!(status_output_running(running));
+        let not_running = r#"{"status":"not_running","running":false,"version":null,"protocol":null,"capabilities":null,"compatible":null,"socket":"/home/huangyu/.config/herdr/herdr.sock","session":null,"restart_needed":false}"#;
+        assert!(!status_output_running(not_running));
+    }
+
+    #[test]
+    fn status_output_running_falls_back_to_human_format() {
+        assert!(status_output_running(
+            "status: running\nversion: 0.8.2\nprotocol: 20\n"
+        ));
+        assert!(!status_output_running(
+            "status: not running\nsocket: /tmp/herdr.sock"
+        ));
+        assert!(!status_output_running("not json at all"));
+    }
+
+    #[test]
+    fn status_output_running_accepts_status_without_bool() {
+        let legacy = r#"{"status":"running","socket":"/tmp/herdr.sock"}"#;
+        assert!(status_output_running(legacy));
+        let legacy_down = r#"{"status":"not_running","socket":"/tmp/herdr.sock"}"#;
+        assert!(!status_output_running(legacy_down));
     }
 }
