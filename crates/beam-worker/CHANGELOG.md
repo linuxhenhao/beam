@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.2](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.11.1...beam-worker-v0.11.2) - 2026-09-03
+
+### Fixed
+
+- *(worker)* detect herdr server liveness from status output
+
 ## [0.11.0](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.10.2...beam-worker-v0.11.0) - 2026-08-29
 
 ### Fixed
