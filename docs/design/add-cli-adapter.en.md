@@ -32,7 +32,7 @@ You must answer three questions:
 - Model: `init.model` → kimi `--model <model>`, gemini `--model <model>`.
 - Resume: when `init.resume` is set, use `init.cli_session_id` (falling back to `resume_session_id` / `session_id`); kimi maps to `--session <id>`.
 - Initial prompt: only CLIs that support "interactive mode with an initial prompt passed via argv" may set `passes_initial_prompt_via_args: true` in `CLI_SPECS` (gemini `-i`, opencode). kimi's `-p` is a one-shot non-interactive mode and does **not** qualify — its initial prompt is typed into the TUI by the worker via `write_input`.
-- TUI-ready gate: TUI CLIs drop keystrokes typed before their input UI is initialized. After spawn and before signaling `Ready`, the worker polls the viewport until the case-insensitive substring in `CLI_SPECS.tui_ready_marker` appears, then lets the first input (initial prompt / first stdin message) through. Use the exact welcome text when known (kimi `"Welcome to Kimi Code"`, grok `"Grok"`, Codex/Traex `"›"`), the generic `"Welcome"` otherwise; `None` disables the wait (gemini/opencode pass the initial prompt via argv). Adopted sessions attach to an already-running CLI, so the wait is skipped. Codex `write_input` also refuses to type if `›` is still missing.
+- TUI-ready gate: TUI CLIs drop keystrokes typed before their input UI is initialized. After spawn and before signaling `Ready`, the worker polls the viewport until the signal in `CLI_SPECS.ready_probe` appears, then lets the first input (initial prompt / first stdin message) through. `ready_probe` has three values: `Text(&[...])` matches a welcome substring (case-insensitive; kimi `"Welcome to Kimi Code"`, grok `"Grok"`, the generic `"Welcome"` otherwise); `PromptLine` means "a composer input line is present" and is detected **structurally** rather than by a literal: the row's leading non-whitespace cell must be a prompt glyph (boxed composers need a `│` border first), and the glyph is accepted from a whole Unicode-family band (`>`, `›`, `❯`, `»`, `→`, `⟩`, ...). A codex/traex-style TUI that restyles its prompt therefore needs no code or config change. `None` disables the wait (gemini/opencode pass the initial prompt via argv). Adopted sessions attach to an already-running CLI, so the wait is skipped. In `write_input` the codex/traex gate is **soft**: it types anyway when the composer never shows up and lets the transcript confirmation decide, and only retypes once when the first attempt really was blind-typed during TUI boot.
 
 ## 2. Change checklist (3 code touch points)
 
@@ -47,7 +47,7 @@ CliSpec {
     adopt_command_patterns: &["mynewcli"],// zellij adopt substring match; empty = never auto-recognized
     supports_resume: true,                // only when the adapter implements init.resume
     passes_initial_prompt_via_args: false,// see §1.2
-    tui_ready_marker: Some("Welcome"),    // TUI ready marker (case-insensitive); None = no wait
+    ready_probe: ReadyProbe::Text(&["Welcome"]), // TUI ready signal; PromptLine = wait for a composer row; None = no wait
     inject_term_xterm: false,             // only when the CLI requires xterm-256color
 },
 ```
@@ -106,7 +106,7 @@ pub mod mynewcli;
 
 - Name it `live_*` or place it under `tests/live_*.rs`, mark `#[ignore]`, and document requirements (real CLI installed and authenticated, `zellij`) plus the run command.
 - Keeping it inside the adapter file's `#[cfg(test)]` module gives access to the crate-private `ZellijBackend`: `ZellijBackend::new(name)` → `spawn` the real CLI → wait for the TUI to be ready (kimi: viewport contains "Welcome to Kimi Code") → `write_input` a prompt → poll `poll` for `final_output`.
-  - The "wait for TUI ready" marker in live tests is the same `CLI_SPECS.tui_ready_marker`: the runtime waits for it automatically before the first input (see §1.2); the live test keeps the explicit wait to prove the marker actually matches the real CLI.
+  - The "wait for TUI ready" signal in live tests is the same `CLI_SPECS.ready_probe`: the runtime waits for it automatically before the first input (see §1.2); the live test keeps the explicit wait to prove the signal actually matches the real CLI (`PromptLine` against a real composer row, including after a glyph restyle).
 - Always clean up: `zellij delete-session -f`, the temporary working directory, and the session data the CLI created for it (for kimi also drop the matching lines from `session_index.jsonl`).
 
 ### 3.3 Full verification

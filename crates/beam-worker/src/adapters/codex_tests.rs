@@ -120,6 +120,7 @@ fn emits_final_output_from_rollout() {
         )
         .unwrap();
     let mut state = CodexState {
+        label: "Codex",
         home_dir: PathBuf::new(),
         history_path: PathBuf::new(),
         rollout_path: Some(path.clone()),
@@ -150,6 +151,7 @@ fn adopt_emits_preamble_once_and_absorbs_history() {
         )
         .unwrap();
     let mut state = CodexState {
+        label: "Codex",
         home_dir: PathBuf::new(),
         history_path: PathBuf::new(),
         rollout_path: Some(path.clone()),
@@ -186,6 +188,7 @@ fn adopt_emits_local_turn_when_user_text_is_not_from_daemon() {
         )
         .unwrap();
     let mut state = CodexState {
+        label: "Codex",
         home_dir: PathBuf::new(),
         history_path: PathBuf::new(),
         rollout_path: Some(path.clone()),
@@ -217,6 +220,7 @@ fn adopt_keeps_remote_turn_as_bridge_output() {
         )
         .unwrap();
     let mut state = CodexState {
+        label: "Codex",
         home_dir: PathBuf::new(),
         history_path: PathBuf::new(),
         rollout_path: Some(path.clone()),
@@ -250,6 +254,7 @@ fn adopt_restored_absorbs_history_without_preamble() {
         )
         .unwrap();
     let mut state = CodexState {
+        label: "Codex",
         home_dir: PathBuf::new(),
         history_path: PathBuf::new(),
         rollout_path: Some(path.clone()),
@@ -275,6 +280,7 @@ fn adopt_restored_absorbs_history_without_preamble() {
 fn bridge_queue_final_answer_detection_across_turns() {
     let path = temp_path("codex-bridge-queue.jsonl");
     let mut state = CodexState {
+        label: "Codex",
         home_dir: PathBuf::new(),
         history_path: PathBuf::new(),
         rollout_path: Some(path.clone()),
@@ -419,6 +425,7 @@ fn poll_with_rollout_resolved_by_pid_emits_preamble_without_cwd_fallback() {
         )
         .unwrap();
     let mut state = CodexState {
+        label: "Codex",
         home_dir: PathBuf::new(),
         history_path: PathBuf::new(),
         rollout_path: Some(path.clone()),

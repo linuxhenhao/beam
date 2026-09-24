@@ -31,7 +31,7 @@ beam 的最终输出依赖「读 CLI 落盘的会话记录」，而不是解析�
 - model：`init.model` → kimi `--model <model>`、gemini `--model <model>`。
 - resume：`init.resume` 时用 `init.cli_session_id`（fallback `resume_session_id` / `session_id`），kimi 对应 `--session <id>`。
 - 初始 prompt：只有支持「交互模式 + 命令行传入初始 prompt」的 CLI 才能在 `CLI_SPECS` 里设 `passes_initial_prompt_via_args: true`（gemini `-i`、opencode）。kimi 的 `-p` 是一次性非交互模式，**不能**算——它的初始 prompt 由 worker 经 `write_input` 在 TUI 里输入。
-- TUI ready gate：TUI 类 CLI 在输入 UI 就绪前会丢弃键入的按键。worker 在 spawn 后、发送 `Ready` 前轮询 viewport，等待 `CLI_SPECS` 里 `tui_ready_marker` 指定的子串（大小写不敏感）出现，再放行第一条输入（初始 prompt / 首条 stdin 消息）。已知 marker 用精确欢迎语（kimi `"Welcome to Kimi Code"`，grok `"Grok"`，codex/traex `"›"`），未知的用通用 `"Welcome"`；`None` 表示不等待（gemini/opencode 初始 prompt 走命令行参数）。adopt 会话连的是已运行 CLI，跳过等待。Codex 在 `write_input` 里若仍看不到 `›` 会拒绝打字并回报失败。
+- TUI ready gate：TUI 类 CLI 在输入 UI 就绪前会丢弃键入的按键。worker 在 spawn 后、发送 `Ready` 前轮询 viewport，等待 `CLI_SPECS` 里 `ready_probe` 指定的信号出现，再放行第一条输入（初始 prompt / 首条 stdin 消息）。`ready_probe` 三种取值：`Text(&[...])` 匹配欢迎语子串（大小写不敏感，kimi `"Welcome to Kimi Code"`、grok `"Grok"`，未知的用通用 `"Welcome"`）；`PromptLine` 表示「composer 输入行出现」——按**结构**识别而不是按字面量，行首非空白 cell 是角标符号（箱体类还要先有 `│` 边框），符号按 Unicode 区段接受整个符号族（`>`、`›`、`❯`、`»`、`→`、`⟩`…），所以 codex/traex 这种换了 prompt 字符的 TUI 无需改代码或加配置；`None` 表示不等待（gemini/opencode 初始 prompt 走命令行参数）。adopt 会话连的是已运行 CLI，跳过等待。Codex/Traex 的 `write_input` 里这道门是**软门**：等不到 composer 也照常输入、由 transcript 确认兜底，只有首轮确实是在 TUI 启动期盲打时才等到 composer 后重新输入一次。
 
 ## 2. 改动清单（3 个代码触点）
 
@@ -46,7 +46,7 @@ CliSpec {
     adopt_command_patterns: &["mynewcli"],// zellij adopt 子串识别；空数组 = 不自动识别
     supports_resume: true,                // 实现了 init.resume 才为 true
     passes_initial_prompt_via_args: false,// 见 §1.2
-    tui_ready_marker: Some("Welcome"),    // TUI 就绪标记（大小写不敏感）；None = 不等待
+    ready_probe: ReadyProbe::Text(&["Welcome"]), // TUI 就绪信号；PromptLine = 等 composer 行；None = 不等待
     inject_term_xterm: false,             // 仅当 CLI 要求 xterm-256color
 },
 ```
@@ -105,7 +105,7 @@ pub mod mynewcli;
 
 - 命名 `live_*` 或放 `tests/live_*.rs`，标 `#[ignore]`，注释写明依赖（真实 CLI 已安装并登录、`zellij`）与运行命令。
 - 放在 adapter 文件内的 `#[cfg(test)]` 里可以直接用 crate 私有的 `ZellijBackend`：`ZellijBackend::new(name)` → `spawn` 真跑 CLI → 等 TUI ready（kimi 等 viewport 出现 "Welcome to Kimi Code"）→ `write_input` 提交 → 轮询 `poll` 拿 `final_output`。
-  - live 测试里「等 TUI ready」的 marker 就是 `CLI_SPECS` 的 `tui_ready_marker`：运行时会在第一条输入前自动等待它（见 §1.2），live 测试保持显式等待是为了验证该 marker 对真实 CLI 有效。
+  - live 测试里「等 TUI ready」的信号就是 `CLI_SPECS` 的 `ready_probe`：运行时会在第一条输入前自动等待它（见 §1.2），live 测试保持显式等待是为了验证该信号对真实 CLI 有效（`PromptLine` 用真实 composer 行验证；字形换了也要能过）。
 - 必须清理：`zellij delete-session -f`、临时工作目录、CLI 为该目录生成的 session 数据（kimi 还需清掉 `session_index.jsonl` 里的对应行）。
 
 ### 3.3 全量验证

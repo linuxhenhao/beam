@@ -11,7 +11,7 @@ use crate::adapter::{
     normalize_history_text, realpath_cwd,
 };
 use crate::backend::SessionBackend;
-use crate::composer::{KIMI_COMPOSER, confirm_typed_submit, sample_draft_fgs};
+use crate::composer::{BOXED_COMPOSER, confirm_typed_submit, sample_draft_fgs};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct KimiState {
@@ -77,13 +77,13 @@ impl Adapter for KimiState {
         tokio::time::sleep(Duration::from_millis(200)).await;
         let draft_fgs = sample_draft_fgs(
             &backend.capture_viewport().await.unwrap_or_default(),
-            KIMI_COMPOSER,
+            BOXED_COMPOSER,
         );
         backend.send_enter().await?;
 
         let confirmed = confirm_typed_submit(
             backend,
-            KIMI_COMPOSER,
+            BOXED_COMPOSER,
             &draft_fgs,
             "enter",
             || {
@@ -853,6 +853,16 @@ mod tests {
         let spec = state.build_spawn_spec(&init);
         assert!(!spec.args.iter().any(|arg| arg == "--yolo"));
 
+        // The adapter must not inject --yolo itself; the real value comes from
+        // `bots.json` (`CLI_SPECS.default_cli_args`). Pass it explicitly here
+        // because zellij rejects a layout whose `args` block is empty.
+        let init = InitConfig {
+            cli_args: vec!["--yolo".to_string()],
+            ..init
+        };
+        let spec = state.build_spawn_spec(&init);
+        assert!(spec.args.iter().any(|arg| arg == "--yolo"));
+
         let backend = crate::backend::ZellijBackend::new(zellij_session);
         backend
             .spawn(
@@ -870,17 +880,55 @@ mod tests {
 
         // Wait for the TUI welcome screen before typing.
         let mut ready = false;
+        let mut last_viewport = String::new();
         for _ in 0..60 {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            let viewport = backend.capture_viewport().await.unwrap_or_default();
-            if viewport.contains("Welcome to Kimi Code") {
+            last_viewport = backend.capture_viewport().await.unwrap_or_default();
+            if last_viewport.contains("Welcome to Kimi Code") {
                 ready = true;
                 break;
+            }
+            // First run in a new directory: kimi asks whether to trust the
+            // folder before showing its composer. Answer it like a user would.
+            if last_viewport.contains("Trust this folder?") {
+                println!("answering kimi's first-run trust prompt");
+                let _ = backend.send_enter().await;
+            }
+        }
+        if !ready {
+            for row in crate::worker_runtime::screenshot_ansi::parse_ansi_screen(&last_viewport)
+                .iter()
+                .rev()
+                .take(20)
+                .rev()
+            {
+                let text: String = row.iter().map(|cell| cell.ch).collect();
+                println!("ROW {:?}", text);
             }
         }
         assert!(
             ready,
             "kimi TUI did not reach the welcome screen within 60s"
+        );
+
+        // The structural composer detection must also see the real kimi box.
+        let mut composer_row = None;
+        for _ in 0..30 {
+            let viewport = backend.capture_viewport().await.unwrap_or_default();
+            if crate::composer::screen_has_composer(&viewport, BOXED_COMPOSER) {
+                composer_row = Some(viewport);
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        let viewport = composer_row.expect("structural detection never matched the live kimi box");
+        let glyph = viewport
+            .chars()
+            .find(|ch| crate::composer::is_prompt_glyph(*ch))
+            .expect("live kimi box has no prompt glyph");
+        println!(
+            "live kimi prompt glyph = {glyph:?} (U+{:04X})",
+            glyph as u32
         );
 
         let submit = state
@@ -895,7 +943,7 @@ mod tests {
         assert!(submit.cli_session_id.is_some());
 
         let mut final_output = None;
-        for _ in 0..90 {
+        for _ in 0..180 {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let result = state.poll().expect("poll live kimi");
             if result.final_output.is_some() {
@@ -903,7 +951,7 @@ mod tests {
                 break;
             }
         }
-        let final_output = final_output.expect("kimi did not produce a final output within 90s");
+        let final_output = final_output.expect("kimi did not produce a final output within 180s");
         assert!(
             final_output.contains("BEAM_KIMI_OK"),
             "unexpected final output: {final_output}"

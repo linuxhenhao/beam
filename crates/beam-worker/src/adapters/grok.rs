@@ -11,7 +11,7 @@ use crate::adapter::{
     is_uuid_like, normalize_history_text, realpath_cwd,
 };
 use crate::backend::SessionBackend;
-use crate::composer::{GROK_COMPOSER, confirm_typed_submit, sample_draft_fgs};
+use crate::composer::{BOXED_COMPOSER, confirm_typed_submit, sample_draft_fgs};
 
 const UPDATES_FILE: &str = "updates.jsonl";
 
@@ -117,13 +117,13 @@ impl Adapter for GrokState {
         tokio::time::sleep(Duration::from_millis(200)).await;
         let draft_fgs = sample_draft_fgs(
             &backend.capture_viewport().await.unwrap_or_default(),
-            GROK_COMPOSER,
+            BOXED_COMPOSER,
         );
         backend.send_enter().await?;
 
         let confirmed = confirm_typed_submit(
             backend,
-            GROK_COMPOSER,
+            BOXED_COMPOSER,
             &draft_fgs,
             "enter",
             || {

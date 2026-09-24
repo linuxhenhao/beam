@@ -6,6 +6,27 @@
 //! requires exactly one new row in [`CLI_SPECS`] here (plus the adapter
 //! implementation in beam-worker).
 
+/// How the worker decides a TUI CLI is ready for its first input.
+///
+/// The gate exists because TUI CLIs drop keystrokes typed before their input
+/// UI is initialized, so the first input of a fresh session waits for one of
+/// these signals. Keeping the signal structural ([`ReadyProbe::PromptLine`])
+/// rather than a literal prompt character means a CLI that restyles its
+/// composer (`›` -> `❯` -> `->`) keeps working without a code change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadyProbe {
+    /// No gate: the CLI takes the initial prompt via spawn args, or the
+    /// adapter gates itself.
+    None,
+    /// Ready when any of these substrings appears in the viewport
+    /// (case-insensitive), e.g. a CLI's welcome banner.
+    Text(&'static [&'static str]),
+    /// Ready when a composer input line appears in the viewport: the leading
+    /// non-whitespace cell of a line is a prompt glyph (codex `›`, traex `❯`,
+    /// kimi `>`), optionally behind a box border.
+    PromptLine,
+}
+
 /// Static description of one supported CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CliSpec {
@@ -26,12 +47,10 @@ pub struct CliSpec {
     /// Whether the CLI accepts an initial prompt via spawn args while staying
     /// interactive (opencode `--prompt`, gemini `-i`).
     pub passes_initial_prompt_via_args: bool,
-    /// Case-insensitive substring the CLI's TUI renders once its input UI is
-    /// initialized (e.g. kimi's "Welcome to Kimi Code"). The worker waits for
-    /// this marker before the first `write_input` so keystrokes typed during
-    /// TUI boot are not dropped. `None` disables the gate (CLIs that accept
-    /// the initial prompt via spawn args, or adapters that gate themselves).
-    pub tui_ready_marker: Option<&'static str>,
+    /// Signal the CLI's TUI emits once its input UI is initialized. The worker
+    /// waits for it before the first `write_input` so keystrokes typed during
+    /// TUI boot are not dropped.
+    pub ready_probe: ReadyProbe,
     /// Whether the worker injects `TERM=xterm-256color` when the inherited
     /// TERM is missing/empty/`dumb` (codex/traex require it).
     pub inject_term_xterm: bool,
@@ -53,7 +72,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         adopt_command_patterns: &["claude"],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
-        tui_ready_marker: Some("Welcome"),
+        ready_probe: ReadyProbe::Text(&["Welcome"]),
         inject_term_xterm: false,
     },
     CliSpec {
@@ -67,7 +86,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         adopt_command_patterns: &["codex"],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
-        tui_ready_marker: Some("›"),
+        ready_probe: ReadyProbe::PromptLine,
         inject_term_xterm: true,
     },
     CliSpec {
@@ -78,7 +97,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         adopt_command_patterns: &["traex"],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
-        tui_ready_marker: Some("›"),
+        ready_probe: ReadyProbe::PromptLine,
         inject_term_xterm: true,
     },
     CliSpec {
@@ -95,7 +114,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         adopt_command_patterns: &[],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
-        tui_ready_marker: Some("Welcome"),
+        ready_probe: ReadyProbe::Text(&["Welcome"]),
         inject_term_xterm: false,
     },
     CliSpec {
@@ -106,7 +125,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         adopt_command_patterns: &["gemini"],
         supports_resume: false,
         passes_initial_prompt_via_args: true,
-        tui_ready_marker: None,
+        ready_probe: ReadyProbe::None,
         inject_term_xterm: false,
     },
     CliSpec {
@@ -117,7 +136,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         adopt_command_patterns: &["opencode"],
         supports_resume: false,
         passes_initial_prompt_via_args: true,
-        tui_ready_marker: None,
+        ready_probe: ReadyProbe::None,
         inject_term_xterm: false,
     },
     CliSpec {
@@ -128,7 +147,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         adopt_command_patterns: &["hermes"],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
-        tui_ready_marker: Some("Welcome"),
+        ready_probe: ReadyProbe::Text(&["Welcome"]),
         inject_term_xterm: false,
     },
     CliSpec {
@@ -139,7 +158,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         adopt_command_patterns: &[],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
-        tui_ready_marker: Some("Welcome"),
+        ready_probe: ReadyProbe::Text(&["Welcome"]),
         inject_term_xterm: false,
     },
     CliSpec {
@@ -150,7 +169,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         adopt_command_patterns: &["kimi"],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
-        tui_ready_marker: Some("Welcome to Kimi Code"),
+        ready_probe: ReadyProbe::Text(&["Welcome to Kimi Code"]),
         inject_term_xterm: false,
     },
     CliSpec {
@@ -161,7 +180,7 @@ pub const CLI_SPECS: &[CliSpec] = &[
         adopt_command_patterns: &["grok"],
         supports_resume: true,
         passes_initial_prompt_via_args: false,
-        tui_ready_marker: Some("Grok"),
+        ready_probe: ReadyProbe::Text(&["Grok"]),
         inject_term_xterm: false,
     },
 ];
@@ -239,22 +258,25 @@ mod tests {
     }
 
     #[test]
-    fn tui_ready_markers_match_expected_list() {
+    fn ready_probes_match_expected_list() {
         let gated: Vec<_> = CLI_SPECS
             .iter()
-            .filter_map(|s| s.tui_ready_marker.map(|marker| (s.cli_id, marker)))
+            .filter_map(|s| match s.ready_probe {
+                ReadyProbe::None => None,
+                probe => Some((s.cli_id, probe)),
+            })
             .collect();
         assert_eq!(
             gated,
             vec![
-                ("claude-code", "Welcome"),
-                ("codex", "›"),
-                ("traex", "›"),
-                ("coco", "Welcome"),
-                ("hermes", "Welcome"),
-                ("antigravity", "Welcome"),
-                ("kimi", "Welcome to Kimi Code"),
-                ("grok", "Grok"),
+                ("claude-code", ReadyProbe::Text(&["Welcome"])),
+                ("codex", ReadyProbe::PromptLine),
+                ("traex", ReadyProbe::PromptLine),
+                ("coco", ReadyProbe::Text(&["Welcome"])),
+                ("hermes", ReadyProbe::Text(&["Welcome"])),
+                ("antigravity", ReadyProbe::Text(&["Welcome"])),
+                ("kimi", ReadyProbe::Text(&["Welcome to Kimi Code"])),
+                ("grok", ReadyProbe::Text(&["Grok"])),
             ]
         );
     }
