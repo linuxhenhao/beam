@@ -129,7 +129,13 @@ pub fn create_traex(init: &InitConfig) -> Box<dyn Adapter> {
 
 fn traex_paths(home: &Path) -> (PathBuf, PathBuf) {
     // Trae keeps its submit history and rollout transcripts in separate homes.
-    (home.join(".trae/cli/history.json"), home.join(".traex/cli"))
+    // The submit history is JSONL (one entry per line, appended per submit);
+    // naming it `.json` made the confirm match read the wrong file and report
+    // every input as rejected.
+    (
+        home.join(".trae/cli/history.jsonl"),
+        home.join(".traex/cli"),
+    )
 }
 
 fn create_state_with_paths(
@@ -370,9 +376,23 @@ fn capture_history_boundary(history_path: &Path) -> Result<HistoryBoundary> {
         }
         Err(error) => return Err(error.into()),
     };
+    // A one-entry JSONL file parses as a single JSON value, so content sniffing
+    // alone cannot tell the two formats apart. An explicit `.jsonl` name wins:
+    // those files are append-only streams and must use the byte boundary, or the
+    // first submit after a fresh history file would look unconfirmed.
+    if is_jsonl_history(history_path) {
+        return Ok(HistoryBoundary::Byte(raw.len() as u64));
+    }
     Ok(parse_history_document(&raw)
         .map(HistoryBoundary::DocumentEntries)
         .unwrap_or_else(|| HistoryBoundary::Byte(raw.len() as u64)))
+}
+
+/// Whether a submit-history file is an append-only JSONL stream (`*.jsonl`).
+fn is_jsonl_history(history_path: &Path) -> bool {
+    history_path
+        .extension()
+        .is_some_and(|extension| extension == "jsonl")
 }
 
 fn codex_history_match(
@@ -403,7 +423,14 @@ fn read_recent_history_entries(
     boundary: &HistoryBoundary,
 ) -> Result<Vec<Value>> {
     let raw = std::fs::read_to_string(history_path)?;
-    if let Some(entries) = parse_history_document(&raw) {
+    // `.jsonl` is never a document; anything else keeps the content sniffing
+    // used by CLIs that rewrite a whole JSON document per submit.
+    let document = if is_jsonl_history(history_path) {
+        None
+    } else {
+        parse_history_document(&raw)
+    };
+    if let Some(entries) = document {
         return match boundary {
             HistoryBoundary::DocumentEntries(previous) if entries.starts_with(previous) => {
                 Ok(entries[previous.len()..].to_vec())

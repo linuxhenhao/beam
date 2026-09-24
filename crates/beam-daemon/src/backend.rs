@@ -35,8 +35,17 @@ pub(crate) fn apply_ready_identity(
     terminal_url: Option<String>,
 ) {
     session.backend_kind = backend_kind;
-    session.herdr_workspace_id = herdr_workspace_id;
-    session.herdr_pane_id = herdr_pane_id;
+    // Herdr readiness and turn-card delivery latch on these ids (see
+    // `worker_ready_reported` / `session_card_ready`), and the adopt path
+    // stores them before the worker ever starts. A worker that attaches to an
+    // existing pane may report `None`, so only overwrite what was actually
+    // provided: erasing identity is never the right answer.
+    if herdr_workspace_id.is_some() {
+        session.herdr_workspace_id = herdr_workspace_id;
+    }
+    if herdr_pane_id.is_some() {
+        session.herdr_pane_id = herdr_pane_id;
+    }
     if backend_kind == BackendKind::Zellij {
         session.terminal_url = terminal_url;
     }
@@ -100,7 +109,74 @@ pub(crate) async fn handle_mux_agent_state(
 mod tests {
     use super::*;
     use crate::tests::test_helpers::{make_session, make_state, temp_paths};
+    use crate::worker_health::worker_ready_reported;
     use std::collections::HashMap;
+
+    fn adopted_herdr_session(session_id: &str) -> Session {
+        let mut session = make_session(session_id);
+        session.status = SessionStatus::Active;
+        session.backend_kind = BackendKind::Herdr;
+        session.herdr_workspace_id = Some("w8".to_string());
+        session.herdr_pane_id = Some("w8:p1".to_string());
+        session.adopted_from = Some(AdoptedFrom {
+            backend_kind: BackendKind::Herdr,
+            tmux_target: None,
+            zellij_session: None,
+            zellij_pane_id: None,
+            herdr_workspace_id: Some("w8".to_string()),
+            herdr_pane_id: Some("w8:p1".to_string()),
+            original_cli_pid: 2150974,
+            session_id: None,
+            cli_id: Some("traex".to_string()),
+            cwd: "/tmp/project".to_string(),
+            pane_cols: None,
+            pane_rows: None,
+        });
+        session
+    }
+
+    #[test]
+    fn ready_identity_never_erases_stored_herdr_ids() {
+        // An adopted observe worker reports no ids (it has no managed handle);
+        // the ids stored at adopt time must survive Ready.
+        let mut session = adopted_herdr_session("adopt-ready-none");
+        apply_ready_identity(&mut session, BackendKind::Herdr, None, None, None);
+        assert_eq!(session.herdr_workspace_id.as_deref(), Some("w8"));
+        assert_eq!(session.herdr_pane_id.as_deref(), Some("w8:p1"));
+        assert!(
+            worker_ready_reported(&session),
+            "a ready adopted herdr session must not look like a startup timeout"
+        );
+    }
+
+    #[test]
+    fn ready_identity_accepts_worker_reported_herdr_ids() {
+        let mut session = adopted_herdr_session("adopt-ready-some");
+        apply_ready_identity(
+            &mut session,
+            BackendKind::Herdr,
+            Some("w9".to_string()),
+            Some("w9:p4".to_string()),
+            None,
+        );
+        assert_eq!(session.herdr_workspace_id.as_deref(), Some("w9"));
+        assert_eq!(session.herdr_pane_id.as_deref(), Some("w9:p4"));
+        assert!(session.terminal_url.is_none(), "herdr never gets a url");
+    }
+
+    #[test]
+    fn ready_identity_partial_update_keeps_the_other_half() {
+        let mut session = adopted_herdr_session("adopt-ready-partial");
+        apply_ready_identity(
+            &mut session,
+            BackendKind::Herdr,
+            None,
+            Some("w8:p7".to_string()),
+            None,
+        );
+        assert_eq!(session.herdr_workspace_id.as_deref(), Some("w8"));
+        assert_eq!(session.herdr_pane_id.as_deref(), Some("w8:p7"));
+    }
 
     #[tokio::test]
     async fn mux_agent_state_blocked_sets_attention_with_default_reason() {

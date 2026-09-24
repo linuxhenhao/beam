@@ -1,12 +1,5 @@
-use super::worker_health::worker_ready_reported;
+use super::worker_health::{WORKER_READY_TIMEOUT, run_worker_ready_watchdog};
 use super::*;
-
-/// Upper bound for a worker to report `Ready` after being spawned. When the
-/// terminal backend hangs during startup (e.g. a zellij server crash that
-/// leaves `zellij attach --create-background` retrying forever), the worker
-/// would otherwise never send `Ready` and the session would silently stay
-/// active without any card or error.
-pub(crate) const WORKER_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_schedule_task(
@@ -750,64 +743,15 @@ pub(crate) async fn spawn_worker(
     {
         let state = watchdog_state;
         let watchdog_session_id = session_id.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(WORKER_READY_TIMEOUT).await;
-            let session = {
-                let sessions = state.sessions.lock().await;
-                sessions.get(&watchdog_session_id).cloned()
-            };
-            let Some(session) = session else {
-                return;
-            };
-            if worker_ready_reported(&session) {
-                return;
-            }
-            warn!(
-                "worker for session {} did not report Ready within {:?}",
-                watchdog_session_id, WORKER_READY_TIMEOUT
-            );
-            notify_worker_ready_timeout(&state, &session).await;
-        });
+        tokio::spawn(run_worker_ready_watchdog(
+            state,
+            watchdog_session_id,
+            WORKER_READY_TIMEOUT,
+        ));
     }
 
     info!("spawned worker for session {}", session_id);
     Ok(())
-}
-
-/// Notify the user (via Lark) that a session's worker failed to become ready
-/// within [`WORKER_READY_TIMEOUT`]. No-op for local (non-Lark) sessions.
-async fn notify_worker_ready_timeout(state: &AppState, session: &Session) {
-    if session.lark_app_id == "local" {
-        return;
-    }
-    let Some(bot) = state.bots.get(&session.lark_app_id) else {
-        return;
-    };
-    let message = if crate::prompt::is_zh_locale(session.locale.as_deref()) {
-        format!(
-            "⚠️ session「{}」启动超时：worker 未在 {} 秒内向 daemon 报告就绪，终端后端可能启动失败（如 zellij 异常）。请尝试重新创建 session。",
-            session.title,
-            WORKER_READY_TIMEOUT.as_secs()
-        )
-    } else {
-        format!(
-            "⚠️ Session \"{}\" startup timed out: the worker did not report ready within {}s. The terminal backend may have failed to start (e.g. zellij crash). Please try creating the session again.",
-            session.title,
-            WORKER_READY_TIMEOUT.as_secs()
-        )
-    };
-    let result = match session.scope {
-        SessionScope::Thread if !session.root_message_id.is_empty() => {
-            lark_reply_message_with_opts(state, bot, &session.root_message_id, &message, true).await
-        }
-        _ => lark_send_chat_message(state, bot, &session.chat_id, &message).await,
-    };
-    if let Err(err) = result {
-        warn!(
-            "failed to notify worker-ready timeout for session {}: {}",
-            session.session_id, err
-        );
-    }
 }
 
 /// CLI process exit is not a user close. Clear the worker pid and leave

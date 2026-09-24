@@ -74,9 +74,207 @@ fn traex_uses_its_rollout_home() {
     let (history_path, home_dir) = traex_paths(Path::new("/home/tester"));
     assert_eq!(
         history_path,
-        PathBuf::from("/home/tester/.trae/cli/history.json")
+        PathBuf::from("/home/tester/.trae/cli/history.jsonl")
     );
     assert_eq!(home_dir, PathBuf::from("/home/tester/.traex/cli"));
+}
+
+#[test]
+fn traex_history_confirm_reads_jsonl_appends() {
+    // Traex appends one JSON object per submit, so the confirm match must read
+    // the JSONL delta after the captured boundary (not a whole JSON document).
+    let path = temp_path("traex-history").with_extension("jsonl");
+    std::fs::write(&path, "{\"text\":\"first\",\"session_id\":\"s1\"}\n").unwrap();
+    let boundary = capture_history_boundary(&path).expect("boundary");
+
+    // Nothing new yet: no match, and no accidental fallback to older entries.
+    assert_eq!(
+        codex_history_match(&path, &boundary, "second").unwrap(),
+        None
+    );
+
+    std::fs::write(
+        &path,
+        concat!(
+            "{\"text\":\"first\",\"session_id\":\"s1\"}\n",
+            "{\"text\":\"second\",\"session_id\":\"019c6e27-e55b-73d1-87d8-4e01f1f75043\"}\n"
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        codex_history_match(&path, &boundary, "second").unwrap(),
+        Some("019c6e27-e55b-73d1-87d8-4e01f1f75043".to_string())
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn single_entry_jsonl_history_still_uses_byte_boundary() {
+    // A fresh `.jsonl` history with exactly one line parses as a single JSON
+    // value; reading it as a document would make the next submit unconfirmed.
+    let path = temp_path("traex-single-entry").with_extension("jsonl");
+    std::fs::write(&path, "{\"text\":\"first\",\"session_id\":\"s1\"}\n").unwrap();
+    let boundary = capture_history_boundary(&path).expect("boundary");
+    assert!(
+        matches!(boundary, HistoryBoundary::Byte(_)),
+        "jsonl history must use a byte boundary, got {boundary:?}"
+    );
+    std::fs::write(
+        &path,
+        concat!(
+            "{\"text\":\"first\",\"session_id\":\"s1\"}\n",
+            "{\"text\":\"second\",\"session_id\":\"s2\"}\n"
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        codex_history_match(&path, &boundary, "second").unwrap(),
+        Some("s2".to_string())
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+/// Traex TUI stand-in: shows an idle composer and appends the accepted submit
+/// to its JSONL history, exactly like the real CLI does on Enter.
+struct TraexSubmitBackend {
+    history_path: PathBuf,
+    record_submit: bool,
+}
+
+#[async_trait::async_trait]
+impl crate::backend::SessionBackend for TraexSubmitBackend {
+    async fn spawn(
+        &self,
+        _bin: &str,
+        _args: &[String],
+        _opts: crate::backend::SpawnOpts,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn send_text(&self, _text: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn send_enter(&self) -> anyhow::Result<()> {
+        if !self.record_submit {
+            return Ok(());
+        }
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.history_path)?;
+        writeln!(
+            file,
+            "{{\"text\":\"hello traex\",\"session_id\":\"019c6e27-e55b-73d1-87d8-4e01f1f75043\"}}"
+        )?;
+        Ok(())
+    }
+    async fn send_special_keys(&self, _keys: &[String]) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn paste_text(&self, _text: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn write_raw(&self, _text: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn raw_input(&self, _text: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn capture_viewport(&self) -> anyhow::Result<String> {
+        Ok("› \n  deepseek-v4-flash\n".to_string())
+    }
+    async fn capture_current_screen(&self) -> anyhow::Result<String> {
+        self.capture_viewport().await
+    }
+    async fn is_alive(&self) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+    async fn child_pid(&self) -> anyhow::Result<Option<u32>> {
+        Ok(None)
+    }
+    async fn kill(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn destroy_session(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn cursor_position(&self) -> anyhow::Result<Option<(u16, u16)>> {
+        Ok(None)
+    }
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<String> {
+        let (tx, rx) = tokio::sync::broadcast::channel(1);
+        drop(tx);
+        rx
+    }
+}
+
+#[tokio::test]
+async fn traex_write_input_confirms_from_jsonl_history() {
+    let home = temp_path("traex-home");
+    let history_path = home.join(".trae/cli/history.jsonl");
+    std::fs::create_dir_all(history_path.parent().expect("history parent"))
+        .expect("create traex history dir");
+    let init = crate::adapter::test_support::test_init("traex");
+    let mut state = create_state_with_paths(&init, history_path.clone(), home.join(".traex/cli"));
+    let backend = TraexSubmitBackend {
+        history_path: history_path.clone(),
+        record_submit: true,
+    };
+
+    let submit = state
+        .write_input(&backend, "hello traex")
+        .await
+        .expect("write_input");
+
+    assert!(
+        submit.submitted,
+        "a submit present in the traex JSONL history must be confirmed: {:?}",
+        submit.failure_reason
+    );
+    assert_eq!(
+        submit.cli_session_id.as_deref(),
+        Some("019c6e27-e55b-73d1-87d8-4e01f1f75043")
+    );
+    assert_eq!(
+        state.cli_session_id.as_deref(),
+        submit.cli_session_id.as_deref()
+    );
+    assert!(
+        submit.failure_reason.is_none(),
+        "a confirmed submit must not report a failure: {:?}",
+        submit.failure_reason
+    );
+    let _ = std::fs::remove_dir_all(home);
+}
+
+#[tokio::test]
+async fn traex_write_input_still_reports_failure_without_a_history_entry() {
+    // The failure hint stays for input that really was not submitted: if the
+    // history never records the text, the turn must not look accepted.
+    let home = temp_path("traex-home-unconfirmed");
+    let history_path = home.join(".trae/cli/history.jsonl");
+    std::fs::create_dir_all(history_path.parent().expect("history parent"))
+        .expect("create traex history dir");
+    let init = crate::adapter::test_support::test_init("traex");
+    let mut state = create_state_with_paths(&init, history_path.clone(), home.join(".traex/cli"));
+    let backend = TraexSubmitBackend {
+        history_path,
+        record_submit: false,
+    };
+
+    let submit = state
+        .write_input(&backend, "hello traex")
+        .await
+        .expect("write_input");
+
+    assert!(!submit.submitted);
+    let reason = submit.failure_reason.unwrap_or_default();
+    assert!(
+        reason.contains("Traex did not accept the input"),
+        "unexpected failure reason: {reason}"
+    );
+    let _ = std::fs::remove_dir_all(home);
 }
 
 #[test]
