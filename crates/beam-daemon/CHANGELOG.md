@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.12.0...beam-daemon-v0.12.1) - 2026-09-24
+
+### Fixed
+
+- *(daemon,worker)* 修正 Herdr adopt 的 Ready 身份与 Traex 提交确认
+
 ## [0.11.1](https://github.com/linuxhenhao/beam/compare/beam-daemon-v0.11.0...beam-daemon-v0.11.1) - 2026-08-30
 
 ### Fixed
