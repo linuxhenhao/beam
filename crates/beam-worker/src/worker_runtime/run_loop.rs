@@ -113,11 +113,13 @@ pub async fn run(init: InitConfig) -> Result<()> {
     // no outer Mutex is needed and a long write_input() never blocks screen
     // capture, terminal keys, or the screenshot coordinator.
     let backend = backend_impl;
-    let (herdr_workspace_id, herdr_pane_id) = herdr_handle
-        .as_ref()
-        .and_then(|h| h.herdr_ids())
-        .map(|ids| (Some(ids.workspace_id), Some(ids.pane_id)))
-        .unwrap_or((None, None));
+    let (herdr_workspace_id, herdr_pane_id) = crate::backend::select::ready_herdr_identity(
+        herdr_handle
+            .as_ref()
+            .and_then(|h| h.herdr_ids())
+            .map(|ids| ids.workspace_pane()),
+        init.adopted_from.as_ref(),
+    );
     let mut cli_pid_marker = None;
     let child_pid = backend.child_pid().await?;
     adapter.lock().await.on_spawned(child_pid);

@@ -62,6 +62,7 @@ CliSpec {
 - **不要手写样板**，直接用 `crate::adapter` 的共享件：
   - `TranscriptCursor`（JSONL transcript 专用）：`drain(path)` 内含截断重置与 offset/tail 维护；`emit_if_new(text)` 同文去重；`reset_dedupe()` 新用户 turn 时调用；`skip_to(size)` adopt 基线跳过历史。state 里不要再带 `transcript_offset` / `pending_tail` / `emitted_final_text` 字段。
   - 排队型 TUI（grok / kimi / codex）用 `composer::confirm_typed_submit`：入队即成功。提交前采样输入框真输入颜色，提交后空框或「整段统一且不是该颜色」视为 placeholder/已入队，不再补提交键；只有草稿还在才补一次。transcript 只作 idle 发出去的旁证。其它 CLI 仍可用 `confirm_submit_loop`（4×800ms，未确认补 Enter）。最终失败必须返回 `failure_reason`，不要谎报 `submitted`。
+  - 提交确认的数据源必须对准 CLI 真实写入的文件与格式，否则会把成功输入误报成失败。codex / traex 复用 `codex.rs`，其 submit history 是 **append-only JSONL**（`~/.codex/history.jsonl` / `~/.trae/cli/history.jsonl`）：`capture_history_boundary` 按字节取边界、`read_recent_history_entries` 只读增量。**文件名必须带 `.jsonl`**——写成 `.json` 会走 JSON document 路径，且单条 entry 的 JSONL 会被整文件解析成一个 JSON 值，两种情况都会让确认永远匹配不上。注意 Traex 的 history 与 rollout 分家（history 在 `~/.trae/cli/`，rollout 在 `~/.traex/cli/`）。
 - `poll` 约定：`final_output`、`final_output_kind = FinalOutputKind::Bridge`、`prompt_ready = true` 三者一起设置；中间步骤文本不产出。
 - **可选能力钩子**（默认 no-op，多数 adapter 不需要）：
   - `on_spawned(child_pid)`：需要跟踪 CLI 进程 PID 时（claude、codex）。

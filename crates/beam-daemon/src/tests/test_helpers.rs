@@ -73,7 +73,41 @@ impl Drop for LarkBaseUrlEnvGuard {
     }
 }
 
+/// Every request the mock Lark server handled, as `"METHOD /path"`.
+///
+/// The list is process-wide and append-only; tests assert on paths that carry a
+/// unique id (e.g. their own root message id) so parallel tests cannot confuse
+/// each other.
+pub(crate) fn mock_lark_requests() -> &'static std::sync::Mutex<Vec<String>> {
+    static REQUESTS: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> =
+        std::sync::OnceLock::new();
+    REQUESTS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+async fn record_mock_lark_request(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    mock_lark_requests().lock().unwrap().push(format!(
+        "{} {}",
+        request.method(),
+        request.uri().path()
+    ));
+    next.run(request).await
+}
+
 pub(crate) async fn start_mock_lark_server() -> String {
+    start_mock_lark_server_with(false).await
+}
+
+/// Mock whose `/reply` endpoint returns a fresh message id per call, so tests
+/// can prove that a new card was created instead of an existing one patched.
+pub(crate) async fn start_mock_lark_server_unique_cards() -> String {
+    start_mock_lark_server_with(true).await
+}
+
+async fn start_mock_lark_server_with(unique_card_ids: bool) -> String {
+    let reply_counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let app = Router::new()
         .route(
             "/auth/v3/tenant_access_token/internal",
@@ -126,15 +160,22 @@ pub(crate) async fn start_mock_lark_server() -> String {
         )
         .route(
             "/im/v1/messages/{message_id}/reply",
-            post(
-                |AxumPath(_msg_id): AxumPath<String>,
-                 AxumJson(_body): AxumJson<serde_json::Value>| async {
+            post(move |AxumPath(_msg_id): AxumPath<String>,
+                  AxumJson(_body): AxumJson<serde_json::Value>| {
+                let counter = reply_counter.clone();
+                async move {
+                    let message_id = if unique_card_ids {
+                        let next = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                        format!("om_reply_mock_{next}")
+                    } else {
+                        "om_reply_mock".to_string()
+                    };
                     AxumJson(serde_json::json!({
                         "code": 0,
-                        "data": { "message_id": "om_reply_mock" },
+                        "data": { "message_id": message_id },
                     }))
-                },
-            ),
+                }
+            }),
         )
         .route(
             "/im/v1/messages",
@@ -194,7 +235,8 @@ pub(crate) async fn start_mock_lark_server() -> String {
                     }))
                 },
             ),
-        );
+        )
+        .layer(axum::middleware::from_fn(record_mock_lark_request));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

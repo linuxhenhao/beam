@@ -680,6 +680,8 @@ Ready {
 
 Daemon **必须持久化** Herdr ids 到 `Session`。今天 Ready 只打日志，对 Zellij 能工作是因为名字派生自 `sid8`；Herdr 的 `w1:p1` **不能**从 session id 派生。Herdr Ready **不**写 `terminal_url`（与 card-ready 同一 PR）。
 
+Adopt 会话的 Ready 身份来自 `adopted_from`，不是 managed handle：observe-only backend 根本没有 handle，worker 必须回传 `adopted_from.herdr_workspace_id` / `adopted_from.herdr_pane_id`。daemon 侧 `apply_ready_identity()` 收到 `None` 时**不得**清空 `Session` 里已经存在的 id。两处任一缺失都会同时踩两个门闩：`worker_ready_reported()` 判为未就绪 → 虚假的 60s「启动超时」通知；`session_card_ready()` 变 false → 后续输入不再新建 turn card，只 patch adopt 时那张旧卡，新回复卡停在话题中间。**不要**用伪造 `terminal_url` 绕过这两个门闩——Herdr 的就绪身份就是 workspace/pane id。
+
 ### `Session`
 
 ```rust

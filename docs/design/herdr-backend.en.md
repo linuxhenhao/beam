@@ -678,6 +678,8 @@ Ready {
 
 The daemon **must persist** Herdr ids onto `Session`. Ready currently only logs, which works for Zellij because the name is derived from `sid8`; Herdr's `w1:p1` **cannot** be derived from the session id. Herdr Ready does **not** write `terminal_url` (same PR as card-ready).
 
+An adopted session's Ready identity comes from `adopted_from`, not from a managed handle: the observe-only backend has no handle at all, so the worker must echo `adopted_from.herdr_workspace_id` / `adopted_from.herdr_pane_id`. On the daemon side `apply_ready_identity()` must **never** clear ids the `Session` already has when the worker reports `None`. Missing either half trips both latches at once: `worker_ready_reported()` reads as not-ready, producing a bogus 60s "startup timed out" notice, and `session_card_ready()` goes false, so later inputs patch the card created at adopt time instead of creating a turn card — leaving the newest response mid-thread. Do **not** fake a `terminal_url` to get around those latches: for Herdr the readiness identity *is* the workspace/pane id.
+
 ### `Session`
 
 ```rust

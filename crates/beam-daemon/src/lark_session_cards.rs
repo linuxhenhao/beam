@@ -856,4 +856,96 @@ mod tests {
 
         maybe_remove_dir(&paths.root().to_path_buf());
     }
+
+    #[tokio::test]
+    async fn herdr_adopt_input_replies_a_new_card_per_turn() {
+        // Regression: adopted Herdr sessions latch card delivery on the herdr
+        // ids. When Ready reported `None` and the daemon erased them,
+        // `begin_lark_turn_card` returned early, so later inputs kept patching
+        // the card created at adopt time and the newest response stayed
+        // mid-thread instead of landing at the end of the topic.
+        // Recover from a poisoned lock so one failing assertion cannot cascade
+        // into every other test in this module.
+        let _env_lock = lark_base_url_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let base_url = start_mock_lark_server_unique_cards().await;
+        let _env_guard = LarkBaseUrlEnvGuard::set(&base_url);
+
+        let paths = temp_paths("adopt-turn-card");
+        maybe_remove_dir(&paths.root().to_path_buf());
+        let app_id = "app-adopt-card";
+        let bot = make_bot(app_id);
+        let state = make_state(paths.clone(), HashMap::from([(app_id.to_string(), bot)]));
+
+        let root_message_id = format!("om_root_adopt_{}", uuid::Uuid::new_v4().simple());
+        let mut session = make_session("sess-adopt-card");
+        session.status = SessionStatus::Active;
+        session.closed_at = None;
+        session.lark_app_id = app_id.to_string();
+        session.backend_kind = BackendKind::Herdr;
+        session.herdr_workspace_id = Some("w8".to_string());
+        session.herdr_pane_id = Some("w8:p1".to_string());
+        session.root_message_id = root_message_id.clone();
+        session.scope = SessionScope::Thread;
+        session.display_mode = Some(DisplayMode::Screenshot);
+        // The card the adopt flow created when the session was attached.
+        session.stream_card_id = Some("om_card_from_adopt".to_string());
+        session.stream_card_nonce = Some("nonce_adopt".to_string());
+        // Exactly what the worker reported before the fix: an observe-only
+        // adopted session has no managed handle, so Ready carried no ids.
+        crate::backend::apply_ready_identity(&mut session, BackendKind::Herdr, None, None, None);
+        assert_eq!(
+            session.herdr_pane_id.as_deref(),
+            Some("w8:p1"),
+            "Ready must not erase the adopt identity"
+        );
+        {
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert(session.session_id.clone(), session.clone());
+        }
+
+        let mut cards = Vec::new();
+        let mut nonces = Vec::new();
+        for _ in 0..2 {
+            begin_lark_turn_card(&state, &session.session_id, "starting")
+                .await
+                .expect("begin turn card");
+            let stored = {
+                let sessions = state.sessions.lock().await;
+                sessions
+                    .get(&session.session_id)
+                    .cloned()
+                    .expect("stored session")
+            };
+            cards.push(stored.stream_card_id.clone().expect("turn card id"));
+            nonces.push(stored.stream_card_nonce.clone().expect("turn card nonce"));
+        }
+        assert_ne!(
+            cards[0], "om_card_from_adopt",
+            "the first input must not keep the card created at adopt time"
+        );
+        assert_ne!(
+            cards[0], cards[1],
+            "every input needs its own card so the newest response is last"
+        );
+
+        let reply_path = format!("POST /im/v1/messages/{root_message_id}/reply");
+        let replies = mock_lark_requests()
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| **request == reply_path)
+            .count();
+        assert_eq!(
+            replies, 2,
+            "every input must reply-create a card in the thread"
+        );
+        assert!(
+            nonces.iter().all(|nonce| nonce != "nonce_adopt"),
+            "the adopt-time card must be replaced, not reused for a new turn"
+        );
+
+        maybe_remove_dir(&paths.root().to_path_buf());
+    }
 }
