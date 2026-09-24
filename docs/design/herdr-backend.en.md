@@ -297,14 +297,14 @@ sequenceDiagram
   else workspace exists, pane present, foreground process dead (or pane empty)
     W->>H: wait for shell ready (pane wait-output)
     W->>H: pane run pane_id "<posix-quoted launch spec>" (InitConfig.resume + adapter resume argv)
-    W->>W: wait_for_tui_ready
+    W->>W: wait_for_ready
     W->>H: terminal session observe
   else workspace missing
     W->>H: workspace create --cwd WD --label beam-sid8 --no-focus
     H-->>W: .result.workspace.workspace_id / .result.tab.tab_id / .result.root_pane.pane_id
     W->>H: pane wait-output (shell prompt)
     W->>H: pane run … launch spec
-    W->>W: wait_for_tui_ready
+    W->>W: wait_for_ready
     W->>H: terminal session observe pane_id --cols 160 --rows 50
   end
   W->>D: Ready { backend_kind, zellij_session: "beam-sid8", herdr_workspace_id, herdr_pane_id }

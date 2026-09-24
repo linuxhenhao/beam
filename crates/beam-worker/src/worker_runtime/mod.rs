@@ -24,8 +24,9 @@ pub(crate) use uuid::Uuid;
 
 pub(crate) use crate::adapter::CliAdapter;
 pub(crate) use crate::adapter::ResolveOutcome;
-pub(crate) use crate::adapter::{TUI_READY_TIMEOUT, wait_for_tui_ready};
+pub(crate) use crate::adapter::{TUI_READY_TIMEOUT, wait_for_ready};
 pub(crate) use crate::backend::{SessionBackend, SpawnOpts};
+pub(crate) use beam_core::cli_specs::ReadyProbe;
 
 mod analyzer;
 mod coordinator;

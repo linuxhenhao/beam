@@ -16,7 +16,9 @@ use crate::adapter::{
     TranscriptCursor, file_size, is_uuid_like, normalize_history_text,
 };
 use crate::backend::SessionBackend;
-use crate::composer::{CODEX_COMPOSER, confirm_typed_submit, sample_draft_fgs, screen_looks_busy};
+use crate::composer::{
+    PLAIN_COMPOSER, confirm_typed_submit, sample_draft_fgs, screen_has_composer, screen_looks_busy,
+};
 
 const COMPOSER_WAIT_ATTEMPTS: usize = 20;
 const COMPOSER_WAIT_INTERVAL: Duration = Duration::from_millis(500);
@@ -24,7 +26,7 @@ const COMPOSER_WAIT_INTERVAL: Duration = Duration::from_millis(500);
 async fn wait_for_codex_composer(backend: &dyn SessionBackend) -> bool {
     for attempt in 0..COMPOSER_WAIT_ATTEMPTS {
         let screen = backend.capture_viewport().await.unwrap_or_default();
-        if screen.contains('›') {
+        if screen_has_composer(&screen, PLAIN_COMPOSER) {
             tracing::debug!(attempt, "codex composer visible");
             return true;
         }
@@ -34,8 +36,62 @@ async fn wait_for_codex_composer(backend: &dyn SessionBackend) -> bool {
     false
 }
 
+/// Whether the viewport currently shows an idle composer (no start-up dialog).
+async fn composer_on_screen(backend: &dyn SessionBackend) -> bool {
+    let screen = backend.capture_viewport().await.unwrap_or_default();
+    screen_has_composer(&screen, PLAIN_COMPOSER)
+}
+
+/// Type `content` into the composer, submit it, and confirm it against the
+/// submit history. Returns the CLI session id when the submit was confirmed.
+async fn type_and_submit(
+    backend: &dyn SessionBackend,
+    history_path: &Path,
+    history_boundary: &HistoryBoundary,
+    content: &str,
+) -> Result<Option<String>> {
+    backend.paste_text(content).await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let typed_screen = backend.capture_viewport().await.unwrap_or_default();
+    let draft_fgs = sample_draft_fgs(&typed_screen, PLAIN_COMPOSER);
+    let queue = screen_looks_busy(&typed_screen);
+    let submit_via = if queue { "tab" } else { "enter" };
+    tracing::debug!(busy = queue, submit_via, "codex submit key");
+    if queue {
+        backend.send_special_keys(&["Tab".to_string()]).await?;
+    } else {
+        backend.send_enter().await?;
+    }
+    let mut confirmed_session_id: Option<String> = None;
+    confirm_typed_submit(
+        backend,
+        PLAIN_COMPOSER,
+        &draft_fgs,
+        submit_via,
+        || {
+            let found = codex_history_match(history_path, history_boundary, content)?;
+            if let Some(cli_session_id) = found {
+                confirmed_session_id = Some(cli_session_id);
+                return Ok(true);
+            }
+            Ok(false)
+        },
+        || async {
+            if queue {
+                backend.send_special_keys(&["Tab".to_string()]).await
+            } else {
+                backend.send_enter().await
+            }
+        },
+    )
+    .await?;
+    Ok(confirmed_session_id)
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct CodexState {
+    /// Display label for failure messages ("Codex" / "Traex").
+    label: &'static str,
     home_dir: PathBuf,
     history_path: PathBuf,
     rollout_path: Option<PathBuf>,
@@ -82,6 +138,9 @@ fn create_state_with_paths(
     home_dir: PathBuf,
 ) -> CodexState {
     CodexState {
+        label: beam_core::cli_specs::cli_spec(&init.cli_id)
+            .map(|spec| spec.label)
+            .unwrap_or("Codex"),
         history_path,
         home_dir,
         rollout_path: None,
@@ -126,50 +185,28 @@ impl Adapter for CodexState {
             self.pending_remote_user_inputs
                 .push_back(normalize_history_text(content));
         }
-        if !wait_for_codex_composer(backend).await {
-            tracing::debug!("codex composer not visible, refusing to type");
-            return Ok(SubmitResult {
-                submitted: false,
-                cli_session_id: self.cli_session_id.clone(),
-                failure_reason: Some("Codex TUI is not ready".to_string()),
-            });
-        }
+        // Soft gate: a missing composer only means "type blind", never "fail".
+        // A cosmetic restyling of the TUI must not make the session unusable.
+        let composer_ready = wait_for_codex_composer(backend).await;
         let history_boundary = capture_history_boundary(&self.history_path)?;
-        backend.paste_text(content).await?;
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let typed_screen = backend.capture_viewport().await.unwrap_or_default();
-        let draft_fgs = sample_draft_fgs(&typed_screen, CODEX_COMPOSER);
-        let queue = screen_looks_busy(&typed_screen);
-        let submit_via = if queue { "tab" } else { "enter" };
-        tracing::debug!(busy = queue, submit_via, "codex submit key");
-        if queue {
-            backend.send_special_keys(&["Tab".to_string()]).await?;
-        } else {
-            backend.send_enter().await?;
+        let mut confirmed_session_id =
+            type_and_submit(backend, &self.history_path, &history_boundary, content).await?;
+        if confirmed_session_id.is_none() && !composer_on_screen(backend).await {
+            // Our text is not sitting in a composer, so the paste was dropped or
+            // landed in a start-up dialog (codex's "Update available!" menu owns
+            // the input area until it is answered) rather than being rejected by
+            // the model. Wait for a real composer and type once more instead of
+            // reporting a failed turn.
+            tracing::debug!(
+                composer_ready,
+                "codex input is not in a composer after a failed confirm; retyping"
+            );
+            if wait_for_codex_composer(backend).await {
+                confirmed_session_id =
+                    type_and_submit(backend, &self.history_path, &history_boundary, content)
+                        .await?;
+            }
         }
-        let mut confirmed_session_id: Option<String> = None;
-        confirm_typed_submit(
-            backend,
-            CODEX_COMPOSER,
-            &draft_fgs,
-            submit_via,
-            || {
-                let found = codex_history_match(&self.history_path, &history_boundary, content)?;
-                if let Some(cli_session_id) = found {
-                    confirmed_session_id = Some(cli_session_id);
-                    return Ok(true);
-                }
-                Ok(false)
-            },
-            || async {
-                if queue {
-                    backend.send_special_keys(&["Tab".to_string()]).await
-                } else {
-                    backend.send_enter().await
-                }
-            },
-        )
-        .await?;
         if let Some(cli_session_id) = confirmed_session_id {
             self.cli_session_id = Some(cli_session_id.clone());
             return Ok(SubmitResult {
@@ -181,7 +218,7 @@ impl Adapter for CodexState {
         Ok(SubmitResult {
             submitted: false,
             cli_session_id: self.cli_session_id.clone(),
-            failure_reason: Some("Codex did not accept the input".to_string()),
+            failure_reason: Some(format!("{} did not accept the input", self.label)),
         })
     }
 

@@ -7,9 +7,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use beam_core::cli_specs::ReadyProbe;
 use beam_core::{FinalOutputKind, InitConfig};
 
 use crate::backend::SessionBackend;
+use crate::composer::PLAIN_COMPOSER;
 
 /// Unified resolver outcome for adopt/source resolution.
 ///
@@ -263,34 +265,46 @@ pub(crate) const TUI_READY_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// Upper bound for the TUI-ready gate. Matches the kimi live-test window.
 pub(crate) const TUI_READY_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Wait until the CLI TUI shows `marker` (case-insensitive) in its viewport.
+/// Wait until the CLI TUI reports its input UI is up (see `CliSpec::ready_probe`).
 ///
 /// TUI CLIs drop keystrokes sent before their input UI is initialized, so the
-/// first input of a freshly spawned session must be gated on the CLI's ready
-/// marker (see `CliSpec::tui_ready_marker`). Returns `true` when the marker
-/// was seen; `false` on timeout — callers proceed anyway, degrading to the
-/// un-gated behavior.
-pub(crate) async fn wait_for_tui_ready(backend: &dyn SessionBackend, marker: &str) -> bool {
-    wait_for_tui_ready_with_timeout(backend, marker, TUI_READY_TIMEOUT).await
+/// first input of a freshly spawned session is gated on the CLI's ready signal.
+/// Returns `true` when the signal was seen; `false` on timeout — callers
+/// proceed anyway, degrading to the un-gated behavior.
+pub(crate) async fn wait_for_ready(backend: &dyn SessionBackend, probe: ReadyProbe) -> bool {
+    wait_for_ready_with_timeout(backend, probe, TUI_READY_TIMEOUT).await
 }
 
-/// [`wait_for_tui_ready`] with a tunable timeout (tests).
-pub(crate) async fn wait_for_tui_ready_with_timeout(
+/// [`wait_for_ready`] with a tunable timeout (tests).
+pub(crate) async fn wait_for_ready_with_timeout(
     backend: &dyn SessionBackend,
-    marker: &str,
+    probe: ReadyProbe,
     timeout: Duration,
 ) -> bool {
     let deadline = tokio::time::Instant::now() + timeout;
-    let marker_lc = marker.to_ascii_lowercase();
     loop {
         let screen = backend.capture_viewport().await.unwrap_or_default();
-        if screen.to_ascii_lowercase().contains(&marker_lc) {
+        if probe_matches(&screen, probe) {
             return true;
         }
         if tokio::time::Instant::now() >= deadline {
             return false;
         }
         tokio::time::sleep(TUI_READY_POLL_INTERVAL).await;
+    }
+}
+
+/// [`wait_for_ready`] against an already-captured viewport.
+pub(crate) fn probe_matches(screen: &str, probe: ReadyProbe) -> bool {
+    match probe {
+        ReadyProbe::None => true,
+        ReadyProbe::Text(markers) => {
+            let lower = screen.to_ascii_lowercase();
+            markers
+                .iter()
+                .any(|marker| lower.contains(&marker.to_ascii_lowercase()))
+        }
+        ReadyProbe::PromptLine => crate::composer::screen_has_composer(screen, PLAIN_COMPOSER),
     }
 }
 
@@ -614,10 +628,11 @@ mod tests {
     }
 
     mod tui_ready_gate {
-        use super::super::wait_for_tui_ready_with_timeout;
+        use super::super::wait_for_ready_with_timeout;
         use crate::backend::{SessionBackend, SpawnOpts};
         use anyhow::Result;
         use async_trait::async_trait;
+        use beam_core::cli_specs::ReadyProbe;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::Duration;
         use tokio::sync::broadcast;
@@ -686,9 +701,9 @@ mod tests {
                 ],
                 calls: AtomicUsize::new(0),
             };
-            let ok = wait_for_tui_ready_with_timeout(
+            let ok = wait_for_ready_with_timeout(
                 &backend,
-                "welcome to kimi code",
+                ReadyProbe::Text(&["Welcome to Kimi Code"]),
                 Duration::from_secs(5),
             )
             .await;
@@ -701,9 +716,9 @@ mod tests {
                 screens: vec!["WELCOME TO KIMI CODE".to_string()],
                 calls: AtomicUsize::new(0),
             };
-            let ok = wait_for_tui_ready_with_timeout(
+            let ok = wait_for_ready_with_timeout(
                 &backend,
-                "Welcome to Kimi Code",
+                ReadyProbe::Text(&["Welcome to Kimi Code"]),
                 Duration::from_secs(5),
             )
             .await;
@@ -716,7 +731,46 @@ mod tests {
                 screens: vec!["still booting".to_string()],
                 calls: AtomicUsize::new(0),
             };
-            let ok = wait_for_tui_ready_with_timeout(&backend, "welcome", Duration::ZERO).await;
+            let ok = wait_for_ready_with_timeout(
+                &backend,
+                ReadyProbe::Text(&["welcome"]),
+                Duration::ZERO,
+            )
+            .await;
+            assert!(!ok);
+        }
+
+        #[tokio::test]
+        async fn prompt_line_probe_accepts_any_glyph() {
+            for glyph in ["›", "❯", "❭"] {
+                let backend = ScreenBackend {
+                    screens: vec![
+                        "starting...".to_string(),
+                        format!("{glyph} \n  deepseek-v4-flash\n"),
+                    ],
+                    calls: AtomicUsize::new(0),
+                };
+                let ok = wait_for_ready_with_timeout(
+                    &backend,
+                    ReadyProbe::PromptLine,
+                    Duration::from_secs(5),
+                )
+                .await;
+                assert!(ok, "{glyph:?} composer should satisfy the gate");
+            }
+        }
+
+        #[tokio::test]
+        async fn prompt_line_probe_ignores_prose_and_footers() {
+            let backend = ScreenBackend {
+                screens: vec![
+                    "starting...".to_string(),
+                    "no glyph, just prose\n  model: gpt-5\n".to_string(),
+                ],
+                calls: AtomicUsize::new(0),
+            };
+            let ok =
+                wait_for_ready_with_timeout(&backend, ReadyProbe::PromptLine, Duration::ZERO).await;
             assert!(!ok);
         }
     }

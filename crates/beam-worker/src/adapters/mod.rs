@@ -10,6 +10,7 @@ pub mod opencode;
 
 use anyhow::{Result, bail};
 use beam_core::InitConfig;
+use beam_core::cli_specs::ReadyProbe;
 
 use crate::adapter::{Adapter, CliAdapter};
 
@@ -47,18 +48,20 @@ pub fn passes_initial_prompt_via_args(cli_id: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// The TUI-ready marker the worker should wait for (case-insensitive) before
-/// the first `write_input`, if the CLI's TUI exposes one. `None` disables the
-/// gate for CLIs that accept the initial prompt via spawn args or that gate
-/// themselves inside `write_input` (codex/traex).
-pub fn tui_ready_marker(cli_id: &str) -> Option<&'static str> {
-    beam_core::cli_specs::cli_spec(cli_id).and_then(|spec| spec.tui_ready_marker)
+/// The ready signal the worker waits for before the first `write_input`.
+/// `ReadyProbe::None` disables the gate for CLIs that accept the initial prompt
+/// via spawn args.
+pub fn ready_probe(cli_id: &str) -> ReadyProbe {
+    beam_core::cli_specs::cli_spec(cli_id)
+        .map(|spec| spec.ready_probe)
+        .unwrap_or(ReadyProbe::None)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{create_adapter, tui_ready_marker};
+    use super::{create_adapter, ready_probe};
     use crate::adapter::test_support::{home_test_lock, test_init};
+    use beam_core::cli_specs::ReadyProbe;
 
     #[test]
     fn create_adapter_rejects_unknown_cli_ids() {
@@ -80,17 +83,20 @@ mod tests {
     }
 
     #[test]
-    fn tui_ready_marker_lookup() {
-        assert_eq!(tui_ready_marker("kimi"), Some("Welcome to Kimi Code"));
-        assert_eq!(tui_ready_marker("claude-code"), Some("Welcome"));
-        assert_eq!(tui_ready_marker("coco"), Some("Welcome"));
-        assert_eq!(tui_ready_marker("hermes"), Some("Welcome"));
-        assert_eq!(tui_ready_marker("antigravity"), Some("Welcome"));
-        assert_eq!(tui_ready_marker("grok"), Some("Grok"));
-        assert_eq!(tui_ready_marker("codex"), Some("›"));
-        assert_eq!(tui_ready_marker("traex"), Some("›"));
-        assert_eq!(tui_ready_marker("gemini"), None);
-        assert_eq!(tui_ready_marker("unknown-cli"), None);
+    fn ready_probe_lookup() {
+        assert_eq!(
+            ready_probe("kimi"),
+            ReadyProbe::Text(&["Welcome to Kimi Code"])
+        );
+        assert_eq!(ready_probe("claude-code"), ReadyProbe::Text(&["Welcome"]));
+        assert_eq!(ready_probe("coco"), ReadyProbe::Text(&["Welcome"]));
+        assert_eq!(ready_probe("hermes"), ReadyProbe::Text(&["Welcome"]));
+        assert_eq!(ready_probe("antigravity"), ReadyProbe::Text(&["Welcome"]));
+        assert_eq!(ready_probe("grok"), ReadyProbe::Text(&["Grok"]));
+        assert_eq!(ready_probe("codex"), ReadyProbe::PromptLine);
+        assert_eq!(ready_probe("traex"), ReadyProbe::PromptLine);
+        assert_eq!(ready_probe("gemini"), ReadyProbe::None);
+        assert_eq!(ready_probe("unknown-cli"), ReadyProbe::None);
     }
 
     #[test]
