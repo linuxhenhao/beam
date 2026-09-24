@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.11.2...beam-worker-v0.12.0) - 2026-09-24
+
+### Fixed
+
+- *(worker)* 按结构识别 TUI 输入框，就绪判定不再依赖具体字符
+
 ## [0.11.2](https://github.com/linuxhenhao/beam/compare/beam-worker-v0.11.1...beam-worker-v0.11.2) - 2026-09-03
 
 ### Fixed
